@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "prompt": "review pack T2",
+  "prompt_hash": "b1b6f0a1d9f6d6b9c4c9b0f4a1c9d6f4a1c9d6f4a1c9d6f4a1c9d6f4a1c9d6f4",
+  "attempt": 1,
+  "conversation_url": "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949",
+  "sent_at": "2026-08-01T09:00:00+08:00",
+  "baseline": {
+    "assistant_count": 5,
+    "last_assistant_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

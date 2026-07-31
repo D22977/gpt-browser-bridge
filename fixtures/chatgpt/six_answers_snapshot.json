@@ -1,0 +1,16 @@
+{
+  "url": "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949",
+  "title": "GBB-003 fixture conversation",
+  "assistantMessages": [
+    "Answer 1: baseline reply before any job in this fixture.",
+    "Answer 2: second reply, distinct text.",
+    "Answer 3: third reply, distinct text.",
+    "Answer 4: fourth reply, distinct text.",
+    "Answer 5: fifth reply - this is the one a stale watcher could wrongly treat as final.",
+    "Answer 6: sixth reply - the real candidate when baseline.assistant_count is 5.<!-- GBB:END -->"
+  ],
+  "stopVisible": false,
+  "continueVisible": false,
+  "loginWall": false,
+  "networkError": false
+}
