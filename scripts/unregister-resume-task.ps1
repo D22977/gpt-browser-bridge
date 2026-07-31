@@ -2,10 +2,11 @@
 param(
   [string]$TaskName = "GPT_BROWSER_BRIDGE_RESUME"
 )
-try {
-  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+& schtasks.exe /Delete /F /TN $TaskName 2>&1
+$code = $LASTEXITCODE
+if ($code -eq 0) {
   "unregistered: $TaskName"
-} catch {
-  "not found or failed: $($_.Exception.Message)"
+} else {
+  "not found or failed: schtasks returned code $code"
   exit 1
 }
