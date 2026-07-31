@@ -112,6 +112,16 @@ test("job.json rejects http scheme, explicit port and non-/c/ paths", () => {
   }
 });
 
+test("job.json rejects explicit default ports (443/80) and other ports", () => {
+  for (const bad of [
+    `https://chatgpt.com:443/c/${uuid}`,
+    `https://chatgpt.com:80/c/${uuid}`,
+    `https://chatgpt.com:8443/c/${uuid}`,
+  ]) {
+    assert.throws(() => jobSchema.parse(validJob({ conversation_url: bad })), /conversation_url/);
+  }
+});
+
 test("job.json rejects a bad prompt hash", () => {
   assert.throws(() => jobSchema.parse(validJob({ prompt_hash: "not-a-hash" })), /prompt_hash/);
 });

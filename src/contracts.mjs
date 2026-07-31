@@ -13,8 +13,11 @@ export const SCHEMA_VERSION = 1;
 // Spec: parent work order §14 "Sender 必做" / §7.4.
 // Fail-closed conversation URL check (P1-2 rework): the hostname must be
 // exactly "chatgpt.com"; subdomains, look-alike hostnames, userinfo, explicit
-// ports, non-https schemes and non-"/c/<uuid-ish>" paths are all rejected.
-// Query/hash are tolerated (URL parsing separates them from hostname/path).
+// ports (including default ports such as :443/:80), non-https schemes and
+// non-"/c/<uuid-ish>" paths are all rejected. Query/hash are tolerated (URL
+// parsing separates them from hostname/path).
+// Note: WHATWG URL normalization drops explicit default ports, so the check
+// for explicit ports must inspect the RAW value's authority, not parsed.port.
 export function isChatgptConversationUrl(value) {
   let parsed;
   try {
@@ -22,14 +25,21 @@ export function isChatgptConversationUrl(value) {
   } catch {
     return false;
   }
-  return (
-    parsed.protocol === "https:" &&
-    parsed.hostname === "chatgpt.com" &&
-    parsed.port === "" &&
-    parsed.username === "" &&
-    parsed.password === "" &&
-    /^\/c\/[0-9a-f-]+$/i.test(parsed.pathname)
-  );
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname !== "chatgpt.com" ||
+    parsed.port !== "" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    !/^\/c\/[0-9a-f-]+$/i.test(parsed.pathname)
+  ) {
+    return false;
+  }
+  // Raw-string authority check: `https://chatgpt.com:443/c/...` parses with
+  // parsed.port === "" because 443 is https's default port, so reject any
+  // ":" immediately after the hostname in the raw value (covers :443, :80,
+  // :8443 and every explicit port). Case-insensitive hostname tolerated.
+  return /^https:\/\/chatgpt\.com(?!:)/i.test(value);
 }
 
 export const jobSchema = z.object({
