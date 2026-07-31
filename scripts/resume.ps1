@@ -7,6 +7,7 @@ param(
 
 $heartbeatFile = Join-Path $Runtime "state\heartbeat.json"
 $log = Join-Path $Runtime "logs\scheduler.log"
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null
 
 function Write-Log($msg) {
   "$(Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz') $msg" | Add-Content $log
@@ -16,17 +17,22 @@ function Write-Log($msg) {
 $staleAfter = (Get-Date).AddSeconds(-45)
 
 if (Test-Path $heartbeatFile) {
-  $hb = Get-Content $heartbeatFile -Raw | ConvertFrom-Json
-  $hbTime = [datetime]::Parse($hb.at)
-  if ($hbTime -gt $staleAfter) {
-    Write-Log "heartbeat fresh (${hb.at}); no action"
-    exit 0
+  try {
+    $hb = Get-Content $heartbeatFile -Raw | ConvertFrom-Json
+    $hbTime = [datetime]::Parse($hb.at)
+    if ($hbTime -gt $staleAfter) {
+      Write-Log "heartbeat fresh ($($hb.at)); no action"
+      return
+    }
+    Write-Log "heartbeat stale ($($hb.at)); restarting supervisor"
+  } catch {
+    Write-Log "heartbeat unreadable; restarting supervisor"
   }
-  Write-Log "heartbeat stale (${hb.at}); restarting supervisor"
 } else {
   Write-Log "no heartbeat file; starting supervisor"
 }
 
 # Double-start protection handled by supervisor.lock inside supervisor.mjs
-Start-Process powershell -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "D:\AIWORK\GPT_BROWSER_BRIDGE\scripts\start-supervisor.ps1" -WindowStyle Hidden
-exit 0
+$startScript = Join-Path $PSScriptRoot "start-supervisor.ps1"
+& $startScript -Runtime $Runtime -Orca $Orca
+return

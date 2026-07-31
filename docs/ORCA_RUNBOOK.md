@@ -25,6 +25,14 @@ GBB-004-A1-watcher
 The title plus `run_id` is durable identity. A terminal handle is only a
 runtime-scoped route and must be re-acquired after an ORCA restart.
 
+The 2026-08-01 live canary is recorded in
+`fixtures/orca/LIVE_CANARY_20260801.md`. On the installed CLI, terminal
+commands are top-level (`orca terminal ...`), not
+`orca orchestration terminal ...`. From a shell whose cwd is not recognized
+by the runtime, `--worktree active` can fail even when `worktree list` contains
+the checkout; use the exact `path:<forward-slash-path>` selector captured by
+`orca worktree list --json`.
+
 ## Preflight
 
 Run in PowerShell as the logged-in project user. These commands are read-only:
@@ -50,7 +58,10 @@ $Runtime = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE'
 New-Item -ItemType Directory -Force -Path "$Runtime\state", "$Runtime\locks", "$Runtime\jobs", "$Runtime\runs", "$Runtime\events", "$Runtime\logs" | Out-Null
 & 'D:\AIWORK\GPT_BROWSER_BRIDGE\scripts\start-supervisor.ps1' -Runtime $Runtime -Orca 'C:\Users\Lupun\AppData\Local\Programs\orca\resources\bin\orca.exe'
 Get-Content 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\state\heartbeat.json' -Raw
-Get-Content 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\logs\supervisor.log' -Tail 50
+Get-ChildItem 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\logs\supervisor-*.log' |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1 |
+  Get-Content -Tail 50
 ```
 
 `heartbeat.json` should refresh every 15 seconds. A second invocation exits
@@ -121,6 +132,13 @@ If the old handle is absent but the exact title exists, relink
 the title is absent, use `runs\<run_id>\dispatch.json`; never invent the
 worktree, title, or command from memory.
 
+If duplicate exact-title candidates exist, the adapter ignores disconnected,
+read-only or orphaned entries, then chooses newest `lastOutputAt` with a stable
+handle tie-breaker and records the ambiguity. A fresh `terminal list` remains
+authoritative. The installed CLI was also observed to remove a terminal while
+`terminal close` returned exit 1 / `runtime_error: tab_not_found`; always
+re-list before concluding that cleanup or invalidation failed.
+
 Supervisor recovery output is durable in:
 
 ```text
@@ -138,6 +156,13 @@ minutes:
 & 'D:\AIWORK\GPT_BROWSER_BRIDGE\scripts\register-resume-task.ps1' -TaskName 'GPT_BROWSER_BRIDGE_RESUME' -ResumeScript 'D:\AIWORK\GPT_BROWSER_BRIDGE\scripts\resume.ps1'
 schtasks.exe /Query /TN 'GPT_BROWSER_BRIDGE_RESUME' /V /FO LIST
 ```
+
+`register-resume-task.ps1` also accepts `-Runtime` and `-Orca`. It omits the
+Orca argument from the scheduled action when it equals the fixed default, to
+stay below the Windows 261-character `/TR` limit. `Get-ScheduledTask` may be
+unavailable under PowerShell 7; `schtasks.exe /Query` is the verified fallback.
+The executed register/stale-start/duplicate-lock/unregister transcript is
+`fixtures/orca/WINDOWS_RESUME_SMOKE_20260801.md`.
 
 Remove it only when intentionally disabling automatic resume:
 

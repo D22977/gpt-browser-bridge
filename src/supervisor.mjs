@@ -224,8 +224,17 @@ export async function readProjectStateSafe(paths) {
   }
 }
 
+export function validateProjectStateTransition(previousState, nextState) {
+  if (previousState?.state === "NEEDS_HUMAN" && nextState?.state === "RUNNING") {
+    throw new Error("ILLEGAL_STATE_TRANSITION: NEEDS_HUMAN -> RUNNING");
+  }
+  return nextState;
+}
+
 export async function writeProjectState(paths, state) {
   const validated = projectStateSchema.parse(state);
+  const previous = await readProjectStateSafe(paths);
+  if (previous.ok) validateProjectStateTransition(previous.state, validated);
   await writeFileAtomic(paths.state, JSON.stringify(validated, null, 2) + "\n");
   return validated;
 }
@@ -407,7 +416,14 @@ export async function recoverActiveTerminal(ctx, state, recoveryState, isoNow) {
       last_checkpoint: isoNow,
       updated_at: isoNow,
     });
-    events.push({ type: "terminal_relinked", role: ref.role, old_handle: ref.handle, new_handle: resolved.terminal.handle });
+    events.push({
+      type: "terminal_relinked",
+      role: ref.role,
+      old_handle: ref.handle,
+      new_handle: resolved.terminal.handle,
+      candidate_count: resolved.candidateCount,
+      ambiguous_title: resolved.ambiguous,
+    });
     recoveries.push(`Relinked ${ref.role} terminal after ORCA restart (old=${ref.handle} new=${resolved.terminal.handle})`);
     await appendRecoveryLog(ctx.paths, state.active_run_id, {
       at: isoNow,
@@ -556,7 +572,12 @@ export async function scanDurableReports(ctx, state, isoNow) {
       const key = `${runId}:${kind}`;
       if (cursor.seenRuns.includes(key)) continue;
       if (await pathExists(path.join(ctx.paths.runsDir, runId, file))) {
-        events.push({ type: "durable_report", run_id: runId, report: kind });
+        events.push({
+          type: "durable_report",
+          run_id: runId,
+          report: kind,
+          action: "control_tower_handoff_requested",
+        });
         cursor.seenRuns.push(key);
       }
     }

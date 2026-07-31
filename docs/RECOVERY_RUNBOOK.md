@@ -74,6 +74,13 @@ If another live PID owns `supervisor.lock`, the new process must exit. Do not
 delete the lock merely because its timestamp looks old; PID liveness is the
 ownership check.
 
+The checked-in scripts resolve `src/supervisor.mjs` from their own
+`$PSScriptRoot`, so a worktree smoke test cannot silently launch the main-repo
+copy. Each launch uses unique stdout/stderr files, allowing the duplicate
+process to record `LOCK_NOT_OWNED` without competing for one redirected log.
+See `fixtures/orca/WINDOWS_RESUME_SMOKE_20260801.md` for the live PID/lock
+evidence and final no-task/no-runtime cleanup checks.
+
 ### Worker terminal crash
 
 1. Read `runs\<run_id>\dispatch.json`.
