@@ -249,3 +249,108 @@ duration_ms 162.2751
 2. `D:\AIWORK\七工契約` 非 git repo，無法提供 `git status` 快照（快照表已註記
    「不適用」）；若指揮塔有該 repo 的其他管理方式請告知。
 
+---
+
+# GBB-001-A3（退修 attempt 3）Worker Report
+
+- run_id: GBB-001-A3
+- worker: deepseek-v4-flash-free（opencode / worktree `gbb-001-a3`）
+- base_commit: `ed2848c`
+- 完成時間: 2026-08-01T00:00:00+08:00
+- 退修派工單: `DISPATCH.md`（repo 根，未追蹤，由 Control Tower 管理）
+
+## A3-1 修正內容：顯式 `:443` port fail-closed（P1-2 收尾）
+
+`src/contracts.mjs` 的 `isChatgptConversationUrl()` 原本以
+`parsed.port === ""` 判斷 port；但 WHATWG `URL` 會把 HTTPS 的顯式預設 port
+`:443`（及 HTTP 的 `:80`）正規化掉——`https://chatgpt.com:443/c/<id>` 的
+`parsed.port` 是空字串，因此被**誤接受**。
+
+修正：保留所有既有 parsed 檢查（protocol / hostname / port / userinfo /
+pathname），額外加入**原始字串 authority** 檢查——以
+`/^https:\/\/chatgpt\.com(?!:)/i` 斷言 hostname 之後不得緊跟冒號，任何顯式
+port（含 `:443`、`:80`、`:8443` 及一切 `:數字`）一律拒絕。userinfo 拒絕仍由
+`parsed.username/password` 負責，與 raw 檢查獨立。
+
+## A3-2 新增負向測試（tests/contracts.test.mjs）
+
+保留既有全部測試（含 query/hash 容錯正向測試與其他負向測試），新增 1 項：
+
+`job.json rejects explicit default ports (443/80) and other ports`——`443`、
+`80`、`8443` 三例皆必須被 `jobSchema` 拒絕（`/conversation_url/`）。
+
+## A3-3 測試輸出（worktree 本機，attempt 3 修正後）
+
+```
+> npm test
+
+> gpt-browser-bridge@0.1.0 test
+> node --test "tests/**/*.test.mjs"
+
+✔ job.json schema accepts a valid job
+✔ job.json rejects a non-ChatGPT conversation URL
+✔ job.json accepts a conversation URL with query/hash tolerance
+✔ job.json rejects look-alike hostnames
+✔ job.json rejects a conversation URL without scheme
+✔ job.json rejects a conversation URL with userinfo
+✔ job.json rejects http scheme, explicit port and non-/c/ paths
+✔ job.json rejects explicit default ports (443/80) and other ports
+✔ job.json rejects a bad prompt hash
+✔ job.json rejects a missing baseline
+✔ result.json accepts DONE / NEEDS_DECISION / FAILED
+✔ result.json rejects an invalid state
+✔ result.json requires reply_hash
+✔ project_state.json accepts a RUNNING state
+✔ project_state.json accepts all legal states
+✔ project_state.json rejects an illegal state
+✔ project_state.json rejects NEEDS_HUMAN with an empty blocked_reason
+✔ worker report schema accepts a valid report
+✔ worker report rejects a worker report claiming reviewer role
+✔ reviewer report schema accepts only 通過 / 退修 / 受阻
+✔ agentReportSchema discriminates on role
+
+tests 21
+suites 0
+pass 21
+fail 0
+cancelled 0
+skipped 0
+todo 0
+duration_ms 162.4706
+```
+
+`node --check` 對改動的 `src/contracts.mjs`、`tests/contracts.test.mjs` 均通過。
+
+## A3-4 其他 repo 快照（§2.4）
+
+施工前（2026-07-31）與 commit 前各執行一次 `git -C
+D:\AIWORK\MEP工程管理系統 status --short`（快照檔存於 runtime
+`tmp\gbb-001-a3\mep_before.txt` / `mep_after.txt`，不進 Git）：
+
+| Repo | 施工前 | commit 前 | 結果 |
+| ---- | ------ | -------- | ---- |
+| `D:\AIWORK\MEP工程管理系統` | `git status --short` 28 行（既有 dirty：6 個 M 檔 + 22 個 ?? 項目），HEAD `1f4db15` | 逐字元比對與施工前**完全相同**（`git diff --no-index` 一致，HEAD 同為 `1f4db15`） | 無變化 |
+| `D:\AIWORK\七工契約` | 非 git repo（attempt 2 已記錄），本次未觸碰 | 同左 | 不適用 |
+
+未發現施工期間其他 repo 出現變化。
+
+## A3-5 與 P1 對帳表（最終）
+
+| P1 | 內容 | 處理 | 狀態 |
+| -- | ---- | ---- | ---- |
+| P1-1 | allowed paths 越界 | 指揮塔 §12 Scope amendment 已追認 | 已解決 |
+| P1-2 | `conversation_url` 驗證未 fail-closed | A2-1 + A3-1（raw authority 拒絕顯式預設 port）+ A3-2 負向測試 | **已解決** |
+| P1-3 | Repo 可重建證據不足 | A2-4 已實測 | 已解決 |
+| P1-4 | 未修改其他 repo 無證據 | A2-5 / A3-4 快照比對 | 已解決 |
+
+## A3-6 commit 清單
+
+- `3f67c8c` GBB-001 rework: reject explicit ports in conversation_url（內容 commit：`src/contracts.mjs` + `tests/contracts.test.mjs`）
+- 本 report 的簿記 commit（`docs/WORKER_REPORT_GBB_001.md`）
+
+最後內容 commit SHA：`3f67c8c`。
+
+## A3-7 未完成／待指揮塔知悉
+
+1. `DISPATCH.md` 仍為未追蹤檔案，未納入 commit；由 Control Tower 決定是否納管。
+
