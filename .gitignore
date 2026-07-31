@@ -1,0 +1,32 @@
+# Runtime (never in git)
+D:/AIWORK_RUNTIME/
+D:/AIWORK_WT/
+D:\AIWORK_RUNTIME\
+D:\AIWORK_WT\
+
+# Node
+node_modules/
+
+# Chrome automation profile / cookies / credentials
+chrome-profile/
+*profile*/
+*Cookies*
+*Login Data*
+*Session*
+
+# Logs
+logs/
+*.log
+heartbeat.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Secrets
+*.pem
+*.key
+.env
+.env.*
