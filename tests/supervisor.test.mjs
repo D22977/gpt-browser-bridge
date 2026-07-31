@@ -16,11 +16,13 @@ import {
   escalateToNeedsHuman,
   evaluateOrcaAvailability,
   recordRecoveryFailure,
+  readDispatchCheckpoint,
   recoverActiveTerminal,
   resolveRuntimePaths,
   runLoopOnce,
   runSupervisor,
   scanDurableReports,
+  writeProjectState,
 } from "../src/supervisor.mjs";
 import { OrcaAdapter, resolveActiveTerminal } from "../src/adapters/orca_adapter.mjs";
 
@@ -292,6 +294,25 @@ test("stale terminal handle is discarded and re-linked by exact title", async (t
   assert.equal(result.events[0].type, "terminal_relinked");
 });
 
+test("same-title terminal candidates resolve deterministically to the newest healthy handle", () => {
+  const ref = { role: "control", handle: "term-stale", title: "GBB-004-A1-control" };
+  const candidates = [
+    { handle: "term-disconnected", title: ref.title, connected: false, writable: true, lastOutputAt: 999 },
+    { handle: "term-older", title: ref.title, connected: true, writable: true, lastOutputAt: 100 },
+    { handle: "term-newer", title: ref.title, connected: true, writable: true, lastOutputAt: 200 },
+  ];
+
+  const forward = resolveActiveTerminal(candidates, ref);
+  const reversed = resolveActiveTerminal([...candidates].reverse(), ref);
+
+  assert.equal(forward.found, true);
+  assert.equal(forward.method, "title");
+  assert.equal(forward.terminal.handle, "term-newer");
+  assert.equal(forward.candidateCount, 2);
+  assert.equal(forward.ambiguous, true);
+  assert.equal(reversed.terminal.handle, "term-newer", "input order must not affect resolution");
+});
+
 test("missing terminal is rebuilt from checkpoint and receives a deterministic resume prompt", async (t) => {
   const { paths } = await tempRuntime(t);
   const runDir = path.join(paths.runsDir, "GBB-004-A1");
@@ -360,28 +381,73 @@ test("durable reports and result.json become one-shot Control Tower events", asy
   assert.equal(first.authRequired, false);
 });
 
-test("Supervisor forwards a Reviewer verdict but has no pass/rework decision path", async (t) => {
-  const { root, paths } = await tempRuntime(t);
-  const runDir = path.join(paths.runsDir, "GBB-004-A1");
-  await mkdir(runDir, { recursive: true });
-  await writeFile(path.join(runDir, "reviewer_report.md"), "conclusion: 退修\n");
-  await writeFile(paths.state, JSON.stringify(projectState({ state: "WAITING_REVIEWER" })));
+for (const conclusion of ["通過", "退修", "COMPLETED"]) {
+  test(`Reviewer report conclusion ${conclusion} only requests Control Tower handoff`, async (t) => {
+    const { root, paths } = await tempRuntime(t);
+    const runDir = path.join(paths.runsDir, "GBB-004-A1");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(path.join(runDir, "reviewer_report.md"), [
+      "# GBB-004 Reviewer report",
+      "",
+      `conclusion: ${conclusion}`,
+      "status: COMPLETED",
+      "recommendation: transition task to REWORK if the Control Tower agrees",
+      "",
+    ].join("\n"));
+    const before = projectState({
+      state: "WAITING_REVIEWER",
+      current_phase: "reviewer",
+      next_action: "Control Tower reads durable reviewer report",
+    });
+    await writeFile(paths.state, JSON.stringify(before, null, 2));
 
-  const outcome = await runLoopOnce({
-    runtimeRoot: root,
-    orca: quietOrca(),
-    pid: 700,
-    now: () => BASE_MS,
-    isAlive: async () => false,
+    const forbiddenCalls = [];
+    const spy = (name) => async () => { forbiddenCalls.push(name); return {}; };
+    const outcome = await runLoopOnce({
+      runtimeRoot: root,
+      orca: quietOrca({
+        createTerminal: spy("create reviewer"),
+        sendTerminal: spy("resend work prompt"),
+        taskUpdate: spy("task update"),
+        writeDecision: spy("decision writer"),
+        pressContinue: spy("press Continue"),
+      }),
+      taskUpdater: spy("ctx task update"),
+      decisionWriter: spy("ctx decision writer"),
+      sender: spy("ctx sender"),
+      reviewerFactory: spy("ctx reviewer factory"),
+      pid: 700,
+      now: () => BASE_MS,
+      isAlive: async () => false,
+    });
+
+    assert.deepEqual(forbiddenCalls, []);
+    assert.deepEqual(await readJson(paths.state), before, "durable reviewer content must not alter quality state");
+    assert.deepEqual(outcome.events, [{
+      type: "durable_report",
+      run_id: "GBB-004-A1",
+      report: "reviewer",
+      action: "control_tower_handoff_requested",
+    }]);
+    assert.deepEqual(await readJson(paths.state), before, "reload remains byte-semantically unchanged");
   });
-  assert.equal((await readJson(paths.state)).state, "WAITING_REVIEWER");
-  assert.ok(outcome.events.some((event) => event.type === "durable_report" && event.report === "reviewer"));
+}
 
+test("Supervisor source scan remains a secondary never-judge assertion", async () => {
   const source = await readFile(path.join(REPO_ROOT, "src", "supervisor.mjs"), "utf8");
   const executable = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
   assert.doesNotMatch(executable, /conclusion\s*(?:===|==|switch)/);
   assert.doesNotMatch(executable, /["'](?:通過|退修)["']/);
   assert.doesNotMatch(executable, /task-update|REPEATED_REWORK/);
+});
+
+test("truncated dispatch checkpoint fails closed without inventing recovery data", async (t) => {
+  const { paths } = await tempRuntime(t);
+  const runDir = path.join(paths.runsDir, "GBB-004-A1");
+  await mkdir(runDir, { recursive: true });
+  await writeFile(path.join(runDir, "dispatch.json"), '{"run_id":"GBB-004-A1","roles":{"worker":');
+
+  assert.equal(await readDispatchCheckpoint(paths, "GBB-004-A1"), null);
 });
 
 test("NEEDS_HUMAN cannot transition back to RUNNING", async (t) => {
@@ -402,4 +468,16 @@ test("NEEDS_HUMAN cannot transition back to RUNNING", async (t) => {
   const persisted = await readJson(paths.state);
   assert.equal(persisted.state, "NEEDS_HUMAN");
   assert.equal(persisted.blocked_reason, "AUTH_REQUIRED: login wall");
+});
+
+test("unified project-state writer rejects NEEDS_HUMAN to RUNNING from every caller", async (t) => {
+  const { paths } = await tempRuntime(t);
+  const needsHuman = projectState({ state: "NEEDS_HUMAN", blocked_reason: "AUTH_REQUIRED: login wall" });
+  await writeFile(paths.state, JSON.stringify(needsHuman, null, 2));
+
+  await assert.rejects(
+    writeProjectState(paths, projectState({ state: "RUNNING", blocked_reason: null })),
+    /ILLEGAL_STATE_TRANSITION: NEEDS_HUMAN -> RUNNING/
+  );
+  assert.deepEqual(await readJson(paths.state), needsHuman);
 });

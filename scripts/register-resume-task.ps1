@@ -6,13 +6,18 @@
 # Uses schtasks.exe so it works from both pwsh and Windows PowerShell 5.1.
 param(
   [string]$TaskName = "GPT_BROWSER_BRIDGE_RESUME",
-  [string]$ResumeScript = "D:\AIWORK\GPT_BROWSER_BRIDGE\scripts\resume.ps1"
+  [string]$ResumeScript = (Join-Path $PSScriptRoot "resume.ps1"),
+  [string]$Runtime = "D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE",
+  [string]$Orca = "C:\Users\Lupun\AppData\Local\Programs\orca\resources\bin\orca.exe"
 )
 
-$tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ResumeScript`""
-$quotedTr = "`"$tr`""
+$defaultOrca = "C:\Users\Lupun\AppData\Local\Programs\orca\resources\bin\orca.exe"
+$tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ResumeScript`" -Runtime `"$Runtime`""
+if ($Orca -ne $defaultOrca) {
+  $tr += " -Orca `"$Orca`""
+}
 
-& schtasks.exe /Create /F /TN $TaskName /TR $quotedTr /SC MINUTE /MO 5 /RL LIMITED /IT 2>&1
+& schtasks.exe /Create /F /TN $TaskName /TR $tr /SC MINUTE /MO 5 /RL LIMITED /IT 2>&1
 $code = $LASTEXITCODE
 if ($code -eq 0) {
   "registered: $TaskName"

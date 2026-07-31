@@ -64,11 +64,34 @@ export function parseTerminalTitle(title) {
 // stale handle silently - the caller is told which method matched.
 export function resolveActiveTerminal(terminals, ref) {
   if (!Array.isArray(terminals) || !ref) return { found: false, terminal: null, method: "none" };
-  const byHandle = terminals.find((t) => t.handle === ref.handle);
-  if (byHandle) return { found: true, terminal: byHandle, method: "handle" };
-  const byTitle = terminals.find((t) => t.title === ref.title);
-  if (byTitle) return { found: true, terminal: byTitle, method: "title" };
-  return { found: false, terminal: null, method: "none" };
+  const isHealthy = (terminal) => terminal?.orphaned !== true
+    && terminal?.connected !== false
+    && terminal?.writable !== false;
+  const byHandle = terminals.find((t) => t.handle === ref.handle && isHealthy(t));
+  if (byHandle) {
+    return { found: true, terminal: byHandle, method: "handle", candidateCount: 1, ambiguous: false };
+  }
+
+  // Duplicate titles can remain briefly after a crash/recreate race. Resolve
+  // them independently of CLI array order: ignore unhealthy entries, prefer
+  // the most recently active candidate, then use the opaque handle as a
+  // stable tie-breaker. The ambiguity metadata is retained for audit events.
+  const titleCandidates = terminals
+    .filter((t) => t.title === ref.title && isHealthy(t))
+    .sort((a, b) => {
+      const activityDelta = (Number(b.lastOutputAt) || 0) - (Number(a.lastOutputAt) || 0);
+      return activityDelta || String(a.handle ?? "").localeCompare(String(b.handle ?? ""));
+    });
+  if (titleCandidates.length > 0) {
+    return {
+      found: true,
+      terminal: titleCandidates[0],
+      method: "title",
+      candidateCount: titleCandidates.length,
+      ambiguous: titleCandidates.length > 1,
+    };
+  }
+  return { found: false, terminal: null, method: "none", candidateCount: 0, ambiguous: false };
 }
 
 // ---------------------------------------------------------------------------

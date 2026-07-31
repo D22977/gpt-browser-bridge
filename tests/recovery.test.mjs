@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   ORCA_UNAVAILABLE_ESCALATE_MS,
@@ -15,6 +16,7 @@ import {
 import { runWatchLoop } from "../src/gpt_watch.mjs";
 
 const BASE_MS = Date.parse("2026-08-01T01:00:00.000Z");
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WORKTREE = "D:\\AIWORK_WT\\GPT_BROWSER_BRIDGE\\GBB-004-A1";
 const CONVERSATION_URL = "https://chatgpt.com/c/00000000-0000-0000-0000-000000000004";
 
@@ -74,6 +76,28 @@ function orca(overrides = {}) {
     ...overrides,
   };
 }
+
+test("Windows resume chain stays bound to the checked-out worktree and forwards runtime arguments", async () => {
+  const start = await readFile(path.join(REPO_ROOT, "scripts", "start-supervisor.ps1"), "utf8");
+  const resume = await readFile(path.join(REPO_ROOT, "scripts", "resume.ps1"), "utf8");
+  const register = await readFile(path.join(REPO_ROOT, "scripts", "register-resume-task.ps1"), "utf8");
+
+  assert.match(start, /\$PSScriptRoot/);
+  assert.match(start, /Join-Path\s+\$repo\s+["']src\\supervisor\.mjs["']/i);
+  assert.doesNotMatch(start, /\$repo\s*=\s*["']D:\\AIWORK\\GPT_BROWSER_BRIDGE["']/i);
+  assert.match(start, /\[int\]\$heartbeatState\.pid\s+-eq\s+\$process\.Id/);
+  assert.match(resume, /\$PSScriptRoot/);
+  assert.match(resume, /-Runtime\s+\$Runtime\s+-Orca\s+\$Orca/);
+  assert.doesNotMatch(resume, /-File["',\s]+["']D:\\AIWORK\\GPT_BROWSER_BRIDGE\\scripts\\start-supervisor\.ps1/i);
+  assert.doesNotMatch(resume, /\bexit\s+0\b/i);
+  assert.doesNotMatch(resume, /\$\{hb\.at\}/);
+  assert.match(resume, /\$\(\$hb\.at\)/);
+  assert.match(register, /\[string\]\$Runtime/);
+  assert.match(register, /\[string\]\$Orca/);
+  assert.match(register, /\$tr\s*=.*-Runtime.*\$Runtime/);
+  assert.match(register, /if\s*\(\$Orca\s+-ne\s+\$defaultOrca\)/);
+  assert.match(register, /\$tr\s*\+=.*-Orca.*\$Orca/);
+});
 
 test("Worker CLI crash rebuilds the same worktree from checkpoint without reset, clean, or stash", async (t) => {
   const state = projectState({
