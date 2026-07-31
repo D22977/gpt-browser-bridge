@@ -1140,6 +1140,16 @@ GPT_BROWSER_BRIDGE_RESUME
 * 不重複建立無限 terminal。
 * 不誤標完成。
 
+## GBB-004 執行紀錄（Control Tower）
+
+* 施工：Claude Code（程式部分，session limit 中斷）＋ codex（測試/fixtures/runbooks 續跑＋rework）。Worktree gbb-004-a1。Commits `2d2b715`（初版）、`0d74873`（rework）；main merges `6b8f2d2`、`50869c3`。
+* 網頁版 GPT 第一意見：
+  * attempt 1 退修（`https://chatgpt.com/c/6a6d0518-9e8c-83e8-a83f-8c7d19d74025`）：P1-1 真實 ORCA live canary、P1-2 「永不裁決」行為級負向測試、P1-3 Windows resume 鏈路 smoke；P2 checkpoint 半寫入／同名多候選／統一 transition validator。
+  * attempt 2 **通過**（`https://chatgpt.com/c/6a6d0f01-b1bc-83ee-bf71-de470c93a3af`）：live canary 實錄 `fixtures/orca/LIVE_CANARY_20260801.md`（terminal list/create/send/read、handle 失效重找、同名重建、resume token 送達驗證）、行為級「永不裁決」測試（spy 驗證無狀態裁決/task update/prompt 重送/Continue）、統一 transition validator（所有狀態寫入單一路徑、NEEDS_HUMAN→RUNNING 不可繞過）、Windows resume smoke `fixtures/orca/WINDOWS_RESUME_SMOKE_20260801.md`（register/query/stale 啟動/duplicate lock/unregister/無殘留）。
+* 測試：113 → 142 → **149 全過**；`node --check` 全過。
+* 剩餘風險（網頁 GPT 列為非阻擋）：ORCA CLI 版本升級可能改輸出 envelope；真實 Windows reboot/logoff 未做長期 release canary；transition validator 須確保未來所有新增寫入路徑都經它。
+* Reviewer 報告：`runs/reviewer_report_gbb004_webgpt_a2.md`（runtime 目錄）。
+
 ---
 
 # 16. 子卡 GBB-005：Pilot、Shadow Review 與最終 Gate
