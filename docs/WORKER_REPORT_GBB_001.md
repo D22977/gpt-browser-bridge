@@ -59,8 +59,9 @@ todo 0
 ## commit 清單（SHA + 訊息）
 
 - `74c244f` GBB-001 bootstrap: governance, skills, contracts, adapters, tests, docs
+- `89e3e38` GBB-001 report: record final commit SHA
 
-最後 commit SHA: `74c244f`
+最後 commit SHA: `89e3e38`
 
 ## 與父工單 §12 的對帳
 
