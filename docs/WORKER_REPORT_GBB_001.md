@@ -62,8 +62,9 @@ todo 0
 - `89e3e38` GBB-001 report: record final commit SHA
 - `05a2d05` GBB-001 report: correct final commit SHA
 - `dbf40e0` GBB-001 report: final
+- `4f2b4e6` GBB-001 report: final SHA
 
-最後 commit SHA: `dbf40e0`
+最後 commit SHA: `4f2b4e6`
 
 ## 與父工單 §12 的對帳
 
