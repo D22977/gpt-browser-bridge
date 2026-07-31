@@ -822,6 +822,17 @@ plans/GBB001_*.md            # 指揮塔審查紀錄（含網頁 GPT 審查紀�
 * 不再投入修 Playwright CLI。
 * 保留 Spike 報告。
 
+## GBB-002 執行紀錄（Control Tower）
+
+* 施工：attempt 1 = DeepSeek/opencode（兩次 transcript 停滯被棄置，task failed）；attempt 2 = Claude Code（`-p --dangerously-skip-permissions` 非互動模式）。
+* Spike 報告：`docs/GBB002_SPIKE_REPORT.md`（worker worktree gbb-002-a2，commits `0acebdf` 初版、`6c507e6` rework）。
+* main merges：`8bde172`（初版）、`a2d4b31`（rework）。
+* 網頁版 GPT 第一意見（fresh-context Reviewer）：
+  * attempt 1 退修（`https://chatgpt.com/c/6a6ce5e6-92a8-83ee-94ba-c5e7067c8a0f`）：Test 11 中途斷線證據不足、Test 13 須維持正式 FAIL、Test 14 升級禁令、Test 10 PARTIAL、Test 6 有限度可信、Gate A–H 擴充。
+  * attempt 2 **通過**（`https://chatgpt.com/c/6a6ce922-741c-83e8-b863-b9c9790b6613`）：Test 11 以本機 TCP proxy 補測（`%TEMP%\gbb002-spike2`，`127.0.0.1:19226 → 9225`，kill proxy 模擬中途斷線，驗證無殘缺輸出、session 乾淨移除、可重新 attach、current-tab 重新初始化）；Gate A–H 全數採納。
+* 最終判定：**ACCEPT（附條件）**。條件 = Gate A–H（單一受控入口、每次操作重新定位、select 後 URL 二次驗證、失效規則、併發 mutex、Watcher 寫入禁令、Dashboard 全面禁用、斷線恢復/重試規則），並由 GBB-003 實作時落實兩項非阻斷補充：verify/read 的 TOCTOU 防護（固定唯讀 eval 同次呼叫回傳 URL+資料）、timeout 後確認舊 child process 已終止才重試（不得重疊操作）。
+* Reviewer 報告：`runs/reviewer_report_gbb002_webgpt_a2.md`（runtime 目錄）。
+
 ---
 
 # 14. 子卡 GBB-003：Watcher MVP
