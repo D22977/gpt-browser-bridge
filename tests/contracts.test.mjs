@@ -75,6 +75,43 @@ test("job.json rejects a non-ChatGPT conversation URL", () => {
   assert.throws(() => jobSchema.parse(validJob({ conversation_url: "https://example.com/x" })), /conversation_url/);
 });
 
+test("job.json accepts a conversation URL with query/hash tolerance", () => {
+  const parsed = jobSchema.parse(
+    validJob({ conversation_url: `https://chatgpt.com/c/${uuid}?utm_source=x#top` })
+  );
+  assert.equal(parsed.conversation_url, `https://chatgpt.com/c/${uuid}?utm_source=x#top`);
+});
+
+test("job.json rejects look-alike hostnames", () => {
+  for (const bad of [
+    `https://evilchatgpt.com/c/${uuid}`,
+    `https://chatgpt.com.evil.com/c/${uuid}`,
+    `https://evil.chatgpt.com/c/${uuid}`,
+  ]) {
+    assert.throws(() => jobSchema.parse(validJob({ conversation_url: bad })), /conversation_url/);
+  }
+});
+
+test("job.json rejects a conversation URL without scheme", () => {
+  assert.throws(() => jobSchema.parse(validJob({ conversation_url: `chatgpt.com/c/${uuid}` })), /conversation_url/);
+});
+
+test("job.json rejects a conversation URL with userinfo", () => {
+  assert.throws(() => jobSchema.parse(validJob({ conversation_url: `https://user@chatgpt.com/c/${uuid}` })), /conversation_url/);
+});
+
+test("job.json rejects http scheme, explicit port and non-/c/ paths", () => {
+  for (const bad of [
+    `http://chatgpt.com/c/${uuid}`,
+    `https://chatgpt.com:8443/c/${uuid}`,
+    `https://chatgpt.com/foo/${uuid}`,
+    `https://chatgpt.com/c/${uuid}/extra`,
+    `https://chatgpt.com/c/not-a-valid-id!`,
+  ]) {
+    assert.throws(() => jobSchema.parse(validJob({ conversation_url: bad })), /conversation_url/);
+  }
+});
+
 test("job.json rejects a bad prompt hash", () => {
   assert.throws(() => jobSchema.parse(validJob({ prompt_hash: "not-a-hash" })), /prompt_hash/);
 });

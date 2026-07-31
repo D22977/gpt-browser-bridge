@@ -11,18 +11,36 @@ export const SCHEMA_VERSION = 1;
 // job.json  (written once by the Sender; immutable afterwards)
 // ---------------------------------------------------------------------------
 // Spec: parent work order §14 "Sender 必做" / §7.4.
+// Fail-closed conversation URL check (P1-2 rework): the hostname must be
+// exactly "chatgpt.com"; subdomains, look-alike hostnames, userinfo, explicit
+// ports, non-https schemes and non-"/c/<uuid-ish>" paths are all rejected.
+// Query/hash are tolerated (URL parsing separates them from hostname/path).
+export function isChatgptConversationUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    parsed.protocol === "https:" &&
+    parsed.hostname === "chatgpt.com" &&
+    parsed.port === "" &&
+    parsed.username === "" &&
+    parsed.password === "" &&
+    /^\/c\/[0-9a-f-]+$/i.test(parsed.pathname)
+  );
+}
+
 export const jobSchema = z.object({
   schema_version: z.literal(SCHEMA_VERSION),
   job_id: z.uuid(),
   prompt: z.string().min(1),
   prompt_hash: z.string().regex(/^[0-9a-f]{64}$/),
   attempt: z.number().int().positive(),
-  conversation_url: z
-    .string()
-    .url()
-    .refine((u) => /chatgpt\.com\/c\/[0-9a-f-]+/i.test(u), {
-      message: "conversation_url must be a ChatGPT conversation URL",
-    }),
+  conversation_url: z.string().url().refine(isChatgptConversationUrl, {
+    message: "conversation_url must be a ChatGPT conversation URL",
+  }),
   sent_at: z.string().datetime({ offset: true }),
   baseline: z.object({
     assistant_count: z.number().int().nonnegative(),
