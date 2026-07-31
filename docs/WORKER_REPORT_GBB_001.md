@@ -65,8 +65,9 @@ todo 0
 - `4f2b4e6` GBB-001 report: final SHA
 - `1702790` GBB-001 report: final
 - `3fceacf` GBB-001 report: final
+- `cdcbff5` GBB-001 report: record final commit SHA
 
-最後 commit SHA: `3fceacf`
+最後 commit SHA: `cdcbff5`
 
 ## 與父工單 §12 的對帳
 
