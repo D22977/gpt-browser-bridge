@@ -1,0 +1,9 @@
+{
+  "id": "fixture-terminal-create",
+  "ok": true,
+  "result": {
+    "handle": "term-worker-new",
+    "title": "GBB-004-A1-worker",
+    "status": "running"
+  }
+}

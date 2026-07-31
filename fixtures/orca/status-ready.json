@@ -1,0 +1,10 @@
+{
+  "id": "fixture-status-ready",
+  "ok": true,
+  "result": {
+    "runtime": {
+      "reachable": true,
+      "state": "ready"
+    }
+  }
+}

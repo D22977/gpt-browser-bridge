@@ -1,0 +1,5 @@
+{
+  "id": "fixture-status-unavailable",
+  "ok": false,
+  "error": "runtime unavailable"
+}

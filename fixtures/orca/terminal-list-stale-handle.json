@@ -1,0 +1,18 @@
+{
+  "id": "fixture-terminal-list",
+  "ok": true,
+  "result": {
+    "terminals": [
+      {
+        "handle": "term-control-new",
+        "title": "GBB-004-A1-control",
+        "status": "running"
+      },
+      {
+        "handle": "term-unrelated",
+        "title": "unrelated-shell",
+        "status": "running"
+      }
+    ]
+  }
+}
