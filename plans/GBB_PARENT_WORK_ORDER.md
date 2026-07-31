@@ -936,6 +936,17 @@ FAILED
 * 測試通過。
 * Reviewer 通過。
 
+## GBB-003 執行紀錄（Control Tower）
+
+* 施工：Claude Code（print 模式），worktree gbb-003-a1。Commits `fba2728`（MVP）、`71a9106`（rework）；main merges `fdb2067`、`4dda380`。
+* 網頁版 GPT 第一意見：
+  * attempt 1 退修（`https://chatgpt.com/c/6a6cefb4-b2f8-83ee-8237-c22cb949dba1`）：架構與 Gate A–H 可信，但 P1-1 真實 CLI envelope fixtures、P1-2 受控 live end-to-end canary、P1-3 mutex rejection recovery、P1-4 真實 child timeout/kill、P1-5 二次 URL 不一致全輪失效、P1-6 selector 缺失 fail-closed 六項為驗收必要。
+  * attempt 2 **通過**（`https://chatgpt.com/c/6a6cfba0-b384-83ee-a4a1-af5ee4c551e5`）：六項全數關閉；live canary（fixtures/chatgpt/live_canary_send_watch.json）以真實全域 CLI + 真實 ChatGPT 頁面、直接執行正式 sendJob()/runWatchLoop() 證明前景可見條件下 send/watch/capture/result 端到端成立。
+* rework 額外修復 4 個真實 bug（live 才顯現）：① `press` 誤吃 selector → 改 click send-button；② 背景頁面 send 必然失敗 → `assertPageVisible()` + `PAGE_HIDDEN` fail-closed；③ `.cmd` shim spawn EINVAL → 解析底層 `node cli.js`（免 shell injection）；④ baseline_invalid 被 hash 穩定條件鎖成無限 WAITING → 改立即回報。
+* 測試：75 → 113 全過；`node --check` 全過。
+* 高優先級後續（非阻擋，網頁 GPT 點名）：send-button click 成功但 CLI timeout/kill 時結果不確定 → 不得自動重送；以 SEND_OUTCOME_UNKNOWN/NEEDS_DECISION 標記、以唯一 job marker 搜尋確認後才決定 watch 或重送。此項列入 GBB-005 驗收參考。
+* Reviewer 報告：`runs/reviewer_report_gbb003_webgpt_a2.md`（runtime 目錄）。
+
 ---
 
 # 15. 子卡 GBB-004：Overnight Supervisor 與 Crash Recovery
