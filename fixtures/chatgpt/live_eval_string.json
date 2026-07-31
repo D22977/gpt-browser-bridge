@@ -1,0 +1,5 @@
+{
+  "_captured": "2026-08-01, real @playwright/cli 0.1.17, `eval \"() => document.title\" --json` against the live ChatGPT tab.",
+  "_finding": "Confirms the GBB-002 spike's primitive-string shape still holds: `result` is a JSON-encoded string (the literal quote characters are part of the string value), requiring one extra JSON.parse to reach the plain string. unwrapCliResult() already handled this correctly.",
+  "stdout": "{\n  \"result\": \"\\\"GBB-003 功能驗收結果\\\"\"\n}\n"
+}

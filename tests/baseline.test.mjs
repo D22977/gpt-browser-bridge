@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, mkdir as mkdirAsync, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,13 @@ import {
   locateChatgptTab,
   sendJob,
   SendInvalidationError,
+  parseTabList,
+  runCliCommand,
+  sendPrompt,
+  readBaseline,
+  assertPageVisible,
+  SEND_BUTTON_SELECTOR,
+  resolveSpawnTarget,
 } from "../src/gpt_send.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -243,7 +250,7 @@ test("sendJob reads baseline, sends, waits for URL, writes job.json, and never r
     "tab-select": () => jsonStdout(null),
     eval: (args, callIndex) => (callIndex === 1 ? jsonStdout(preSend) : jsonStdout({ url: conversationUrl })),
     fill: () => jsonStdout(null),
-    press: () => jsonStdout(null),
+    click: () => jsonStdout(null),
   });
 
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "gbb003-sendjob-"));
@@ -266,7 +273,235 @@ test("sendJob reads baseline, sends, waits for URL, writes job.json, and never r
 
   // Only Sender-legal subcommands were used, and no polling loop for
   // assistant replies happened (that is exclusively the Watcher's job).
-  assert.deepEqual(Object.keys(exec.counts).sort(), ["eval", "fill", "press", "tab-list", "tab-select"]);
+  assert.deepEqual(Object.keys(exec.counts).sort(), ["click", "eval", "fill", "tab-list", "tab-select"]);
   assert.equal(exec.counts.fill, 1);
-  assert.equal(exec.counts.press, 1);
+  assert.equal(exec.counts.click, 1);
+});
+
+// ---------------------------------------------------------------------------
+// sendPrompt: click, not the invalid `press <selector>` call (CONT_DISPATCH3
+// finding - `press` takes key names like "Enter", not a CSS selector).
+// ---------------------------------------------------------------------------
+
+test("sendPrompt fills the editor then clicks the send button (never presses a selector as a key)", async () => {
+  const exec = fakeExecFactory({
+    fill: () => jsonStdout(null),
+    click: () => jsonStdout(null),
+  });
+  await sendPrompt("hello", { session: "s", exec });
+  assert.deepEqual(exec.calls.map((c) => c.args[2]), ["fill", "click"]);
+  assert.ok(exec.calls[1].args.includes(SEND_BUTTON_SELECTOR), "click must target the send button selector");
+});
+
+// ---------------------------------------------------------------------------
+// Page-hidden fail-closed (CONT_DISPATCH3): a background tab cannot reliably
+// receive a click (rAF actionability hangs) and Enter does not submit either,
+// so readBaseline must refuse to proceed rather than attempt the send.
+// ---------------------------------------------------------------------------
+
+test("assertPageVisible fails closed with PAGE_HIDDEN when the tab is not visible", () => {
+  assert.throws(
+    () => assertPageVisible({ visibilityState: "hidden" }),
+    (err) => err instanceof SendInvalidationError && err.code === "PAGE_HIDDEN"
+  );
+});
+
+test("assertPageVisible allows a visible page through untouched", () => {
+  assert.doesNotThrow(() => assertPageVisible({ visibilityState: "visible" }));
+  // Older/partial snapshots without the field must not be treated as hidden.
+  assert.doesNotThrow(() => assertPageVisible({}));
+});
+
+test("readBaseline fails closed with PAGE_HIDDEN and never attempts fill/click when the tab is hidden", async () => {
+  const tabs = await loadFixture("tab_list_single_match.json");
+  const exec = fakeExecFactory({
+    "tab-list": () => jsonStdout(tabs),
+    "tab-select": () => jsonStdout(null),
+    eval: () =>
+      jsonStdout({
+        url: "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949",
+        assistantMessages: [],
+        visibilityState: "hidden",
+      }),
+  });
+  await assert.rejects(
+    () => readBaseline("https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949", { session: "s", exec }),
+    (err) => err instanceof SendInvalidationError && err.code === "PAGE_HIDDEN"
+  );
+  assert.equal(exec.counts.fill, undefined);
+  assert.equal(exec.counts.click, undefined);
+});
+
+test("sendJob refuses to send when the pre-send baseline reports a hidden page", async () => {
+  const tabs = await loadFixture("tab_list_single_match.json");
+  const exec = fakeExecFactory({
+    "tab-list": () => jsonStdout(tabs),
+    "tab-select": () => jsonStdout(null),
+    eval: () =>
+      jsonStdout({
+        url: "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949",
+        assistantMessages: [],
+        visibilityState: "hidden",
+      }),
+  });
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "gbb003-pagehidden-"));
+  await assert.rejects(
+    () =>
+      sendJob({
+        prompt: "hello",
+        attempt: 1,
+        conversationUrl: "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949",
+        runtimeRoot,
+        session: "s",
+        exec,
+        sleep: async () => {},
+        now: () => Date.parse("2026-08-01T09:00:00+08:00"),
+        existsCheck: async () => false,
+      }),
+    (err) => err instanceof SendInvalidationError && err.code === "PAGE_HIDDEN"
+  );
+  assert.equal(exec.counts.fill, undefined, "must never attempt fill on a hidden page");
+  assert.equal(exec.counts.click, undefined, "must never attempt click on a hidden page");
+});
+
+// ---------------------------------------------------------------------------
+// Real CLI object-envelope parsing (P1-1 rework): fixtures/chatgpt/live_*.json
+// were captured from the actual `@playwright/cli` 0.1.17 binary attached to
+// a real CDP endpoint (127.0.0.1:9225), not hand-written. See each fixture's
+// `_finding` field for what it proves.
+// ---------------------------------------------------------------------------
+
+test("parseTabList parses the real tab-list markdown shape (single tab, current)", async () => {
+  const fixture = await loadFixture("live_tab_list_single.json");
+  const parsed = JSON.parse(fixture.stdout);
+  const tabs = parseTabList(parsed.result);
+  assert.deepEqual(tabs, [
+    { index: 0, current: true, title: "GBB-003 功能驗收結果", url: "https://chatgpt.com/c/6a6cefb4-b2f8-83ee-8237-c22cb949dba1" },
+  ]);
+});
+
+test("parseTabList parses the real tab-list markdown shape (multiple tabs)", async () => {
+  const fixture = await loadFixture("live_tab_list_multi.json");
+  const parsed = JSON.parse(fixture.stdout);
+  const tabs = parseTabList(parsed.result);
+  assert.equal(tabs.length, 2);
+  assert.equal(tabs[0].current, false);
+  assert.equal(tabs[1].current, true);
+  assert.equal(tabs[1].url, "https://chatgpt.com/");
+});
+
+test("parseTabList still accepts an already-structured array (back-compat with hand-written fixtures)", () => {
+  assert.deepEqual(parseTabList([{ index: 0, url: "https://chatgpt.com/c/x" }]), [{ index: 0, url: "https://chatgpt.com/c/x" }]);
+  assert.deepEqual(parseTabList("not a tab list at all"), []);
+  assert.deepEqual(parseTabList(null), []);
+});
+
+test("locateChatgptTab works against the real markdown tab-list envelope end to end", async () => {
+  const fixture = await loadFixture("live_tab_list_single.json");
+  const exec = fakeExecFactory({
+    "tab-list": () => ({ stdout: fixture.stdout, stderr: "" }),
+    "tab-select": () => jsonStdout(null),
+  });
+  const match = await locateChatgptTab("https://chatgpt.com/c/6a6cefb4-b2f8-83ee-8237-c22cb949dba1", {
+    session: "gbb-send-test",
+    exec,
+  });
+  assert.equal(match.index, 0);
+});
+
+test("runCliCommand parses the real primitive-string eval envelope", async () => {
+  const fixture = await loadFixture("live_eval_string.json");
+  const exec = fakeExecFactory({ eval: () => ({ stdout: fixture.stdout, stderr: "" }) });
+  const result = await runCliCommand("eval", ["() => document.title"], { session: "s", exec });
+  assert.equal(result, "GBB-003 功能驗收結果");
+});
+
+test("runCliCommand parses the real object-returning eval envelope (BASELINE_SNAPSHOT_SCRIPT shape)", async () => {
+  const fixture = await loadFixture("live_eval_object.json");
+  const exec = fakeExecFactory({ eval: () => ({ stdout: fixture.stdout, stderr: "" }) });
+  const result = await runCliCommand("eval", ["() => ({url: location.href, assistantMessages: []})"], { session: "s", exec });
+  assert.equal(result.url, "https://chatgpt.com/c/6a6cefb4-b2f8-83ee-8237-c22cb949dba1");
+  assert.ok(Array.isArray(result.assistantMessages));
+});
+
+test("runCliCommand parses the real array-returning eval envelope", async () => {
+  const fixture = await loadFixture("live_eval_array.json");
+  const exec = fakeExecFactory({ eval: () => ({ stdout: fixture.stdout, stderr: "" }) });
+  const result = await runCliCommand("eval", ["() => ['a','b','c']"], { session: "s", exec });
+  assert.deepEqual(result, ["a", "b", "c"]);
+});
+
+test("runCliCommand throws on the real isError:true / exit-0 error envelope instead of treating it as valid data", async () => {
+  const fixture = await loadFixture("live_cli_error.json");
+  const exec = fakeExecFactory({ eval: () => ({ stdout: fixture.stdout_eval_syntax_error, stderr: "" }) });
+  await assert.rejects(
+    () => runCliCommand("eval", ["() => )bad("], { session: "s", exec }),
+    (err) => err instanceof SendInvalidationError && err.code === "CLI_ERROR_RESPONSE:eval"
+  );
+});
+
+test("runCliCommand throws on a real tab-select-not-found isError response", async () => {
+  const fixture = await loadFixture("live_cli_error.json");
+  const exec = fakeExecFactory({ "tab-select": () => ({ stdout: fixture.stdout_tab_select_not_found, stderr: "" }) });
+  await assert.rejects(
+    () => runCliCommand("tab-select", ["99"], { session: "s", exec }),
+    (err) => err instanceof SendInvalidationError && err.code === "CLI_ERROR_RESPONSE:tab-select"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// P2: exit 0 with empty / truncated / mixed-non-JSON stdout must never be
+// mistaken for valid data.
+// ---------------------------------------------------------------------------
+
+test("runCliCommand throws CLI_INVALID_JSON on exit-0-with-empty stdout", async () => {
+  const exec = fakeExecFactory({ eval: () => ({ stdout: "", stderr: "" }) });
+  await assert.rejects(
+    () => runCliCommand("eval", ["() => document.title"], { session: "s", exec }),
+    (err) => err instanceof SendInvalidationError && err.code === "CLI_INVALID_JSON:eval"
+  );
+});
+
+test("runCliCommand throws CLI_INVALID_JSON on truncated JSON stdout", async () => {
+  const exec = fakeExecFactory({ eval: () => ({ stdout: '{"result": {"url": "https://cha', stderr: "" }) });
+  await assert.rejects(
+    () => runCliCommand("eval", ["() => document.title"], { session: "s", exec }),
+    (err) => err instanceof SendInvalidationError && err.code === "CLI_INVALID_JSON:eval"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Live-capture finding (fixtures/chatgpt/live_canary_send_watch.json,
+// CMD_SHIM_SPAWN_EINVAL): recent Node refuses to spawn a `.cmd` shim directly
+// without `shell: true` ("spawn EINVAL"). This was invisible in every prior
+// test because they all inject a fake `exec` and never touch defaultExec's
+// real spawn path. resolveSpawnTarget() is the fix: resolve the `.cmd` shim
+// to the node entry point it wraps and spawn `node <entry>` directly instead
+// (no shell, no argument-escaping/injection risk).
+// ---------------------------------------------------------------------------
+
+test("resolveSpawnTarget resolves a .cmd shim to `node <sibling cli.js>` (no shell)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "gbb003-spawn-target-"));
+  const shimDir = path.join(root, "pkgA", "node_modules", ".bin");
+  const entryDir = path.join(root, "pkgA", "node_modules", "playwright");
+  await mkdirAsync(shimDir, { recursive: true });
+  await mkdirAsync(entryDir, { recursive: true });
+  const entry = path.join(entryDir, "cli.js");
+  await writeFile(entry, "// stub");
+  const cliPath = path.join(shimDir, "playwright.cmd");
+  await writeFile(cliPath, "@ECHO off");
+
+  const target = resolveSpawnTarget(cliPath);
+  assert.equal(target.command, process.execPath);
+  assert.deepEqual(target.prefixArgs, [entry]);
+});
+
+test("resolveSpawnTarget throws a clear error when the .cmd shim's sibling entry does not exist", () => {
+  assert.throws(() => resolveSpawnTarget("C:\\nowhere\\playwright.cmd"), /cannot resolve/);
+});
+
+test("resolveSpawnTarget passes a non-.cmd path through unchanged (already a real exe/.js)", () => {
+  const target = resolveSpawnTarget("C:\\some\\path\\playwright-core.js");
+  assert.equal(target.command, "C:\\some\\path\\playwright-core.js");
+  assert.deepEqual(target.prefixArgs, []);
 });

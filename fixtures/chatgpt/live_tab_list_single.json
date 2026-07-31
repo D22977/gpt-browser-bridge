@@ -1,0 +1,5 @@
+{
+  "_captured": "2026-08-01, real @playwright/cli 0.1.17 attached via `attach --cdp http://127.0.0.1:9225`, `-s=gbb003live tab-list --json`, cwd outside repo (%TEMP%\\gbb003-live). One tab open (the shared ChatGPT tab).",
+  "_finding": "tab-list --json does NOT return a JSON array of tab objects. It returns a markdown bullet-list STRING under `result`: `- <index>: [(current) ]?[title](url)`. gpt_send.mjs/gpt_watch.mjs previously assumed `Array.isArray(tabs)` or `tabs.tabs`, which is always false for the real CLI - Gate B would silently and permanently fail closed (TAB_NOT_FOUND) against a live browser. Fixed by parseTabList() in both files.",
+  "stdout": "{\n  \"result\": \"- 0: (current) [GBB-003 功能驗收結果](https://chatgpt.com/c/6a6cefb4-b2f8-83ee-8237-c22cb949dba1)\"\n}\n"
+}

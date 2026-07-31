@@ -11,6 +11,8 @@
 // / fill / press / tab-close / tab-new / run-code / navigate / show).
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { isChatgptConversationUrl } from "./contracts.mjs";
 import { sha256Hex, persistResult } from "./result_store.mjs";
 
@@ -84,9 +86,32 @@ export class WatchInvalidationError extends Error {
   }
 }
 
+// Live-capture finding (2026-08-01 canary): recent Node refuses to spawn a
+// `.cmd` shim directly without `shell: true` (EINVAL - see Node's April 2024
+// batch-file CVE fix), and `shell: true` would require re-implementing
+// cmd.exe's argument-escaping ourselves for every CLI arg to stay
+// injection-safe. Instead, resolve npm's `.cmd` shim to the real node entry
+// point it wraps (`..\playwright\cli.js`, exactly what the shim itself
+// invokes - see its `%dp0%\..\playwright\cli.js` line) and spawn that
+// directly via `node`: a plain executable + argv array, no shell, no
+// escaping needed. Non-`.cmd` paths (already a `.js`/real exe) are spawned
+// unchanged. Duplicated from the Sender module deliberately (Gate F: no
+// shared CLI runner between Sender and Watcher).
+export function resolveSpawnTarget(cliPath) {
+  if (!/\.cmd$/i.test(cliPath)) {
+    return { command: cliPath, prefixArgs: [] };
+  }
+  const entry = path.join(path.dirname(cliPath), "..", "playwright", "cli.js");
+  if (!existsSync(entry)) {
+    throw new Error(`gpt_watch: cannot resolve the .cmd shim at ${cliPath} to a node entry point (expected ${entry})`);
+  }
+  return { command: process.execPath, prefixArgs: [entry] };
+}
+
 function defaultExec(cliPath, args, { timeoutMs }) {
   return new Promise((resolve, reject) => {
-    execFile(cliPath, args, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+    const { command, prefixArgs } = resolveSpawnTarget(cliPath);
+    execFile(command, [...prefixArgs, ...args], { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
       if (err) {
         reject(Object.assign(new Error(err.message), { cause: err, stdout, stderr }));
         return;
@@ -148,7 +173,44 @@ export async function runCliCommand(subcommand, rest, opts = {}) {
   } catch (e) {
     throw new WatchInvalidationError(`CLI_INVALID_JSON:${subcommand}`, { cause: e });
   }
+  // Live-capture finding (fixtures/chatgpt/live_cli_error.json): the real CLI
+  // exits 0 and reports failures as `{isError: true, error: "..."}` on
+  // stdout rather than a non-zero exit / exec rejection. Must be checked
+  // explicitly - otherwise a real error silently falls through as "valid"
+  // JSON with no result/url/array shape (fail-closed by accident, mislabeled).
+  if (parsed && typeof parsed === "object" && parsed.isError === true) {
+    throw new WatchInvalidationError(`CLI_ERROR_RESPONSE:${subcommand}`, {
+      cause: new Error(typeof parsed.error === "string" ? parsed.error : "unknown CLI error"),
+    });
+  }
   return unwrapCliResult(parsed);
+}
+
+// Live-capture finding (fixtures/chatgpt/live_tab_list_*.json): `tab-list
+// --json` does NOT return a JSON array of tab objects. It returns a markdown
+// bullet-list STRING under `result`: `- <index>: [(current) ]?[title](url)`.
+// Parses that real shape into the `{index, current, title, url}[]` shape the
+// rest of this file expects. Also tolerates an already-structured
+// array/`{tabs:[...]}` input (used by the pre-existing fixture-based tests)
+// so neither shape silently produces the wrong tab. Any unparseable line is
+// skipped rather than guessed at; an empty/garbled result naturally yields
+// zero matches downstream, which Gate B already treats as fail-closed
+// (TAB_NOT_FOUND), never a guess.
+const TAB_LIST_LINE_RE = /^-\s*(\d+):\s*(\(current\)\s*)?\[(.*)\]\((.+)\)$/;
+
+export function parseTabList(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (raw && Array.isArray(raw.tabs)) return raw.tabs;
+  if (typeof raw !== "string") return [];
+  const tabs = [];
+  for (const rawLine of raw.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const m = TAB_LIST_LINE_RE.exec(line);
+    if (!m) continue;
+    tabs.push({ index: Number(m[1]), current: Boolean(m[2]), title: m[3], url: m[4] });
+  }
+  return tabs;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +254,7 @@ async function locateAndRead(conversationUrl, opts) {
 
   // Gate B: always re-list; never cache a tab index across calls.
   const tabs = await runCliCommand("tab-list", [], opts);
-  const list = Array.isArray(tabs) ? tabs : Array.isArray(tabs?.tabs) ? tabs.tabs : [];
+  const list = parseTabList(tabs);
   const matches = list.filter((t) => extractConversationId(t?.url) === targetId);
   if (matches.length !== 1) {
     throw new WatchInvalidationError(matches.length === 0 ? "TAB_NOT_FOUND" : "TAB_AMBIGUOUS");
@@ -336,6 +398,17 @@ export function decideState({ stopVisible, stability, detections = [] }) {
   }
   if (detections.includes("login_wall")) {
     return { status: "NEEDS_DECISION", reason: "login_wall" };
+  }
+  // P1-6 fail-closed fix: a malformed payload (e.g. a DOM selector that no
+  // longer matches anything live - assistantMessages missing/not an array)
+  // makes extractCandidateMessage() report baseline_invalid every poll and
+  // never push a hash sample (see pollOnce). Left ungated behind the
+  // stability check below, that combination can never become "stable" and
+  // would poll WAITING forever instead of ever surfacing - never a false
+  // empty-set DONE, but also never resolved. Surface it immediately, the
+  // same way login_wall is, rather than hanging indefinitely.
+  if (detections.includes("baseline_invalid")) {
+    return { status: "NEEDS_DECISION", reason: "baseline_invalid" };
   }
   // Stop button existing always blocks DONE, regardless of apparent hash
   // stability (protects against a mid-generation pause looking "stable").

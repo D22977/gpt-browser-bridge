@@ -1,0 +1,5 @@
+{
+  "_captured": "2026-08-01, real @playwright/cli 0.1.17, `tab-list --json` after `tab-new https://chatgpt.com` opened a second tab.",
+  "_finding": "Confirms the multi-tab markdown format: one `- <index>: ...` line per tab, `(current)` marker present only on the currently-focused tab, in arbitrary order (not necessarily sorted by index in general, though it was here).",
+  "stdout": "{\n  \"result\": \"- 0: [GBB-003 功能驗收結果](https://chatgpt.com/c/6a6cefb4-b2f8-83ee-8237-c22cb949dba1)\\n- 1: (current) [ChatGPT](https://chatgpt.com/)\"\n}\n"
+}

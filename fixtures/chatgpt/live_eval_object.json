@@ -1,0 +1,6 @@
+{
+  "_captured": "2026-08-01, real @playwright/cli 0.1.17, `eval \"<BASELINE_SNAPSHOT_SCRIPT-equivalent>\" --json` against the live ChatGPT tab (the shared review conversation).",
+  "_note": "assistantMessages text is redacted/replaced for repo hygiene (the real capture returned the live reviewer conversation's actual text); the JSON envelope shape below - `result` is a pretty-printed (2-space indent) JSON-encoded STRING containing an object with `url` and `assistantMessages` - is exactly what was observed live and is what this fixture exists to prove.",
+  "_finding": "Confirms the previously-unspiked object-returning eval shape used by BASELINE_SNAPSHOT_SCRIPT / READONLY_SNAPSHOT_SCRIPT: same one-more-JSON.parse envelope as the primitive-string case, just with an object as the decoded payload. unwrapCliResult() already handled this correctly - no code change needed for this shape, only for tab-list.",
+  "stdout": "{\n  \"result\": \"{\\n  \\\"url\\\": \\\"https://chatgpt.com/c/6a6cefb4-b2f8-83ee-8237-c22cb949dba1\\\",\\n  \\\"assistantMessages\\\": [\\n    \\\"(redacted live reviewer content - captured only to confirm the object --json envelope shape)\\\"\\n  ]\\n}\"\n}\n"
+}
