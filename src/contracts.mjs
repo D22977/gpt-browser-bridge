@@ -64,6 +64,20 @@ export const jobSchema = z.object({
 // Spec: parent work order §14 "Result states" / "Durable output".
 export const resultStateEnum = z.enum(["DONE", "NEEDS_DECISION", "FAILED"]);
 
+// Watcher detection codes (GBB-003 §14 "偵測" list) plus two technical-failure
+// codes emitted by the CLI wrapper's Gate D/H invalidation-retry handling.
+export const detectionCodeEnum = z.enum([
+  "continue_button",
+  "network_error",
+  "login_wall",
+  "odd_code_fence",
+  "missing_end_marker",
+  "abrupt_tail",
+  "baseline_invalid",
+  "max_retries_exceeded",
+  "cdp_unreachable",
+]);
+
 export const resultSchema = z.object({
   schema_version: z.literal(SCHEMA_VERSION),
   job_id: z.uuid(),
@@ -77,7 +91,7 @@ export const resultSchema = z.object({
   started_at: z.string().datetime({ offset: true }),
   completed_at: z.string().datetime({ offset: true }),
   error: z.string().optional(),
-  detections: z.array(z.string()).optional(),
+  detections: z.array(detectionCodeEnum).optional(),
 });
 
 // ---------------------------------------------------------------------------
