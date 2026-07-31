@@ -754,6 +754,21 @@ docs/SECURITY.md
 * 未修改其他 repo。
 * Reviewer 通過。
 
+### §12 Scope amendment（指揮塔裁定，2026-07-31）
+
+依網頁版 GPT 功能驗收（對話 `https://chatgpt.com/c/6a6cc0dc-3704-83e8-8b1f-ed2a97b9316f`）P1-1/P1-4，正式擴充 §12 allowed paths 與驗收證據要求：
+
+```text
+# 新增 allowed paths（追認）
+docs/WORKER_REPORT_*.md      # §7.2 明文要求的 worker 產出，repo 內固定報告位置
+opencode.json                # 指揮塔治理檔（權限/permission 設定），由指揮塔維護
+plans/GBB001_*.md            # 指揮塔審查紀錄（含網頁 GPT 審查紀錄）
+```
+
+* `docs/WORKER_REPORT_*.md`、`opencode.json`、`plans/GBB001_*.md` 由指揮塔正式授權，非 Worker 越界。
+* 驗收「未修改其他 repo」需在 Worker report 附證據：施工前後各一次 `git status --short` 快照（MEP、七工契約等相關 repo），或說明目標路徑檢查結果。
+* 驗收「Repo 可重建」需附乾淨 checkout 實測：`npm ci && npm test` 輸出（GBB-001-A2 補測）。
+
 ---
 
 # 13. 子卡 GBB-002：Playwright CLI 相容性 Spike
