@@ -61,8 +61,9 @@ todo 0
 - `74c244f` GBB-001 bootstrap: governance, skills, contracts, adapters, tests, docs
 - `89e3e38` GBB-001 report: record final commit SHA
 - `05a2d05` GBB-001 report: correct final commit SHA
+- `dbf40e0` GBB-001 report: final
 
-最後 commit SHA: `05a2d05`
+最後 commit SHA: `dbf40e0`
 
 ## 與父工單 §12 的對帳
 
