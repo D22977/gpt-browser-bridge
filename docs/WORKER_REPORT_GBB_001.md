@@ -70,8 +70,9 @@ todo 0
 - `50cb5f3` GBB-001 report: finalize
 - `a9ab322` GBB-001 report: finalize
 - `6fb031c` GBB-001 report: finalize
+- `ab17a73` GBB-001 report: finalize
 
-最後 commit SHA: `6fb031c`
+最後 commit SHA: `ab17a73`
 
 ## 與父工單 §12 的對帳
 
