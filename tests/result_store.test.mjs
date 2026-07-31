@@ -33,6 +33,10 @@ test("resolveJobDir confines output under <runtimeRoot>/jobs/<job_id> and reject
   assert.throws(() => resolveJobDir("D:\\RUNTIME", "../escape"));
   assert.throws(() => resolveJobDir("D:\\RUNTIME", "a/b"));
   assert.throws(() => resolveJobDir("D:\\RUNTIME", ""));
+  // Exact ".." / "." (not just "../escape") and a bare drive-absolute job_id
+  // must also fail closed rather than resolving outside <runtimeRoot>/jobs/.
+  assert.throws(() => resolveJobDir("D:\\RUNTIME", ".."));
+  assert.throws(() => resolveJobDir("D:\\RUNTIME", "C:\\Windows\\System32"));
 });
 
 test("persistResult writes reply.md then a schema-valid result.json, and the reply hash is recomputable from the file on disk", async () => {
@@ -130,6 +134,46 @@ test("persistResult omits detections/error when not provided, includes them when
   });
   assert.equal(withIssues.result.error, "cdp_unreachable");
   assert.deepEqual(withIssues.result.detections, ["cdp_unreachable"]);
+});
+
+// ---------------------------------------------------------------------------
+// P2: a crash between the reply.md write and the result.json write must not
+// look terminal - only result.json's presence on disk means "done".
+// ---------------------------------------------------------------------------
+
+test("a crash between the reply.md rename and the result.json rename is not terminal, and a retry recovers cleanly", async () => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "gbb003-result-"));
+  const job = sampleJob();
+  const jobDir = resolveJobDir(runtimeRoot, job.job_id);
+
+  // Simulate the crash: only step 1 (reply.md) ran, step 3 (result.json)
+  // never did.
+  const { mkdir: mkdirAsync } = await import("node:fs/promises");
+  const writeFileAtomic = (await import("write-file-atomic")).default;
+  await mkdirAsync(jobDir, { recursive: true });
+  await writeFileAtomic(path.join(jobDir, "reply.md"), "partial text from before the crash");
+
+  // A consumer that only trusts result.json's presence must see this job as
+  // not-yet-terminal, even though reply.md exists on disk.
+  await assert.rejects(() => stat(path.join(jobDir, "result.json")));
+
+  // A retry of persistResult (the Watcher restarting the poll loop after the
+  // crash) must recover cleanly: it overwrites reply.md with the real final
+  // text and produces the missing result.json, reaching the same terminal
+  // shape a crash-free run would have.
+  const { result, resultPath } = await persistResult({
+    jobDir,
+    job,
+    state: "DONE",
+    replyText: "The real final answer.\n<!-- GBB:END -->\n",
+    startedAt: "2026-08-01T09:00:00+08:00",
+    completedAt: "2026-08-01T09:05:00+08:00",
+  });
+  assert.equal(result.state, "DONE");
+  await assert.doesNotReject(() => stat(resultPath));
+  const replyOnDisk = await readFile(path.join(jobDir, "reply.md"), "utf8");
+  assert.equal(replyOnDisk, "The real final answer.\n<!-- GBB:END -->\n");
+  assert.equal(result.reply_hash, sha256(replyOnDisk));
 });
 
 test("persistResult emits a single stdout event only after both files are written", async () => {

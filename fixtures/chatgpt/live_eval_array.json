@@ -1,0 +1,5 @@
+{
+  "_captured": "2026-08-01, real @playwright/cli 0.1.17, `eval \"() => ['a','b','c']\" --json` against the live ChatGPT tab.",
+  "_finding": "Confirms an array-returning eval follows the same JSON-encoded-string envelope as the object case.",
+  "stdout": "{\n  \"result\": \"[\\n  \\\"a\\\",\\n  \\\"b\\\",\\n  \\\"c\\\"\\n]\"\n}\n"
+}

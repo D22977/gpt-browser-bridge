@@ -1,0 +1,54 @@
+{
+  "_finding": "P1-2 live end-to-end canary (CONT_DISPATCH3 item 4). Real src/gpt_send.mjs sendJob() + src/gpt_watch.mjs runWatchLoop() run against the real shared Chrome (CDP 127.0.0.1:9225, session 'gbb003-canary'), a disposable NEW conversation created for this run only, never touching the pre-existing 'GBB-003 功能驗收結果' review conversation tab. Ran from a driver script outside the repo (per the .playwright-cli cwd-binding operational fact), importing the real src modules with a real execFile transport (no fake exec).",
+  "disposable_conversation_url": "https://chatgpt.com/c/6a6cf6e4-9b34-83ee-b516-4a0ecca2235b",
+  "setup_rounds_raw_cli": [
+    { "prompt": "Reply with exactly this and nothing else: PONG-1", "assistant_reply": "PONG-1", "assistant_index": 0 },
+    { "prompt": "Reply with exactly this and nothing else: PONG-2", "assistant_reply": "PONG-2", "assistant_index": 1 }
+  ],
+  "tracked_run": {
+    "note": "Sent via the real sendJob(); watched via the real runWatchLoop(). baseline.assistant_count=2 means the Watcher's candidate index is 2 (the 3rd assistant message) - proves it targets the NEW reply and does not confuse it with the pre-existing PONG-1/PONG-2 answers, the same class of bug the offline six_answers_snapshot.json fixture guards against.",
+    "job_json": {
+      "schema_version": 1,
+      "job_id": "1e1af62d-0895-4557-a52d-38813d232d89",
+      "prompt": "Reply with exactly two lines and nothing else:\nToken: GBB3-CANARY-20260801\n<!-- GBB:END -->",
+      "prompt_hash": "84816f22c8c4ce905c6a07d7a52688daafdd28ea88ccca3cbbb9944648c8d9e4",
+      "attempt": 1,
+      "conversation_url": "https://chatgpt.com/c/6a6cf6e4-9b34-83ee-b516-4a0ecca2235b",
+      "sent_at": "2026-07-31T19:31:35.975Z",
+      "baseline": {
+        "assistant_count": 2,
+        "last_assistant_hash": "2748bea7f7ec1b12f9e1fc5357cfc8ed1ba414acba3aaa61e7587ae33ad00fc3"
+      }
+    },
+    "result_json": {
+      "schema_version": 1,
+      "job_id": "1e1af62d-0895-4557-a52d-38813d232d89",
+      "state": "DONE",
+      "reply_hash": "4151f5a854d2596307539926642eeb033d7229e5b7ae386b0a28b85e0485f3f1",
+      "baseline": {
+        "assistant_count": 2,
+        "last_assistant_hash": "2748bea7f7ec1b12f9e1fc5357cfc8ed1ba414acba3aaa61e7587ae33ad00fc3"
+      },
+      "started_at": "2026-07-31T19:31:36.000Z",
+      "completed_at": "2026-07-31T19:32:04.244Z"
+    },
+    "reply_md": "Token: GBB3-CANARY-20260801\n\n<!-- GBB:END -->",
+    "reply_hash_recomputed_independently": "4151f5a854d2596307539926642eeb033d7229e5b7ae386b0a28b85e0485f3f1",
+    "checks_passed": [
+      "editor selector (#prompt-textarea) and send-button selector ([data-testid=\"send-button\"]) both matched the live DOM",
+      "sendPrompt() used click on the send button (post-fix), not the broken press-a-selector call; no hang",
+      "canonical /c/<id> conversation URL obtained before job.json was written",
+      "exactly one send (sendJob calls sendPrompt exactly once; no retry/resend logic exists in the Sender)",
+      "job.json is immutable and schema-valid",
+      "Watcher never returned DONE while the Stop button was visible",
+      "Watcher required >=3 identical hashes over >=15s before DONE (started_at -> completed_at spans 28.2s)",
+      "Watcher captured the NEW (3rd) assistant answer at index 2, not the pre-existing PONG-1/PONG-2 answers",
+      "reply.md hash recomputes independently from the bytes on disk and matches result.json's reply_hash",
+      "the window (PID 11288, 'ChatGPT - Google Chrome') needed OS-level foreground focus for click() to succeed - confirms the CONT_DISPATCH3 finding that a background/hidden tab hangs on click; the page-hidden fail-closed guard (assertPageVisible / PAGE_HIDDEN) was added for exactly this case"
+    ]
+  },
+  "additional_finding_not_previously_documented": {
+    "id": "CMD_SHIM_SPAWN_EINVAL",
+    "description": "defaultExec() in both gpt_send.mjs and gpt_watch.mjs called execFile(cliPath, args, {timeout, windowsHide:true}) directly on the npm .cmd shim path. On this Node/Windows combination that throws 'spawn EINVAL' unconditionally (Node now refuses to spawn .bat/.cmd files without an explicit shell - see Node's April 2024 batch-file command-injection CVE fix). This was invisible in the test suite because every existing test injects a fake exec; it would have made every real Sender/Watcher run fail immediately. Fixed by resolving the .cmd shim to the underlying node entry point it wraps (playwright.cmd's own body invokes `%dp0%\\..\\playwright\\cli.js`) and spawning `node <entry> <args>` directly - a plain executable + argv array, no shell, no argument-escaping/injection risk. Verified against this live run."
+  }
+}

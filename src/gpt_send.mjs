@@ -10,6 +10,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import writeFileAtomic from "write-file-atomic";
 import { isChatgptConversationUrl, jobSchema, SCHEMA_VERSION } from "./contracts.mjs";
@@ -20,19 +21,23 @@ import { sha256Hex } from "./result_store.mjs";
 // ---------------------------------------------------------------------------
 
 // Gate A: whitelist of Playwright CLI subcommands the Sender may invoke.
-// fill/press are legitimate here (the Sender is the write role); tab-close,
-// tab-new, run-code and show are still never used.
-export const ALLOWED_CLI_SUBCOMMANDS = Object.freeze(["tab-list", "tab-select", "eval", "fill", "press"]);
+// fill/click/press are legitimate here (the Sender is the write role);
+// tab-close, tab-new, run-code and show are still never used. `click` is the
+// actual send-button trigger (see sendPrompt below); `press` is kept
+// whitelisted for key-based input (e.g. Enter into a focused editor) even
+// though the current sendPrompt() does not use it.
+export const ALLOWED_CLI_SUBCOMMANDS = Object.freeze(["tab-list", "tab-select", "eval", "fill", "click", "press"]);
 
 // Fixed read-only eval used to take the pre-send baseline (assistant count +
-// last assistant message) and, after sending, to poll for the new
-// conversation URL. Read-only by construction; the Sender's only *write*
-// happens through the dedicated fill/press CLI subcommands below.
+// last assistant message + page visibility) and, after sending, to poll for
+// the new conversation URL. Read-only by construction; the Sender's only
+// *write* happens through the dedicated fill/click CLI subcommands below.
 export const BASELINE_SNAPSHOT_SCRIPT = `() => {
   const turns = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
   return {
     url: location.href,
     assistantMessages: turns.map((t) => t.innerText || ''),
+    visibilityState: document.visibilityState,
   };
 }`;
 
@@ -126,9 +131,31 @@ export class SendInvalidationError extends Error {
   }
 }
 
+// Live-capture finding (2026-08-01 canary): recent Node refuses to spawn a
+// `.cmd` shim directly without `shell: true` (EINVAL - see Node's April 2024
+// batch-file CVE fix), and `shell: true` would require re-implementing
+// cmd.exe's argument-escaping ourselves for every CLI arg (including the
+// user-supplied prompt text) to stay injection-safe. Instead, resolve npm's
+// `.cmd` shim to the real node entry point it wraps (`..\playwright\cli.js`,
+// exactly what the shim itself invokes - see its `%dp0%\..\playwright\cli.js`
+// line) and spawn that directly via `node`: a plain executable + argv array,
+// no shell, no escaping needed. Non-`.cmd` paths (already a `.js`/real exe)
+// are spawned unchanged.
+export function resolveSpawnTarget(cliPath) {
+  if (!/\.cmd$/i.test(cliPath)) {
+    return { command: cliPath, prefixArgs: [] };
+  }
+  const entry = path.join(path.dirname(cliPath), "..", "playwright", "cli.js");
+  if (!existsSync(entry)) {
+    throw new Error(`gpt_send: cannot resolve the .cmd shim at ${cliPath} to a node entry point (expected ${entry})`);
+  }
+  return { command: process.execPath, prefixArgs: [entry] };
+}
+
 function defaultExec(cliPath, args, { timeoutMs }) {
   return new Promise((resolve, reject) => {
-    execFile(cliPath, args, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+    const { command, prefixArgs } = resolveSpawnTarget(cliPath);
+    execFile(command, [...prefixArgs, ...args], { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
       if (err) {
         reject(Object.assign(new Error(err.message), { cause: err, stdout, stderr }));
         return;
@@ -177,7 +204,39 @@ export async function runCliCommand(subcommand, rest, opts = {}) {
   } catch (e) {
     throw new SendInvalidationError(`CLI_INVALID_JSON:${subcommand}`, { cause: e });
   }
+  // Live-capture finding (fixtures/chatgpt/live_cli_error.json): the real CLI
+  // exits 0 and reports failures as `{isError: true, error: "..."}` on
+  // stdout rather than a non-zero exit / exec rejection. Must be checked
+  // explicitly - otherwise a real error silently falls through as "valid"
+  // JSON with no result/url/array shape.
+  if (parsed && typeof parsed === "object" && parsed.isError === true) {
+    throw new SendInvalidationError(`CLI_ERROR_RESPONSE:${subcommand}`, {
+      cause: new Error(typeof parsed.error === "string" ? parsed.error : "unknown CLI error"),
+    });
+  }
   return unwrapCliResult(parsed);
+}
+
+// Live-capture finding (fixtures/chatgpt/live_tab_list_*.json): `tab-list
+// --json` does NOT return a JSON array of tab objects. It returns a markdown
+// bullet-list STRING under `result`: `- <index>: [(current) ]?[title](url)`.
+// See gpt_watch.mjs's parseTabList for the full rationale (duplicated here,
+// not imported, so the two files keep no shared CLI runner per Gate F).
+const TAB_LIST_LINE_RE = /^-\s*(\d+):\s*(\(current\)\s*)?\[(.*)\]\((.+)\)$/;
+
+export function parseTabList(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (raw && Array.isArray(raw.tabs)) return raw.tabs;
+  if (typeof raw !== "string") return [];
+  const tabs = [];
+  for (const rawLine of raw.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const m = TAB_LIST_LINE_RE.exec(line);
+    if (!m) continue;
+    tabs.push({ index: Number(m[1]), current: Boolean(m[2]), title: m[3], url: m[4] });
+  }
+  return tabs;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +268,7 @@ function isChatgptOrigin(url) {
 
 export async function locateChatgptTab(conversationUrl, opts) {
   const tabs = await runCliCommand("tab-list", [], opts);
-  const list = Array.isArray(tabs) ? tabs : Array.isArray(tabs?.tabs) ? tabs.tabs : [];
+  const list = parseTabList(tabs);
 
   const matches = conversationUrl
     ? list.filter((t) => extractConversationId(t?.url) === extractConversationId(conversationUrl))
@@ -231,15 +290,29 @@ export async function locateChatgptTab(conversationUrl, opts) {
 // Sender flow
 // ---------------------------------------------------------------------------
 
+// Fail-closed guard: a hidden tab (document.visibilityState !== "visible")
+// cannot reliably receive a click - the real CLI's rAF-based actionability
+// check hangs against a background tab and Enter does not submit either.
+// Rather than hang or silently no-op, refuse the send outright.
+export function assertPageVisible(snapshot) {
+  if (snapshot?.visibilityState && snapshot.visibilityState !== "visible") {
+    throw new SendInvalidationError("PAGE_HIDDEN");
+  }
+}
+
 export async function readBaseline(conversationUrl, opts) {
   await locateChatgptTab(conversationUrl, opts);
   const snapshot = await runCliCommand("eval", [BASELINE_SNAPSHOT_SCRIPT], opts);
+  assertPageVisible(snapshot);
   return readBaselineFromSnapshot(snapshot);
 }
 
+// Sends the prompt: fill the editor, then click the send button. (Not
+// `press SEND_BUTTON_SELECTOR` - `press` takes a key name like "Enter", not a
+// CSS selector; clicking is the correct way to activate the send button.)
 export async function sendPrompt(prompt, opts) {
   await runCliCommand("fill", [PROMPT_TEXTAREA_SELECTOR, prompt], opts);
-  await runCliCommand("press", [SEND_BUTTON_SELECTOR], opts);
+  await runCliCommand("click", [SEND_BUTTON_SELECTOR], opts);
 }
 
 export async function waitConversationUrl(opts = {}) {

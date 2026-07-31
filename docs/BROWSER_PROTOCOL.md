@@ -93,7 +93,22 @@ specifically requires the script to be `=== READONLY_SNAPSHOT_SCRIPT`
 ever accepted). `click`, `fill`, `press`, `tab-close`, `tab-new`, `run-code`
 and `show` are absent from the whitelist and never called anywhere in the
 file. `gpt_send.mjs` is the write-capable counterpart and additionally
-whitelists `fill`/`press`.
+whitelists `fill`/`click`/`press`. `sendPrompt()` fills the editor then
+`click`s `SEND_BUTTON_SELECTOR` — not `press <selector>`: the CLI's `press`
+subcommand takes a key name (e.g. `"Enter"`), not a CSS selector, so pressing
+a selector as if it were a key never actually activated Send. `press` stays
+whitelisted for future key-based input but is not currently called.
+
+### 7a. Page-hidden fail-closed (Sender)
+
+Live-capture finding: when the ChatGPT tab is not the visible/foreground tab
+(`document.visibilityState !== "visible"`), the real CLI's `click` hangs
+(its actionability check waits on `requestAnimationFrame`, which browsers
+throttle/suspend on hidden tabs) and pressing Enter does not submit either.
+`BASELINE_SNAPSHOT_SCRIPT` now also returns `visibilityState`, and
+`readBaseline()` calls `assertPageVisible(snapshot)` immediately after
+reading it — before `sendPrompt()` is ever invoked. A hidden page throws
+`SendInvalidationError("PAGE_HIDDEN")` and no `fill`/`click` call is made.
 
 ## 8. Gate G — dashboard is never invoked
 
@@ -181,23 +196,53 @@ refuse-to-overwrite path without racing the filesystem. Because `job_id` is a
 fresh UUID per send, collisions are not expected in practice — this is a
 fail-closed backstop, not the primary uniqueness mechanism.
 
-## 16. Known integration risks (not exercised against a live browser)
+## 15a. `.cmd` shim spawning (live-canary finding, 2026-08-01)
 
-This worktree has no attached Chrome/CDP endpoint, so none of the above was
-run against real `@playwright/cli` output. Two things should be double-checked
-at first live run against the shared ChatGPT tab (`http://127.0.0.1:9225`,
-per `docs/GBB002_SPIKE_REPORT.md`):
+Both files' `defaultExec()` originally called `execFile(cliPath, args, {...})`
+directly on the npm `.cmd` shim path. Recent Node refuses to spawn a
+`.bat`/`.cmd` file that way ("spawn EINVAL" - Node's April 2024 batch-file
+command-injection CVE fix requires an explicit `shell: true`), which this
+repo's test suite never caught because every test injects a fake `exec` and
+never exercises the real spawn path. `resolveSpawnTarget(cliPath)` (exported
+from both files, duplicated per Gate F) resolves a `.cmd` path to the node
+entry point it wraps (`playwright.cmd`'s own body invokes
+`%dp0%\..\playwright\cli.js`) and `defaultExec` spawns `node <entry> <args>`
+directly - a plain executable + argv array, no shell, so no argument-escaping
+or injection risk is introduced. Verified against the real shared Chrome; see
+`fixtures/chatgpt/live_canary_send_watch.json`.
 
-- **CLI `--json` envelope shape.** `unwrapCliResult()` assumes
-  `{"result": <value>}`, unwrapping a JSON-encoded string `result` one level
-  if needed. The GBB-002 spike only confirmed this for primitive string
-  returns (`eval "() => document.title"`); the object-returning shape used
-  here (`READONLY_SNAPSHOT_SCRIPT` / `BASELINE_SNAPSHOT_SCRIPT`) was not
-  spiked and should be reconfirmed before first production use.
-- **ChatGPT DOM selectors.** `READONLY_SNAPSHOT_SCRIPT`'s
-  `[data-message-author-role="assistant"]` / stop-button / continue-button
-  selectors and `gpt_send.mjs`'s `PROMPT_TEXTAREA_SELECTOR` /
-  `SEND_BUTTON_SELECTOR` are based on commonly-documented ChatGPT UI
-  attributes, not verified against the live DOM in this environment. If the
-  UI has since changed, update only these constants — the gate logic around
+## 15b. `baseline_invalid` surfaces immediately (P1-6 fail-closed fix)
+
+`decideState()` now checks `detections.includes("baseline_invalid")` before
+the stability gate, returning `NEEDS_DECISION` right away. Previously it was
+only checked *after* `stability.stable`, but a malformed payload (e.g. a
+selector that no longer matches anything live) makes
+`extractCandidateMessage()` report `baseline_invalid` on every poll and never
+push a hash sample - so stability could never become true and the Watcher
+would poll `WAITING` forever instead of ever surfacing the problem. It never
+produced a false empty-set `DONE` (the bug the acceptance criteria call out
+explicitly), but it also never resolved. Matches the existing `login_wall`
+precedent of deciding immediately regardless of stability.
+
+## 16. Live canary results (P1-2, 2026-08-01)
+
+A real end-to-end run against the shared ChatGPT tab (`http://127.0.0.1:9225`)
+has since resolved the two risks this section used to flag as unexercised;
+see `fixtures/chatgpt/live_canary_send_watch.json` for the full transcript
+(job.json / result.json / reply.md, hashes, timings).
+
+- **CLI `--json` envelope shape.** Confirmed for the object-returning shape
+  (`READONLY_SNAPSHOT_SCRIPT` / `BASELINE_SNAPSHOT_SCRIPT`) as well as the
+  primitive-string and array-returning shapes and the `isError: true` /
+  exit-0 error shape - all captured as `fixtures/chatgpt/live_*.json` and
+  consumed directly by `tests/baseline.test.mjs` / `tests/completion.test.mjs`.
+- **ChatGPT DOM selectors.** `PROMPT_TEXTAREA_SELECTOR` (`#prompt-textarea`),
+  `SEND_BUTTON_SELECTOR` (`[data-testid="send-button"]`), and
+  `READONLY_SNAPSHOT_SCRIPT`'s `[data-message-author-role="assistant"]` /
+  stop-button selectors all matched the live DOM in this run. If the UI
+  changes in the future, update only these constants — the gate logic around
   them does not need to change.
+- **What a full live run additionally required and fixed:** the `.cmd` shim
+  spawn issue (§15a) and the `sendPrompt()` `press`-with-a-selector bug (§7)
+  both only surfaced once actually run against the real CLI/DOM - neither
+  was, or could have been, caught by the fake-`exec` unit test suite alone.

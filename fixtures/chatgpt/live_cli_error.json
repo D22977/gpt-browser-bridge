@@ -1,0 +1,7 @@
+{
+  "_captured": "2026-08-01, real @playwright/cli 0.1.17. Two real error responses captured against the live browser: an eval syntax error and a tab-select on a non-existent tab index.",
+  "_finding": "Both exit with process exit code 0 (execFile does NOT reject) and report the error via `{\"isError\": true, \"error\": \"...\"}` on stdout instead. gpt_send.mjs/gpt_watch.mjs previously only treated a non-zero exit / exec throw as CLI_EXEC_FAILED and never inspected `isError`, so a real CLI error would have parsed as valid JSON with no `result`/`url`/array shape - happening to still fail closed downstream (TAB_NOT_FOUND / VERIFY_URL_MISMATCH) but mislabeled and by accident, not by design. Fixed: runCliCommand() now explicitly checks `parsed.isError === true` and throws CLI_ERROR_RESPONSE.",
+  "stdout_eval_syntax_error": "{\n  \"isError\": true,\n  \"error\": \"SyntaxError: Unexpected token ')'\\n    at eval (eval at evaluate (:303:30), <anonymous>:2:38)\\n    at UtilityScript.evaluate (<anonymous>:305:16)\\n    at UtilityScript.<anonymous> (<anonymous>:1:44)\"\n}\n",
+  "stdout_tab_select_not_found": "{\n  \"isError\": true,\n  \"error\": \"Error: Tab 99 not found\"\n}\n",
+  "stdout_browser_not_open": "{\n  \"isError\": true,\n  \"error\": \"The browser 'gbb003-live' is not open, please run open first\"\n}\n"
+}
