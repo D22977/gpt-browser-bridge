@@ -71,8 +71,9 @@ todo 0
 - `a9ab322` GBB-001 report: finalize
 - `6fb031c` GBB-001 report: finalize
 - `ab17a73` GBB-001 report: finalize
+- `5d2fcce` GBB-001 report: finalize
 
-最後 commit SHA: `ab17a73`
+最後 commit SHA: `5d2fcce`（本卡最終 HEAD；其後的 report 記錄 commit 為簿記性質）
 
 ## 與父工單 §12 的對帳
 
