@@ -1,0 +1,18 @@
+{
+  "name": "gpt-browser-bridge",
+  "version": "0.1.0",
+  "description": "Windows-local browser collaboration bridge for ChatGPT review jobs (ORCA + CLI agents).",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.mjs\""
+  },
+  "dependencies": {
+    "playwright-core": "^1.62.1",
+    "write-file-atomic": "^8.0.0",
+    "zod": "^4.4.3"
+  }
+}
