@@ -5,21 +5,27 @@
 
 param([switch]$Release)
 
-$sig = @'
-[DllImport("kernel32.dll")]
-public static extern uint SetThreadExecutionState(uint esFlags);
+if (-not ('Win32.ThreadExecutionState' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace Win32 {
+    public class ThreadExecutionState {
+        [DllImport("kernel32.dll")]
+        public static extern uint SetThreadExecutionState(uint esFlags);
+    }
+}
 '@
-
-$type = Add-Type -MemberDefinition $sig -Name "ThreadExecutionState" -Namespace "Win32" -PassThru
+}
 
 # ES_CONTINUOUS = 0x80000000, ES_SYSTEM_REQUIRED = 0x00000001
-$ES_CONTINUOUS = 0x80000000
-$ES_SYSTEM_REQUIRED = 0x00000001
+$ES_CONTINUOUS = [uint32]::Parse("80000000", [System.Globalization.NumberStyles]::HexNumber)
+$ES_SYSTEM_REQUIRED = [uint32]::Parse("00000001", [System.Globalization.NumberStyles]::HexNumber)
 
 if ($Release) {
-    $null = $type::SetThreadExecutionState($ES_CONTINUOUS)
+    $null = [Win32.ThreadExecutionState]::SetThreadExecutionState($ES_CONTINUOUS)
     Write-Output "keep-awake: execution state released"
 } else {
-    $null = $type::SetThreadExecutionState($ES_CONTINUOUS -bor $ES_SYSTEM_REQUIRED)
+    $null = [Win32.ThreadExecutionState]::SetThreadExecutionState($ES_CONTINUOUS -bor $ES_SYSTEM_REQUIRED)
     Write-Output "keep-awake: system sleep suppressed (continuous)"
 }
