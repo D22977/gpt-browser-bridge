@@ -1198,6 +1198,95 @@ Q128 fresh-context T2 review pack
 * Reviewer。
 * 晨間摘要。
 
+## 16.1 GBB-005 收斂執行計畫（GBB005-ORCHESTRATOR-CONVERGENCE-R01，2026-08-01 控制塔確立）
+
+### 父包目標
+
+1. 收斂 GBB-005 的「永久 Reviewer 核心」：將 Gate G 清單（16 項）逐卡實作並留下可重算證據。
+2. 凍結可能被 Maestro 取代的 CLI 監視（L2/L3，已完成於 G0）。
+3. 通過 Gate G 後才允許隔離 PoC 比較 Maestro 與現有 CLI 監視能力。
+4. Maestro 通過 Gate M 後才評估 chat2api（新卡，不在本 R01 範圍）。
+
+### 卡序總覽
+
+| 卡 | 名稱 | 對應 Gate G 清單項 | 狀態 |
+| --- | ---- | ---- | ---- |
+| G0 | SAFE-CUTOVER（現場保存、L2/L3 凍結、清單建立） | 12、13-16（宣告層） | **已完成**（699962a + 51a1d9f，Grok + 網頁 GPT 雙審 PASS） |
+| G1A | EVIDENCE-CHAIN-CORE（雜湊鏈核心契約，純離線） | 5、6（core 層，不得關閉） | 待派 |
+| G1B | EVIDENCE-CHAIN-INTEGRATION（接入管線 + live canary） | 5、6（關閉層） | 待派（G1A 後） |
+| G2 | LIVE-REVIEW-CANARIES（真實 PASS 路徑與 fail-closed） | 1、2、3 | 待派 |
+| G3 | STATE-INVARIANT-METRICS（狀態機唯一真相） | 7、8、9、10、11 | 待派 |
+| G4 | GATE-G-CLOSE（證據彙整與裁決） | 4、13、14、15、16 | 待派 |
+| ORCH-POC-001 | Maestro 隔離 PoC 比較（Gate G 通過後才可派） | — | 未啟動 |
+| ORCH-POC-002 | Maestro shadow 對照（視 001 結果） | — | 未啟動 |
+| ORCH-POC-003 | Gate M 決策（Maestro 是否接任 CLI 監視） | — | 未啟動 |
+
+所有卡共用審查流程：DeepSeek Free worker（opencode run --auto 非互動）施工 → Grok 第二意見 → 網頁版 GPT 最終裁決；任一 FIX_REQUIRED 由同一 worker 退修後重審。
+
+> **2026-08-01 卡序修正（網頁 GPT 方向徵詢裁定，conversation `6a6d6534`）**：原 G1 拆為 G1A（核心契約）＋G1B（管線整合）兩張原子卡。原因：原 G1 同時含資料邊界、hash 契約、檔案 I/O、既有 pipeline 整合、live 證據，單卡風險面過多（易卡死、假 fixture 全過但 live 不成立）。裁定：先派 G1A；不派 G3 提前，不新增 G0.5 治理卡。完整攻防與定稿見本地 `%TEMP%\opencode\pw\dir_response.md`。
+
+### G1A-EVIDENCE-CHAIN-CORE（雜湊鏈核心契約，2026-08-01 網頁 GPT 收斂定稿）
+
+- 定位：純離線核心。本卡**不得關閉 Gate G 5/6**；不得接入 ct-web-review、不得修改 sender/watcher/supervisor/recovery、不得 live canary、不得更新 Gate G 狀態。
+- 目標：對 expected run context → raw response bytes → capture bytes → parser output bytes 建立帶執行輪次身分的順序 SHA-256 鏈，能偵測：任一階段一 byte 變更、缺檔/截斷、階段交換、跨 run 拼接、舊 attempt 重放、context 不一致、schema/version/algorithm 不支援。所有失敗 fail-closed exit 40 + 穩定 machine-readable error code。
+- Error codes：`EVIDENCE_MISSING`、`EVIDENCE_HASH_MISMATCH`、`EVIDENCE_CONTEXT_MISMATCH`、`EVIDENCE_STAGE_ORDER_INVALID`、`EVIDENCE_MANIFEST_INVALID`、`EVIDENCE_UNSUPPORTED_VERSION`、`EVIDENCE_IO_ERROR`。
+- Context schema（最小欄位，外部提供，verify 不得自行推導）：`schema_version: "gbb005-evidence-chain-v1"`、`task_id`、`attempt`、`review_run_id`、`request_sha256`（64 hex）、`conversation_identity_sha256`（64 hex）。
+- Hash 鏈契約（domain separation 順序鏈，digest lowercase hex，manifest 存每階段 byte length）：
+  `Hctx = SHA256(DOMAIN_CONTEXT || stable_context_bytes)`；`Hraw = SHA256(DOMAIN_RAW || Hctx || raw_bytes)`；`Hcapture = SHA256(DOMAIN_CAPTURE || Hraw || capture_bytes)`；`Hparsed = SHA256(DOMAIN_PARSED || Hcapture || parsed_bytes)`；chain root = Hparsed。
+- Bytes 規則：artifacts 只接受 Buffer/Uint8Array 原始 bytes，**不做文字 canonicalization**（UTF-8/CRLF/BOM 差異 = bytes 差異）；僅 manifest 固定序列化（UTF-8、無 BOM、LF、key 排序、固定 schema）。
+- Threat model：保護意外截斷/錯配/階段交換/重放/中途寫壞/非預期修改；**不宣稱**防禦已控制本機的惡意程序，也不宣稱密碼學認證 reviewer 身分（Gate G 表述用 "evidence integrity and replay-detection chain under trusted local execution boundary"）。
+- 產出物：`docs/GBB005_G1_EVIDENCE_CHAIN_SPEC.md`、`src/review_evidence_chain.mjs`（buildEvidenceChain/verifyEvidenceChain，公開介面見定稿）、`src/gbb005_evidence_chain_cli.mjs`（build/verify 子命令）、`tests/review_evidence_chain.test.mjs`、`fixtures/review_evidence/**`（合成資料）、`docs/WORKER_REPORT_GBB005_G1A.md`。
+- 測試矩陣（全部必過）：正向（多次執行同 chain root、deterministic manifest、Unicode/CRLF/LF/BOM/NUL Buffer、build 後 verify 成功 exit 0）；負向 20+ 案例（各階段一 byte 變更/截斷/缺失/交換、attempt/review_run/request/conversation 重放、舊 manifest 配新 context、缺欄位、非 lowercase hex、不支援 version/algorithm、length 不符、String 冒充 binary、CLI 不存在檔案），每案例須斷言失敗類型，不只「有拋錯」。CLI 以 child process 測試真實 exit code（成功 0、mismatch/replay/missing/unsupported 全 40）。
+- 驗證命令：`node --check` 兩個 .mjs + `node --test tests/review_evidence_chain.test.mjs`（不行改 package.json 時直接 node --test 或回報 BLOCKED）。
+- Allowed paths：`docs/GBB005_G1_EVIDENCE_CHAIN_SPEC.md`、`docs/WORKER_REPORT_GBB005_G1A.md`、`src/review_evidence_chain.mjs`、`src/gbb005_evidence_chain_cli.mjs`、`tests/review_evidence_chain.test.mjs`、`fixtures/review_evidence/**`。禁止：現有 src 模組、ct-web-review/ct-transition、checkpoint schema、Gate G 狀態、父工單、package.json、.gitignore、Maestro/chat2api。
+- 完成定義：以上全部成立，且 Worker 報告明確寫明「G1 未完成，等 G1B」；若找不到 RAW/CAPTURE/PARSED 在現有 pipeline 的實際接入邊界 → BLOCKED，不得以理想化架構圖替代。
+
+### G1B-EVIDENCE-CHAIN-INTEGRATION（管線整合，G1A 後派）
+
+- 進入條件：G1A PASS。範圍限制（防止再變大卡）：接入既有三個產物（watcher output/capture file/parser result，adapter-level integration test 用現有函式或真實 child process，不得新建 fake pipeline）；atomic write→read-back→verify（temp file + flush/fsync + atomic rename）；exit 40 與 checkpoint error code；一輪 live success canary + 一輪 live artifact mutation canary（正式 capture artifact 改一 byte 後重跑 verifier 必須 exit 40；mismatch 後 checkpoint 不得進入 accepted/PASS transition）。
+- 關閉條件：Gate G 5/6 由 G1B 關閉（G1A 完成時維持 NOT_TESTED）。不得同時做 G2/G3 內容。live evidence 遵循既有忽略規則不入 Git。
+
+### G2-LIVE-REVIEW-CANARIES（真實 PASS 路徑與 fail-closed）
+
+- 目標：對應清單 1/2/3：整個流程存在可實際走通、可重現的真實 PASS 路徑；缺必要格式/欄位時 fail-closed；逾時出口固定 exit code 30 且不自動重送。
+- 完成定義：
+  - `fixtures/canaries/`：PASS 路徑實錄（live canary，經共用 Chrome）、invalid fixture、timeout fixture。
+  - 三路徑 exit code 實測紀錄（0 / 20 / 30）。
+  - 不重複送審驗證（job_id/attempt 唯一性）納入 fixtures。
+- Allowed paths：`fixtures/`、`docs/`、`tests/`（若需 harness 測試）。
+- 註：live canary 由 harness 驅動，worker 只負責啟動、分析、報告，不互動 TUI。
+
+### G3-STATE-INVARIANT-METRICS（狀態機唯一真相）
+
+- 目標：對應清單 7/8/9/10/11：project_state.json 唯一真相（投影不得反向更新）；Shadow Mode hash invariant；transition validator dry-run 不寫入 state；run_events.jsonl／run_metrics.json 由程式產生；Morning Summary 在 COMPLETE／HALT／TIMEOUT／BLOCKED 共用出口更新。
+- 完成定義：
+  - 狀態機測試套件（dry-run 前後 state hash 比對、shadow run 前後 hash、各出口 summary 產生時間戳）。
+  - 產生器實作或既有 harness 補足；內容與實際執行一致。
+- Allowed paths：`src/`、`tests/`、`tools/`、`docs/`。
+
+### G4-GATE-G-CLOSE（證據彙整與裁決）
+
+- 目標：對應清單 4（不重複送審）與 13/14/15/16；彙整 G1-G3 證據成 Gate G 證據包並裁決。
+- 完成定義：
+  - `docs/GBB005_GATE_G_EVIDENCE_PACK.md`：16 項逐項掛證據（或明確 NOT_TESTED 並列出阻因）。
+  - `docs/GBB005_GATE_G_VERDICT.md`：結論只允許 `通過` / `退修` / `受阻`。
+  - Gate G 未通過前禁止派 ORCH-POC-001。
+- Allowed paths：`docs/`、`artifacts/`。
+
+### ORCH-POC-001~003（Maestro 隔離比較，Gate G 後）
+
+- ORCH-POC-001：在隔離 worktree 比較 Maestro 監視能力 vs 現有 CLI 監視（L0/L1 契約、no-output 判定、timeout/停止語義），產出比較報告；不得改動主鏈路、不得解凍 L2/L3。
+- ORCH-POC-002：若 001 顯示劣於或等於現有 → 建議凍結 Maestro，不派 002；若優於 → shadow 對照實測。
+- ORCH-POC-003：Gate M 決策（Maestro 是否接任）；通過才開 chat2api 評估新卡。
+- 三卡都不得在 Gate G 通過前派工。
+
+### 執行紀錄（Control Tower）
+
+- 2026-08-01 G0：commit `699962a`（checkpoint、scope amendment、Gate G checklist v3.0、PILOT_REPORT 保存）；Grok 第一輪 FIX_REQUIRED（P2-1~P2-4：權限/Git scope/License/Reviewer 證據）→ rework commit `51a1d9f`（checklist 13-16、review_history）→ Grok 複審 PASS → 網頁 GPT 最終 PASS（`6a6d61cc`）→ governance committed（state=GOVERNANCE_DONE）。
+- 2026-08-01 卡序修正：網頁 GPT 方向徵詢（`6a6d6534`）給三建議（G1 拆卡／G3 提前／G0.5 治理審計），攻擊並收斂後裁定 G1A-EVIDENCE-CHAIN-CORE 為下一張卡（10 輪攻擊、定稿後再攻 2 剩餘弱點均有承接）。
+- 2026-08-01 G1A：commits `a52a463` + `16d0774`（spec/src/tests/fixtures/report，34/34 tests、npm 183/183）；worker 曾誤判自身 checkpoint 為並行 worker 而 STOPPED（控制塔查證為自我混淆，非真實並行）；Grok PASS（無 findings）→ 網頁 GPT 最終 PASS（`6a6d6df2`）→ governance committed。Gate G 5/6 維持 NOT_TESTED。
+- **2026-08-01 G1B 裁決（Grok + 網頁 GPT 雙審意見，控制塔採納）**：採 (b) 最小 pipeline 變更——(1) runCliCommand() 保留實際收到的 raw stdout bytes（不重新由文字/object 反向生成）；(2) persistResult() 前建立並驗證 evidence chain；(3) CAPTURE 定義為「parser 實際消費之 structured intermediate 的版本化、確定性 bytes 表示」，parser input 必須由這些 bytes 解碼而來或有可驗證的 byte→object 等價檢查，不得另序列化一份 parser 未消費的 object；(4) RAW 透傳可為明確標示之 degraded fallback，但**不得單獨作為關閉 Gate G 5/6 的證據**，無真實 CAPTURE 邊界即維持 BLOCKED/NOT_TESTED；(5) 不新增 snapshot、監視層級、timeout、自動恢復等 L2/L3 能力。G1B 需含一輪 live success canary + 一輪 live artifact mutation canary（mismatch 後 checkpoint 不得進入 accepted/PASS transition）。
+
 ---
 
 # 17. Git 與 Worktree 治理
