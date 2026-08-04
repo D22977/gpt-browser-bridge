@@ -10,6 +10,8 @@ import {
   workerReportSchema,
   reviewerReportSchema,
   agentReportSchema,
+  isChatgptConversationUrl,
+  extractConversationId,
 } from "../src/contracts.mjs";
 
 const uuid = "550e8400-e29b-41d4-a716-446655440000";
@@ -120,6 +122,73 @@ test("job.json rejects explicit default ports (443/80) and other ports", () => {
   ]) {
     assert.throws(() => jobSchema.parse(validJob({ conversation_url: bad })), /conversation_url/);
   }
+});
+
+// ---------------------------------------------------------------------------
+// GBB-URL-001: GPT-project conversation URLs (/g/<project-id>/c/<uuid-ish>)
+// must be accepted alongside the legacy /c/<uuid-ish> form, with every other
+// gate (host, scheme, port, credentials, UUID-shape) unchanged.
+// ---------------------------------------------------------------------------
+
+test("job.json accepts a GPT-project conversation URL (/g/<project-id>/c/<id>)", () => {
+  const parsed = jobSchema.parse(
+    validJob({ conversation_url: `https://chatgpt.com/g/g-p-680e34d1c2b4-review-bot/c/${uuid}` })
+  );
+  assert.equal(parsed.conversation_url, `https://chatgpt.com/g/g-p-680e34d1c2b4-review-bot/c/${uuid}`);
+});
+
+test("job.json accepts a GPT-project conversation URL with query/hash tolerance", () => {
+  const parsed = jobSchema.parse(
+    validJob({ conversation_url: `https://chatgpt.com/g/g-p-680e34d1c2b4-review-bot/c/${uuid}?utm_source=x#top` })
+  );
+  assert.equal(parsed.conversation_url, `https://chatgpt.com/g/g-p-680e34d1c2b4-review-bot/c/${uuid}?utm_source=x#top`);
+});
+
+test("job.json rejects a GPT-project URL missing the /c/<id> suffix", () => {
+  for (const bad of [
+    `https://chatgpt.com/g/g-p-680e34d1c2b4-review-bot`,
+    `https://chatgpt.com/g/g-p-680e34d1c2b4-review-bot/c/`,
+    `https://chatgpt.com/g//c/${uuid}`,
+    `https://chatgpt.com/g/g-p-680e34d1c2b4-review-bot/x/${uuid}`,
+  ]) {
+    assert.throws(() => jobSchema.parse(validJob({ conversation_url: bad })), /conversation_url/);
+  }
+});
+
+test("job.json rejects a GPT-project URL with a malformed conversation id", () => {
+  assert.throws(
+    () => jobSchema.parse(validJob({ conversation_url: `https://chatgpt.com/g/g-p-680e34d1c2b4-review-bot/c/not-a-valid-id!` })),
+    /conversation_url/
+  );
+});
+
+test("job.json still rejects look-alike hostnames, explicit ports and non-https on the GPT-project form", () => {
+  for (const bad of [
+    `https://evilchatgpt.com/g/g-p-680e34d1c2b4-review-bot/c/${uuid}`,
+    `https://chatgpt.com:8443/g/g-p-680e34d1c2b4-review-bot/c/${uuid}`,
+    `http://chatgpt.com/g/g-p-680e34d1c2b4-review-bot/c/${uuid}`,
+    `https://user@chatgpt.com/g/g-p-680e34d1c2b4-review-bot/c/${uuid}`,
+  ]) {
+    assert.throws(() => jobSchema.parse(validJob({ conversation_url: bad })), /conversation_url/);
+  }
+});
+
+test("extractConversationId returns the same id for both the legacy and GPT-project URL forms", () => {
+  const legacy = `https://chatgpt.com/c/${uuid}`;
+  const project = `https://chatgpt.com/g/g-p-680e34d1c2b4-review-bot/c/${uuid.toUpperCase()}`;
+  assert.equal(extractConversationId(legacy), uuid);
+  assert.equal(extractConversationId(project), uuid);
+});
+
+test("extractConversationId returns null for non-conversation paths and unparseable URLs", () => {
+  assert.equal(extractConversationId(`https://chatgpt.com/`), null);
+  assert.equal(extractConversationId(`https://chatgpt.com/g/g-p-x`), null);
+  assert.equal(extractConversationId("not a url"), null);
+});
+
+test("isChatgptConversationUrl accepts both forms directly", () => {
+  assert.equal(isChatgptConversationUrl(`https://chatgpt.com/c/${uuid}`), true);
+  assert.equal(isChatgptConversationUrl(`https://chatgpt.com/g/g-p-680e34d1c2b4-review-bot/c/${uuid}`), true);
 });
 
 test("job.json rejects a bad prompt hash", () => {

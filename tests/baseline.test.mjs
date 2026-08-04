@@ -201,6 +201,52 @@ test("locateChatgptTab fails closed on multiple matches (never guesses)", async 
   );
 });
 
+// ---------------------------------------------------------------------------
+// GBB-URL-001: GPT-project conversation URLs (/g/<project-id>/c/<uuid-ish>)
+// must match the same tab as the legacy /c/<uuid-ish> form, in either
+// direction (job URL legacy + tab URL project, and vice versa).
+// ---------------------------------------------------------------------------
+
+test("locateChatgptTab matches a GPT-project tab URL against a legacy job conversationUrl (same id)", async () => {
+  const conversationId = "6a6cc7f7-6ec8-83ee-8c86-8fe600980949";
+  const tabs = [
+    { index: 0, current: true, title: "GBB project chat", url: `https://chatgpt.com/g/g-p-680e34d1-review-bot/c/${conversationId}` },
+  ];
+  const exec = fakeExecFactory({
+    "tab-list": () => jsonStdout(tabs),
+    "tab-select": () => jsonStdout(null),
+  });
+  const match = await locateChatgptTab(`https://chatgpt.com/c/${conversationId}`, { session: "s", exec });
+  assert.equal(match.index, 0);
+  assert.equal(exec.counts["tab-select"], 1);
+});
+
+test("locateChatgptTab matches a legacy tab URL against a GPT-project job conversationUrl (same id)", async () => {
+  const conversationId = "6a6cc7f7-6ec8-83ee-8c86-8fe600980949";
+  const tabs = [{ index: 0, current: true, title: "GBB legacy chat", url: `https://chatgpt.com/c/${conversationId}` }];
+  const exec = fakeExecFactory({
+    "tab-list": () => jsonStdout(tabs),
+    "tab-select": () => jsonStdout(null),
+  });
+  const match = await locateChatgptTab(
+    `https://chatgpt.com/g/g-p-680e34d1-review-bot/c/${conversationId}`,
+    { session: "s", exec }
+  );
+  assert.equal(match.index, 0);
+  assert.equal(exec.counts["tab-select"], 1);
+});
+
+test("locateChatgptTab still fails closed when a GPT-project tab URL carries a different conversation id", async () => {
+  const conversationId = "6a6cc7f7-6ec8-83ee-8c86-8fe600980949";
+  const otherId = "00000000-0000-0000-0000-000000000000";
+  const tabs = [{ index: 0, current: true, title: "unrelated chat", url: `https://chatgpt.com/g/g-p-680e34d1-review-bot/c/${otherId}` }];
+  const exec = fakeExecFactory({ "tab-list": () => jsonStdout(tabs) });
+  await assert.rejects(
+    () => locateChatgptTab(`https://chatgpt.com/c/${conversationId}`, { session: "s", exec }),
+    (err) => err instanceof SendInvalidationError && err.code === "TAB_NOT_FOUND"
+  );
+});
+
 test("waitConversationUrl polls until the conversation URL appears", async () => {
   const urls = ["https://chatgpt.com/", "https://chatgpt.com/", "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949"];
   let i = 0;

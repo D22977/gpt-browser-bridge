@@ -13,7 +13,7 @@ import { mkdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import writeFileAtomic from "write-file-atomic";
-import { isChatgptConversationUrl, jobSchema, SCHEMA_VERSION } from "./contracts.mjs";
+import { isChatgptConversationUrl, extractConversationId, jobSchema, SCHEMA_VERSION } from "./contracts.mjs";
 import { sha256Hex } from "./result_store.mjs";
 
 // ---------------------------------------------------------------------------
@@ -248,17 +248,6 @@ export function parseTabList(raw) {
 // - Otherwise (brand new conversation), require exactly one tab whose origin
 //   is chatgpt.com. Zero or multiple matches fail closed.
 // ---------------------------------------------------------------------------
-
-function extractConversationId(url) {
-  if (typeof url !== "string") return null;
-  try {
-    const parsed = new URL(url);
-    const m = parsed.pathname.match(/^\/c\/([0-9a-f-]+)$/i);
-    return m ? m[1].toLowerCase() : null;
-  } catch {
-    return null;
-  }
-}
 
 function isChatgptOrigin(url) {
   try {

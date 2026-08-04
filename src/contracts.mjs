@@ -11,11 +11,37 @@ export const SCHEMA_VERSION = 1;
 // job.json  (written once by the Sender; immutable afterwards)
 // ---------------------------------------------------------------------------
 // Spec: parent work order §14 "Sender 必做" / §7.4.
+// Conversation path shapes accepted (GBB-URL-001): the legacy direct form
+// "/c/<uuid-ish>" and the GPT-project form "/g/<project-id>/c/<uuid-ish>"
+// (e.g. https://chatgpt.com/g/g-p-.../c/<uuid>). The project-id segment is
+// opaque (real project slugs vary in shape) but is restricted to a
+// conservative charset and cannot contain "/", so it cannot smuggle extra
+// path segments past this check. Capture group 1 always yields the
+// conversation id itself, shared with tab conversation-ID matching in
+// gpt_send.mjs so both stay in lockstep.
+const CONVERSATION_PATH_RE = /^\/(?:g\/[0-9a-zA-Z._-]+\/)?c\/([0-9a-f-]+)$/i;
+
+// Extracts the conversation id from a ChatGPT conversation URL (either the
+// legacy "/c/<id>" or GPT-project "/g/<project-id>/c/<id>" form), lower-cased.
+// Returns null for anything that fails to parse as a URL or does not match
+// one of those two path shapes.
+export function extractConversationId(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  const m = CONVERSATION_PATH_RE.exec(parsed.pathname);
+  return m ? m[1].toLowerCase() : null;
+}
+
 // Fail-closed conversation URL check (P1-2 rework): the hostname must be
 // exactly "chatgpt.com"; subdomains, look-alike hostnames, userinfo, explicit
 // ports (including default ports such as :443/:80), non-https schemes and
-// non-"/c/<uuid-ish>" paths are all rejected. Query/hash are tolerated (URL
-// parsing separates them from hostname/path).
+// paths that are not one of the two conversation-path shapes above are all
+// rejected. Query/hash are tolerated (URL parsing separates them from
+// hostname/path).
 // Note: WHATWG URL normalization drops explicit default ports, so the check
 // for explicit ports must inspect the RAW value's authority, not parsed.port.
 export function isChatgptConversationUrl(value) {
@@ -31,7 +57,7 @@ export function isChatgptConversationUrl(value) {
     parsed.port !== "" ||
     parsed.username !== "" ||
     parsed.password !== "" ||
-    !/^\/c\/[0-9a-f-]+$/i.test(parsed.pathname)
+    extractConversationId(value) === null
   ) {
     return false;
   }
