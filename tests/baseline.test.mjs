@@ -25,6 +25,8 @@ import {
   sendPrompt,
   readBaseline,
   assertPageVisible,
+  validateAttachments,
+  ALLOWED_CLI_SUBCOMMANDS,
   SEND_BUTTON_SELECTOR,
   resolveSpawnTarget,
 } from "../src/gpt_send.mjs";
@@ -586,4 +588,177 @@ test("resolveSpawnTarget passes a non-.cmd path through unchanged (already a rea
   const target = resolveSpawnTarget("C:\\some\\path\\playwright-core.js");
   assert.equal(target.command, "C:\\some\\path\\playwright-core.js");
   assert.deepEqual(target.prefixArgs, []);
+});
+
+// ---------------------------------------------------------------------------
+// File-upload attachments (GBB file-upload card): support approved web-chat
+// review via file upload instead of passing large review pack text as a CLI
+// fill argument. `upload` joins the Gate A allowlist, is invoked with the
+// attachment paths before `fill`, and every attachment path is validated
+// (explicit regular file, no missing/non-file paths) before any browser
+// mutation happens.
+// ---------------------------------------------------------------------------
+
+test("ALLOWED_CLI_SUBCOMMANDS includes upload alongside the existing Sender-legal subcommands", () => {
+  assert.ok(ALLOWED_CLI_SUBCOMMANDS.includes("upload"));
+  // Gate A stays closed: still no tab-close/tab-new/run-code/show.
+  assert.deepEqual(
+    [...ALLOWED_CLI_SUBCOMMANDS].sort(),
+    ["click", "eval", "fill", "press", "tab-list", "tab-select", "upload"]
+  );
+});
+
+test("validateAttachments is a no-op returning [] when attachments is omitted or null", async () => {
+  assert.deepEqual(await validateAttachments(undefined), []);
+  assert.deepEqual(await validateAttachments(null), []);
+});
+
+test("validateAttachments accepts an existing regular file", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-upload-valid-"));
+  const filePath = path.join(dir, "review_pack.pdf");
+  await writeFile(filePath, "stub bytes");
+  const result = await validateAttachments([filePath]);
+  assert.deepEqual(result, [filePath]);
+});
+
+test("validateAttachments rejects a missing attachment path with a structured SendInvalidationError", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-upload-missing-"));
+  const missingPath = path.join(dir, "does_not_exist.pdf");
+  await assert.rejects(
+    () => validateAttachments([missingPath]),
+    (err) => err instanceof SendInvalidationError && err.code === "ATTACHMENT_NOT_FOUND"
+  );
+});
+
+test("validateAttachments rejects a non-file attachment path (a directory) without reading it", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-upload-dir-"));
+  await assert.rejects(
+    () => validateAttachments([dir]),
+    (err) => err instanceof SendInvalidationError && err.code === "ATTACHMENT_NOT_A_FILE"
+  );
+});
+
+test("sendPrompt uploads attachments before filling the editor, then clicks send (allowlist/upload order)", async () => {
+  const exec = fakeExecFactory({
+    upload: () => jsonStdout(null),
+    fill: () => jsonStdout(null),
+    click: () => jsonStdout(null),
+  });
+  await sendPrompt("hello", { session: "s", exec, attachments: ["C:\\pack\\review.pdf", "C:\\pack\\notes.txt"] });
+  assert.deepEqual(exec.calls.map((c) => c.args[2]), ["upload", "fill", "click"]);
+  assert.deepEqual(exec.calls[0].args.slice(3, 5), ["C:\\pack\\review.pdf", "C:\\pack\\notes.txt"]);
+});
+
+test("sendPrompt never calls upload when attachments is omitted or empty (default behavior preserved)", async () => {
+  const exec = fakeExecFactory({
+    fill: () => jsonStdout(null),
+    click: () => jsonStdout(null),
+  });
+  await sendPrompt("hello", { session: "s", exec });
+  await sendPrompt("hello", { session: "s", exec, attachments: [] });
+  assert.equal(exec.counts.upload, undefined);
+  assert.deepEqual(exec.calls.map((c) => c.args[2]), ["fill", "click", "fill", "click"]);
+});
+
+test("sendJob rejects a missing attachment before touching the browser at all", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-upload-sendjob-missing-"));
+  const missingPath = path.join(dir, "does_not_exist.pdf");
+  const exec = fakeExecFactory({
+    "tab-list": () => jsonStdout([]),
+  });
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "gbb-upload-sendjob-runtime-"));
+  await assert.rejects(
+    () =>
+      sendJob({
+        prompt: "review pack T2",
+        attempt: 1,
+        conversationUrl: "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949",
+        runtimeRoot,
+        attachments: [missingPath],
+        session: "s",
+        exec,
+        sleep: async () => {},
+        now: () => Date.parse("2026-08-01T09:00:00+08:00"),
+        existsCheck: async () => false,
+      }),
+    (err) => err instanceof SendInvalidationError && err.code === "ATTACHMENT_NOT_FOUND"
+  );
+  assert.equal(exec.counts["tab-list"], undefined, "must never contact the browser when an attachment is invalid");
+});
+
+test("sendJob uploads attachments then sends, while the default PAGE_HIDDEN gate and allowBackgroundTab:false still apply", async () => {
+  const tabs = await loadFixture("tab_list_single_match.json");
+  const conversationUrl = "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949";
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-upload-sendjob-ok-"));
+  const attachmentPath = path.join(dir, "review_pack.pdf");
+  await writeFile(attachmentPath, "stub bytes");
+
+  const exec = fakeExecFactory({
+    "tab-list": () => jsonStdout(tabs),
+    "tab-select": () => jsonStdout(null),
+    eval: (args, callIndex) =>
+      callIndex === 1
+        ? jsonStdout({ url: conversationUrl, assistantMessages: [], visibilityState: "visible" })
+        : jsonStdout({ url: conversationUrl }),
+    upload: () => jsonStdout(null),
+    fill: () => jsonStdout(null),
+    click: () => jsonStdout(null),
+  });
+
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "gbb-upload-sendjob-runtime-ok-"));
+  const { job } = await sendJob({
+    prompt: "review pack T2",
+    attempt: 1,
+    conversationUrl,
+    runtimeRoot,
+    attachments: [attachmentPath],
+    session: "gbb-send-test",
+    exec,
+    sleep: async () => {},
+    now: () => Date.parse("2026-08-01T09:00:00+08:00"),
+    existsCheck: async () => false,
+  });
+
+  assert.equal(job.conversation_url, conversationUrl);
+  assert.equal(exec.counts.upload, 1);
+  assert.equal(exec.counts.fill, 1);
+  assert.equal(exec.counts.click, 1);
+  // upload happens before fill/click within the send step.
+  const order = exec.calls.map((c) => c.args[2]).filter((c) => c === "upload" || c === "fill" || c === "click");
+  assert.deepEqual(order, ["upload", "fill", "click"]);
+});
+
+test("sendJob still rejects a hidden page by default even when attachments are supplied (allowBackgroundTab defaults false)", async () => {
+  const tabs = await loadFixture("tab_list_single_match.json");
+  const conversationUrl = "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949";
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-upload-sendjob-hidden-"));
+  const attachmentPath = path.join(dir, "review_pack.pdf");
+  await writeFile(attachmentPath, "stub bytes");
+
+  const exec = fakeExecFactory({
+    "tab-list": () => jsonStdout(tabs),
+    "tab-select": () => jsonStdout(null),
+    eval: () => jsonStdout({ url: conversationUrl, assistantMessages: [], visibilityState: "hidden" }),
+  });
+
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "gbb-upload-sendjob-runtime-hidden-"));
+  await assert.rejects(
+    () =>
+      sendJob({
+        prompt: "review pack T2",
+        attempt: 1,
+        conversationUrl,
+        runtimeRoot,
+        attachments: [attachmentPath],
+        session: "s",
+        exec,
+        sleep: async () => {},
+        now: () => Date.parse("2026-08-01T09:00:00+08:00"),
+        existsCheck: async () => false,
+      }),
+    (err) => err instanceof SendInvalidationError && err.code === "PAGE_HIDDEN"
+  );
+  assert.equal(exec.counts.upload, undefined, "must never attempt upload on a hidden page");
+  assert.equal(exec.counts.fill, undefined);
+  assert.equal(exec.counts.click, undefined);
 });

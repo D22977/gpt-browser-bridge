@@ -9,7 +9,7 @@
 
 import { execFile } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import writeFileAtomic from "write-file-atomic";
@@ -21,12 +21,14 @@ import { sha256Hex } from "./result_store.mjs";
 // ---------------------------------------------------------------------------
 
 // Gate A: whitelist of Playwright CLI subcommands the Sender may invoke.
-// fill/click/press are legitimate here (the Sender is the write role);
-// tab-close, tab-new, run-code and show are still never used. `click` is the
-// actual send-button trigger (see sendPrompt below); `press` is kept
+// fill/click/press/upload are legitimate here (the Sender is the write
+// role); tab-close, tab-new, run-code and show are still never used. `click`
+// is the actual send-button trigger (see sendPrompt below); `press` is kept
 // whitelisted for key-based input (e.g. Enter into a focused editor) even
-// though the current sendPrompt() does not use it.
-export const ALLOWED_CLI_SUBCOMMANDS = Object.freeze(["tab-list", "tab-select", "eval", "fill", "click", "press"]);
+// though the current sendPrompt() does not use it. `upload` attaches
+// pre-validated local file paths (see validateAttachments) for an approved
+// web-chat file-upload send, and is always invoked before `fill`.
+export const ALLOWED_CLI_SUBCOMMANDS = Object.freeze(["tab-list", "tab-select", "eval", "fill", "click", "press", "upload"]);
 
 // Fixed read-only eval used to take the pre-send baseline (assistant count +
 // last assistant message + page visibility) and, after sending, to poll for
@@ -315,12 +317,47 @@ export async function readBaseline(conversationUrl, opts) {
   return readBaselineFromSnapshot(snapshot);
 }
 
-// Sends the prompt: fill the editor, then click the send button. (Not
-// `press SEND_BUTTON_SELECTOR` - `press` takes a key name like "Enter", not a
-// CSS selector; clicking is the correct way to activate the send button.)
+// Validates that every attachment path is an explicit, existing regular
+// file before any browser mutation happens. Fails closed with a structured
+// SendInvalidationError on a missing path or a non-file (directory, socket,
+// etc.) - never reads or logs file contents, only stats the path. A
+// nullish/empty `attachments` is a no-op (the caller skips the upload step).
+export async function validateAttachments(attachments) {
+  if (attachments === undefined || attachments === null) return [];
+  if (!Array.isArray(attachments)) {
+    throw new SendInvalidationError("ATTACHMENT_INVALID_PATH");
+  }
+  for (const attachmentPath of attachments) {
+    if (typeof attachmentPath !== "string" || attachmentPath.length === 0) {
+      throw new SendInvalidationError("ATTACHMENT_INVALID_PATH");
+    }
+    let stats;
+    try {
+      stats = await stat(attachmentPath);
+    } catch (e) {
+      throw new SendInvalidationError("ATTACHMENT_NOT_FOUND", { cause: e });
+    }
+    if (!stats.isFile()) {
+      throw new SendInvalidationError("ATTACHMENT_NOT_A_FILE");
+    }
+  }
+  return attachments;
+}
+
+// Sends the prompt: upload any attachments (approved web-chat file-upload
+// review, per-call opt-in via sendJob's `attachments`), fill the editor,
+// then click the send button. Attachments are pre-validated by
+// validateAttachments before this runs, so this is a direct CLI call with no
+// further path checks or file reads. (Not `press SEND_BUTTON_SELECTOR` -
+// `press` takes a key name like "Enter", not a CSS selector; clicking is the
+// correct way to activate the send button.)
 export async function sendPrompt(prompt, opts) {
-  await runCliCommand("fill", [PROMPT_TEXTAREA_SELECTOR, prompt], opts);
-  await runCliCommand("click", [SEND_BUTTON_SELECTOR], opts);
+  const { attachments, ...cliOpts } = opts || {};
+  if (Array.isArray(attachments) && attachments.length > 0) {
+    await runCliCommand("upload", attachments, cliOpts);
+  }
+  await runCliCommand("fill", [PROMPT_TEXTAREA_SELECTOR, prompt], cliOpts);
+  await runCliCommand("click", [SEND_BUTTON_SELECTOR], cliOpts);
 }
 
 export async function waitConversationUrl(opts = {}) {
@@ -344,19 +381,25 @@ export async function waitConversationUrl(opts = {}) {
 }
 
 // Orchestrates the full "send" job per §14 Sender 必做: read baseline, hash
-// prompt, send, wait for the conversation URL, write immutable job.json, and
-// stop. Never monitors the answer afterwards (that is the Watcher's job).
+// prompt, send (optionally uploading attachments first, for the approved
+// web-chat file-upload review path), wait for the conversation URL, write
+// immutable job.json, and stop. Never monitors the answer afterwards (that
+// is the Watcher's job). Attachments are validated before any browser
+// mutation - an invalid attachment path fails the whole job closed, before
+// the baseline is even read.
 export async function sendJob({
   prompt,
   attempt,
   conversationUrl,
   runtimeRoot,
+  attachments,
   now = () => Date.now(),
   existsCheck,
   ...cliOpts
 }) {
+  const validAttachments = await validateAttachments(attachments);
   const baseline = await readBaseline(conversationUrl, cliOpts);
-  await sendPrompt(prompt, cliOpts);
+  await sendPrompt(prompt, { attachments: validAttachments, ...cliOpts });
   const finalUrl = await waitConversationUrl({ ...cliOpts, now });
 
   const job = buildJob({
