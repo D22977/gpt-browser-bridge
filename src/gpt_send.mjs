@@ -293,8 +293,16 @@ export async function locateChatgptTab(conversationUrl, opts) {
 // Fail-closed guard: a hidden tab (document.visibilityState !== "visible")
 // cannot reliably receive a click - the real CLI's rAF-based actionability
 // check hangs against a background tab and Enter does not submit either.
-// Rather than hang or silently no-op, refuse the send outright.
-export function assertPageVisible(snapshot) {
+// Rather than hang or silently no-op, refuse the send outright by default.
+//
+// `allowBackgroundTab` (default false) is an explicit, per-call authorization
+// for approved web-chat channels (e.g. ChatGPT) where Control Tower has
+// accepted the background-tab risk for a review/question send. It does not
+// authorize CLI/local-model sends, and every other gate (unique target tab,
+// domain matching, send action, conversation URL wait, immutable job
+// evidence) still applies unchanged.
+export function assertPageVisible(snapshot, { allowBackgroundTab = false } = {}) {
+  if (allowBackgroundTab) return;
   if (snapshot?.visibilityState && snapshot.visibilityState !== "visible") {
     throw new SendInvalidationError("PAGE_HIDDEN");
   }
@@ -303,7 +311,7 @@ export function assertPageVisible(snapshot) {
 export async function readBaseline(conversationUrl, opts) {
   await locateChatgptTab(conversationUrl, opts);
   const snapshot = await runCliCommand("eval", [BASELINE_SNAPSHOT_SCRIPT], opts);
-  assertPageVisible(snapshot);
+  assertPageVisible(snapshot, { allowBackgroundTab: opts?.allowBackgroundTab });
   return readBaselineFromSnapshot(snapshot);
 }
 

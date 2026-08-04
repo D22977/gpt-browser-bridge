@@ -312,6 +312,24 @@ test("assertPageVisible allows a visible page through untouched", () => {
   assert.doesNotThrow(() => assertPageVisible({}));
 });
 
+// ---------------------------------------------------------------------------
+// allowBackgroundTab: explicit, default-false authorization for approved
+// web-chat channels (e.g. ChatGPT) to send from a background tab. Does not
+// apply to CLI/local models - it only widens this one gate in the reusable
+// web-chat sender path, every other gate stays in force.
+// ---------------------------------------------------------------------------
+
+test("assertPageVisible still fails closed with PAGE_HIDDEN when allowBackgroundTab is omitted (default false)", () => {
+  assert.throws(
+    () => assertPageVisible({ visibilityState: "hidden" }, {}),
+    (err) => err instanceof SendInvalidationError && err.code === "PAGE_HIDDEN"
+  );
+});
+
+test("assertPageVisible allows a hidden page through when allowBackgroundTab is explicitly true", () => {
+  assert.doesNotThrow(() => assertPageVisible({ visibilityState: "hidden" }, { allowBackgroundTab: true }));
+});
+
 test("readBaseline fails closed with PAGE_HIDDEN and never attempts fill/click when the tab is hidden", async () => {
   const tabs = await loadFixture("tab_list_single_match.json");
   const exec = fakeExecFactory({
@@ -330,6 +348,70 @@ test("readBaseline fails closed with PAGE_HIDDEN and never attempts fill/click w
   );
   assert.equal(exec.counts.fill, undefined);
   assert.equal(exec.counts.click, undefined);
+});
+
+test("readBaseline proceeds past a hidden page when allowBackgroundTab is true", async () => {
+  const tabs = await loadFixture("tab_list_single_match.json");
+  const exec = fakeExecFactory({
+    "tab-list": () => jsonStdout(tabs),
+    "tab-select": () => jsonStdout(null),
+    eval: () =>
+      jsonStdout({
+        url: "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949",
+        assistantMessages: [],
+        visibilityState: "hidden",
+      }),
+  });
+  const baseline = await readBaseline("https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949", {
+    session: "s",
+    exec,
+    allowBackgroundTab: true,
+  });
+  assert.equal(baseline.assistant_count, 0);
+});
+
+test("sendJob completes an authorized background-tab send (allowBackgroundTab: true) while keeping every other gate", async () => {
+  const tabs = await loadFixture("tab_list_single_match.json");
+  const conversationUrl = "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949";
+  const fixture = await loadFixture("six_answers_snapshot.json");
+  const preSend = {
+    url: conversationUrl,
+    assistantMessages: fixture.assistantMessages.slice(0, 5),
+    visibilityState: "hidden",
+  };
+
+  const exec = fakeExecFactory({
+    "tab-list": () => jsonStdout(tabs),
+    "tab-select": () => jsonStdout(null),
+    eval: (args, callIndex) => (callIndex === 1 ? jsonStdout(preSend) : jsonStdout({ url: conversationUrl })),
+    fill: () => jsonStdout(null),
+    click: () => jsonStdout(null),
+  });
+
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "gbb005-bgtab-"));
+  const { job, jobPath } = await sendJob({
+    prompt: "review pack T2",
+    attempt: 1,
+    conversationUrl,
+    runtimeRoot,
+    session: "gbb-send-test",
+    exec,
+    sleep: async () => {},
+    now: () => Date.parse("2026-08-01T09:00:00+08:00"),
+    existsCheck: async () => false,
+    allowBackgroundTab: true,
+  });
+
+  assert.equal(job.baseline.assistant_count, 5);
+  assert.equal(job.conversation_url, conversationUrl);
+  const written = JSON.parse(await readFile(jobPath, "utf8"));
+  assert.equal(written.job_id, job.job_id);
+
+  // Unique-tab, fill, and click gates still all ran - only the hidden-page
+  // gate was authorized to relax.
+  assert.equal(exec.counts["tab-select"], 1);
+  assert.equal(exec.counts.fill, 1);
+  assert.equal(exec.counts.click, 1);
 });
 
 test("sendJob refuses to send when the pre-send baseline reports a hidden page", async () => {
