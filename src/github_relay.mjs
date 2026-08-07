@@ -60,7 +60,6 @@ export const DEFAULT_MAX_REPAIR_ROUNDS = 2;
 export const DEFAULT_COOLDOWN_MINUTES = 5;
 
 const SHA40_RE = /^[0-9a-f]{40}$/;
-const SHA40_IN_BODY_RE = /[0-9a-f]{40}/;
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -183,11 +182,19 @@ export function findReadyComment(comments) {
   return ready.length ? ready[ready.length - 1] : null;
 }
 
-/** Extract a 40-char SHA referenced by a READY comment, or null. */
+/**
+ * Extract the explicit `head_sha:` field from a READY comment, or null.
+ * Binds a READY to the head it was posted for. Any 40-char SHA that appears
+ * earlier in the body (e.g. `base_sha:`) must never be mistaken for the head,
+ * so we match the exact `head_sha:` field rather than the first SHA. The
+ * non-word boundary also rejects composite fields such as `reviewed_head_sha:`.
+ */
 export function readyCommentSha(comment) {
   if (!comment || typeof comment.body !== "string") return null;
-  const m = comment.body.toLowerCase().match(SHA40_IN_BODY_RE);
-  return m ? m[0] : null;
+  const m = comment.body.match(/(^|[^A-Za-z0-9_])head_sha:\s*([0-9a-fA-F]{40})/);
+  if (!m) return null;
+  const head = m[2].toLowerCase();
+  return isSha40(head) ? head : null;
 }
 
 function cooldownSatisfied(state, now) {
@@ -365,11 +372,13 @@ export function evaluate(snapshot, state, now) {
   }
 
   // C. Current head has READY_FOR_REVIEW and no fresh review.
+  // A READY marker must carry an explicit head_sha field that equals the live
+  // head, otherwise we FAIL CLOSED: a SHA-less READY is never assumed to refer
+  // to the current head (that could authorise review of a head the marker never
+  // actually ratified, or of base SHA mistaken for head SHA).
   const ready = findReadyComment(snapshot.comments);
   const readySha = ready ? readyCommentSha(ready) : null;
-  // A READY comment that carries no SHA is assumed to refer to the current head.
-  const effectiveReadyHead = readySha ?? currentHead;
-  if (ready && effectiveReadyHead === currentHead) {
+  if (ready && readySha === currentHead) {
     const key = readyEventKey(snapshot.repo ?? state.repo, prNumber, currentHead);
     if (!state.processed_event_keys.includes(key)) {
       return baseAction(snapshot, state, "REQUEST_REVIEW", "CURRENT_HEAD_READY_FOR_REVIEW", {
@@ -526,22 +535,21 @@ export async function writeStateFile(statePath, state) {
 // Live GitHub snapshot (read-only; poll only)
 // ---------------------------------------------------------------------------
 
-export async function fetchSnapshotViaGh({ repo, issue, pr }) {
-  const prResult = await execFileAsync("gh", [
+export async function fetchSnapshotViaGh({ repo, issue, pr }, execFn = execFileAsync) {
+  const prResult = await execFn("gh", [
     "pr", "view", String(pr), "--repo", repo,
     "--json", "number,state,isDraft,headRefOid,comments",
   ]);
   const prData = JSON.parse(prResult.stdout);
-  let issueData = { comments: [] };
-  try {
-    const issueResult = await execFileAsync("gh", [
-      "issue", "view", String(issue), "--repo", repo,
-      "--json", "number,state,comments",
-    ]);
-    issueData = JSON.parse(issueResult.stdout);
-  } catch {
-    issueData = { comments: [] };
-  }
+  // An issue-read failure is a transport-level failure, NOT an "empty issue".
+  // Swallowing it could produce a snapshot missing the READY/review comments and
+  // silently authorise the wrong action. Propagate so runPoll() maps it to
+  // exit 3 (TRANSPORT_BLOCKED) with the required human notification.
+  const issueResult = await execFn("gh", [
+    "issue", "view", String(issue), "--repo", repo,
+    "--json", "number,state,comments",
+  ]);
+  const issueData = JSON.parse(issueResult.stdout);
 
   const mergeComments = (arr) =>
     (Array.isArray(arr) ? arr : []).map((c) => ({
@@ -674,6 +682,18 @@ export async function main(argv) {
     return 2;
   }
 
+  try {
+    return await dispatchCommand(command, args);
+  } catch (err) {
+    // CLI/schema/usage validation must exit deterministically with code 2 and
+    // no stack trace, regardless of where it is raised.
+    const msg = err && err.message ? err.message : String(err);
+    process.stderr.write(`${msg}\n`);
+    return 2;
+  }
+}
+
+async function dispatchCommand(command, args) {
   if (command === "evaluate") {
     requireArgs(args, ["snapshot", "state"]);
     const now = parseNow(args.now);
@@ -767,7 +787,13 @@ const isDirectRun =
   process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (isDirectRun) {
-  main(process.argv.slice(2)).then((code) => {
-    process.exitCode = code;
-  });
+  main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err) => {
+      process.stderr.write(`${err && err.message ? err.message : String(err)}\n`);
+      process.exitCode = 2;
+    },
+  );
 }

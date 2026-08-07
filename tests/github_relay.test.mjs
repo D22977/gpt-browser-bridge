@@ -6,6 +6,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const ENTRY = fileURLToPath(new URL("../src/github_relay.mjs", import.meta.url));
+const NODE = process.execPath;
 
 import {
   SCHEMA_VERSION,
@@ -25,6 +30,7 @@ import {
   findReadyComment,
   readyCommentSha,
   runPoll,
+  fetchSnapshotViaGh,
 } from "../src/github_relay.mjs";
 
 const REPO = "D22977/MEP-";
@@ -49,8 +55,12 @@ function comment(id, body, created_at = NOW) {
   return { id, body, created_at };
 }
 
-function readyComment(id, sha, created_at = NOW) {
-  return comment(id, `## READY_FOR_REVIEW\nhead sha: ${sha}`);
+function readyComment(id, headSha, created_at = NOW, baseSha = HEAD_A) {
+  return comment(
+    id,
+    `## READY_FOR_REVIEW\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\nbase_sha: ${baseSha}\nhead_sha: ${headSha}\n`,
+    created_at,
+  );
 }
 
 function reviewComment(id, { decision, head = HEAD_A, pr_number = PR, created_at = NOW, card_id = "MRMP-P1-001" }) {
@@ -451,6 +461,49 @@ test("poll with corrupt relay state -> exit 4", async () => {
   assert.equal(result.code, 4);
 });
 
+test("F002 poll propagates issue-read failure to exit 3 (no silent empty issue)", async () => {
+  // Exercise the REAL default snapshot fetcher with a fake exec that lets the
+  // PR read succeed but forces the issue read to fail. fetchSnapshotViaGh must
+  // NOT swallow that into an empty comment list; it must reject so runPoll()
+  // enters TRANSPORT_BLOCKED / exit 3.
+  const fakeExec = async (cmd, args) => {
+    const argStr = args.join(" ");
+    if (argStr.includes("pr view")) {
+      return {
+        stdout: JSON.stringify({
+          number: PR,
+          state: "OPEN",
+          isDraft: true,
+          headRefOid: HEAD_A,
+          comments: [],
+        }),
+      };
+    }
+    if (argStr.includes("issue view")) {
+      throw new Error("gh issue view: x509 certificate error");
+    }
+    throw new Error(`unexpected cmd: ${cmd} ${argStr}`);
+  };
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-gh-relay-issuefail-"));
+  const statePath = path.join(dir, "github_relay.json");
+  await writeStateFile(statePath, makeState());
+  const result = await runPoll({
+    repo: REPO,
+    issue: ISSUE,
+    pr: PR,
+    statePath,
+    now: NOW,
+    dryRun: false,
+    fetchSnapshot: (p) => fetchSnapshotViaGh(p, fakeExec),
+  });
+  assert.equal(result.code, 3);
+  assert.equal(result.action.reason, "TRANSPORT_BLOCKED");
+  const persisted = await readStateFile(statePath);
+  assert.equal(persisted.terminal.notification_required, true);
+  // Must not have persisted a REQUEST_REVIEW based on a partial (PR-only) read.
+  assert.equal(persisted.pending_action, null);
+});
+
 test("parseReviewResults ignores non-review comments and other-card reviews", () => {
   const comments = [
     comment(1, "just a note"),
@@ -488,6 +541,36 @@ test("findReadyComment and readyCommentSha extract the head", () => {
   assert.equal(readyCommentSha(comment(2, "no sha")), null);
 });
 
+test("F001 readyCommentSha binds the head_sha field, never a prior SHA (e.g. base_sha)", () => {
+  const headFirst = comment(9, `## READY_FOR_REVIEW\nhead_sha: ${HEAD_C}\nbase_sha: ${HEAD_B}\n`);
+  const baseFirst = comment(10, `## READY_FOR_REVIEW\nbase_sha: ${HEAD_B}\nhead_sha: ${HEAD_C}\n`);
+  const reviewed = comment(11, `## READY_FOR_REVIEW\nreviewed_head_sha: ${HEAD_B}\nhead_sha: ${HEAD_C}\n`);
+  assert.equal(readyCommentSha(headFirst), HEAD_C);
+  assert.equal(readyCommentSha(baseFirst), HEAD_C);
+  // a non-head_sha field carrying a 40-char SHA must NOT be mistaken for the head
+  assert.equal(readyCommentSha(reviewed), HEAD_C);
+  // bare marker with no head_sha field -> fail closed
+  assert.equal(readyCommentSha(comment(12, `## READY_FOR_REVIEW\nbase_sha: ${HEAD_B}\n`)), null);
+});
+
+test("F001 evaluate fails closed when READY marker has no exact head SHA", () => {
+  const state = makeState();
+  // HEAD is live and a READY marker exists, but it carries no head_sha field.
+  const snap = snapshot(HEAD_A, [comment(13, `## READY_FOR_REVIEW\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\nbase_sha: ${HEAD_B}\n`)]);
+  const d = evaluate(snap, state, NOW);
+  // Must NOT assume the marker refers to the current head.
+  assert.equal(actionOf(d), "NOOP");
+  assert.equal(d.reason, "NO_ACTIONABLE_EVENT");
+});
+
+test("F001 READY bound to a different head than current does not dispatch REQUEST_REVIEW", () => {
+  const state = makeState();
+  // READY explicitly bound to HEAD_B while live head is HEAD_A.
+  const snap = snapshot(HEAD_A, [readyComment(1, HEAD_B, NOW)]);
+  const d = evaluate(snap, state, NOW);
+  assert.equal(actionOf(d), "NOOP");
+});
+
 test("applyDecision sets pending action for REQUEST_REVIEW and DISPATCH_FIX", () => {
   const state = makeState();
   const dReq = evaluate(snapshot(HEAD_A, [readyComment(1, HEAD_A)]), state, NOW);
@@ -517,4 +600,35 @@ test("terminal failure reasons set covers the documented codes", () => {
     "OPENCODE_ADAPTER_START_FAILED",
     "TRANSPORT_BLOCKED",
   ]);
+});
+
+test("F003 CLI missing required args -> exit 2 with no stack trace", async () => {
+  const r = spawnSync(NODE, [ENTRY, "evaluate", "--snapshot", "x.json"], { encoding: "utf8" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /missing --state/);
+  // process-level requirement: no JS stack trace leaks to the CLI surface.
+  assert.doesNotMatch(r.stderr, /\n\s+at /);
+});
+
+test("F003 CLI invalid --now -> exit 2 with no stack trace", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-gh-relay-now-"));
+  const snapPath = path.join(dir, "snap.json");
+  await writeFile(snapPath, JSON.stringify({
+    repo: REPO,
+    issue_number: ISSUE,
+    pr_number: PR,
+    head: { sha: HEAD_A, state: "OPEN", draft: true },
+    comments: [],
+  }));
+  const statePath = path.join(dir, "state.json");
+  const r = spawnSync(NODE, [ENTRY, "evaluate", "--snapshot", snapPath, "--state", statePath, "--now", "not-a-date"], { encoding: "utf8" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /invalid --now/);
+  assert.doesNotMatch(r.stderr, /\n\s+at /);
+});
+
+test("F003 CLI unknown subcommand -> exit 2", async () => {
+  const r = spawnSync(NODE, [ENTRY, "nope"], { encoding: "utf8" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /unknown subcommand/);
 });
