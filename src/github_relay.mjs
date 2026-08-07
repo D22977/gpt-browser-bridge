@@ -4,9 +4,9 @@
 // adapters (GBB-GH-02a WebGPTAdapter, GBB-GH-02b OpenCodeAdapter). This file
 // never starts a model, never writes GitHub, never merges and never dispatches
 // a worker. It only turns a GitHub snapshot plus durable relay state into a
-// deterministic next action (NOOP / REQUEST_REVIEW / DISPATCH_FIX /
-// AWAITING_HUMAN_MERGE / HUMAN_INTERVENTION) and persists exactly-once-ish
-// dispatch checkpoints.
+//   deterministic next action (NOOP / REQUEST_REVIEW / DISPATCH_FIX /
+//   AWAITING_HUMAN_MERGE / HUMAN_INTERVENTION / NOTIFY_HUMAN) and persists
+//   exactly-once-ish dispatch checkpoints.
 //
 // Spec: GBB-GH-01 — GitHub Relay Kernel v1 (§1..§20).
 //
@@ -16,7 +16,11 @@
 //   - A `failed` ACK never marks anything processed.
 //   - A pending action blocks any second dispatch until it is ACKed.
 //   - Terminal state permanently stops the card and always requests a human
-//     notification for the downstream adapter.
+//     notification for the downstream adapter. The terminal only settles into a
+//     permanent NOOP once the notification comment is ACKed with its comment ID
+//     (applyAck); while the notification is still pending the kernel keeps
+//     emitting NOTIFY_HUMAN so a crash between terminal-entry and
+//     notification-delivery is re-driven, never lost.
 //   - Repair is capped at MAX_REPAIR_ROUNDS=2.
 //
 // Runtime checkpoint lives at
@@ -43,6 +47,7 @@ export const ACTION_ENUM = [
   "DISPATCH_FIX",
   "AWAITING_HUMAN_MERGE",
   "HUMAN_INTERVENTION",
+  "NOTIFY_HUMAN",
 ];
 
 export const DECISION_ENUM = ["PASS", "FIX_REQUIRED", "BLOCKED"];
@@ -308,6 +313,18 @@ function baseAction(snapshot, state, action, reason, extra = {}) {
  */
 export function evaluate(snapshot, state, now) {
   if (state.terminal.active) {
+    // F004-R2: a terminal whose human notification is still pending (required
+    // but not yet ACKed with a comment ID) is NOT permanently settled. Emit a
+    // repeatable NOTIFY_HUMAN so a crash between terminal-entry and
+    // notification-delivery re-drives the notification instead of silently
+    // dropping it. Only after the notification comment ID is recorded via
+    // applyAck does the terminal settle to a permanent NOOP.
+    if (state.terminal.notification_required && !state.terminal.notification_comment_id) {
+      return baseAction(snapshot, state, "NOTIFY_HUMAN", "TERMINAL_NOTIFICATION_PENDING", {
+        terminal: true,
+        terminal_state: state.terminal.state,
+      });
+    }
     return baseAction(snapshot, state, "NOOP", "TERMINAL_STATE");
   }
   if (state.pending_action) {
@@ -378,6 +395,17 @@ export function evaluate(snapshot, state, now) {
   // actually ratified, or of base SHA mistaken for head SHA).
   const ready = findReadyComment(snapshot.comments);
   const readySha = ready ? readyCommentSha(ready) : null;
+  // F001-R2: a READY marker present but without a valid explicit head_sha is a
+  // malformed event. Fail closed to human intervention (terminal) rather than
+  // silently treating it as "nothing to do" — a SHA-less READY must never be
+  // assumed to refer to any head.
+  if (ready && !readySha) {
+    return baseAction(snapshot, state, "HUMAN_INTERVENTION", "READY_EVENT_MALFORMED", {
+      event_key: readyEventKey(snapshot.repo ?? state.repo, prNumber, currentHead),
+      terminal: true,
+      terminal_state: "BLOCKED_FOR_HUMAN",
+    });
+  }
   if (ready && readySha === currentHead) {
     const key = readyEventKey(snapshot.repo ?? state.repo, prNumber, currentHead);
     if (!state.processed_event_keys.includes(key)) {
@@ -446,6 +474,11 @@ export function applyDecision(state, decision, now) {
 /**
  * Apply an executor ACK onto a copy of state.
  * Returns { state, changed, status } where status explains the outcome.
+ *   notificationCommentId -> records the GitHub comment ID of the posted
+ *                human-intervention notification comment and clears the
+ *                terminal's notification_required flag, settling the terminal
+ *                into a permanent NOOP (F004-R2 crash-window durability:
+ *                until this ACK the kernel keeps emitting NOTIFY_HUMAN).
  *   succeeded -> pending event key moves to processed; DISPATCH_FIX increments
  *                repair round exactly once.
  *   failed + terminal reason -> terminal entered, pending cleared, nothing
@@ -453,8 +486,14 @@ export function applyDecision(state, decision, now) {
  *   failed + non-terminal reason -> pending kept, nothing marked processed.
  *   no pending / id mismatch -> no-op (idempotent).
  */
-export function applyAck(state, { actionId, result, reason = null, now }) {
+export function applyAck(state, { actionId, result, reason = null, now, notificationCommentId = null }) {
   const next = clone(state);
+  if (notificationCommentId && next.terminal.active && next.terminal.notification_required) {
+    next.terminal.notification_comment_id = notificationCommentId;
+    next.terminal.notification_required = false;
+    next.updated_at = now;
+    return { state: next, changed: true, status: "NOTIFICATION_RECORDED" };
+  }
   if (!next.pending_action) {
     return { state: next, changed: false, status: "NO_PENDING" };
   }
@@ -635,7 +674,8 @@ poll:
   node src/github_relay.mjs poll --repo <owner/repo> --issue <n> --pr <n> --state <state.json> [--now <ISO8601>] [--dry-run]
 
 ack:
-  node src/github_relay.mjs ack --state <state.json> --action-id <id> --result succeeded|failed [--reason <code>] [--now <ISO8601>]`;
+  node src/github_relay.mjs ack --state <state.json> --action-id <id> --result succeeded|failed [--reason <code>] [--now <ISO8601>]
+  node src/github_relay.mjs ack --state <state.json> --notification-comment-id <commentId> [--now <ISO8601>]`;
 }
 
 function parseArgs(argv) {
@@ -749,8 +789,9 @@ async function dispatchCommand(command, args) {
   }
 
   if (command === "ack") {
-    requireArgs(args, ["state", "action-id", "result"]);
-    if (!["succeeded", "failed"].includes(args.result)) {
+    const hasNotificationAck = Boolean(args["notification-comment-id"]);
+    requireArgs(args, hasNotificationAck ? ["state"] : ["state", "action-id", "result"]);
+    if (!hasNotificationAck && !["succeeded", "failed"].includes(args.result)) {
       process.stderr.write(usage(`--result must be succeeded|failed, got ${args.result}`));
       return 2;
     }
@@ -767,10 +808,11 @@ async function dispatchCommand(command, args) {
       return 4;
     }
     const out = applyAck(state, {
-      actionId: args["action-id"],
-      result: args.result,
+      actionId: hasNotificationAck ? null : args["action-id"],
+      result: hasNotificationAck ? "succeeded" : args.result,
       reason: args.reason ?? null,
       now,
+      notificationCommentId: args["notification-comment-id"] ?? null,
     });
     if (out.changed) {
       await writeStateFile(args.state, out.state);

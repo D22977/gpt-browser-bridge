@@ -285,7 +285,7 @@ test("16. duplicate ACK does not increment twice", () => {
   assert.equal(second.state.repair.rounds, 1);
 });
 
-test("17. terminal state -> permanent NOOP", () => {
+test("17. pending-notification terminal -> repeatable NOTIFY_HUMAN (F004-R2)", () => {
   const state = makeState({
     terminal: {
       active: true,
@@ -299,8 +299,62 @@ test("17. terminal state -> permanent NOOP", () => {
   });
   const snap = snapshot(HEAD_A, [reviewComment(1, { decision: "PASS", head: HEAD_A }), readyComment(2, HEAD_A)]);
   const d = evaluate(snap, state, NOW);
+  // Crash-window durability: a terminal that still owes a human notification
+  // is NOT settled. evaluate() re-emits NOTIFY_HUMAN so a crash between
+  // terminal-entry and notification-delivery is re-driven, not silently dropped.
+  assert.equal(actionOf(d), "NOTIFY_HUMAN");
+  assert.equal(d.reason, "TERMINAL_NOTIFICATION_PENDING");
+  assert.equal(d.terminal, true);
+  assert.equal(d.terminal_state, "PASS_AWAITING_MANUAL_MERGE");
+});
+
+test("17b. settled terminal (notification comment ACKed) -> permanent NOOP (F004-R2)", () => {
+  const state = makeState({
+    terminal: {
+      active: true,
+      state: "PASS_AWAITING_MANUAL_MERGE",
+      reason: "FRESH_REVIEW_PASS",
+      entered_at: NOW,
+      notification_required: false,
+      notification_event_key: null,
+      notification_comment_id: 9001,
+    },
+  });
+  const snap = snapshot(HEAD_A, [reviewComment(1, { decision: "PASS", head: HEAD_A }), readyComment(2, HEAD_A)]);
+  const d = evaluate(snap, state, NOW);
   assert.equal(actionOf(d), "NOOP");
   assert.equal(d.reason, "TERMINAL_STATE");
+});
+
+test("17c. applyAck records notification comment id and settles terminal (F004-R2)", () => {
+  const state = makeState({
+    terminal: {
+      active: true,
+      state: "PASS_AWAITING_MANUAL_MERGE",
+      reason: "FRESH_REVIEW_PASS",
+      entered_at: NOW,
+      notification_required: true,
+      notification_event_key: null,
+      notification_comment_id: null,
+    },
+  });
+  const out = applyAck(state, { result: "succeeded", notificationCommentId: 9001, now: NOW });
+  assert.equal(out.changed, true);
+  assert.equal(out.status, "NOTIFICATION_RECORDED");
+  assert.equal(out.state.terminal.notification_required, false);
+  assert.equal(out.state.terminal.notification_comment_id, 9001);
+  // A subsequent evaluate sees a settled terminal -> permanent NOOP.
+  const snap = snapshot(HEAD_A, [reviewComment(1, { decision: "PASS", head: HEAD_A })]);
+  const d = evaluate(snap, out.state, NOW);
+  assert.equal(actionOf(d), "NOOP");
+  assert.equal(d.reason, "TERMINAL_STATE");
+});
+
+test("17d. notification ACK without a pending notification -> no-op (F004-R2)", () => {
+  const state = makeState();
+  const out = applyAck(state, { result: "succeeded", notificationCommentId: 9001, now: NOW });
+  assert.equal(out.changed, false);
+  assert.equal(out.status, "NO_PENDING");
 });
 
 test("18. state atomic-write recovery does not accept partial JSON", async () => {
@@ -445,6 +499,48 @@ test("poll transport failure -> HUMAN_INTERVENTION TRANSPORT_BLOCKED, exit 3", a
   assert.equal(persisted.terminal.notification_required, true);
 });
 
+test("F004-R2 poll crash-window: pending notification re-emits NOTIFY_HUMAN until comment ACK", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-gh-relay-notify-"));
+  const statePath = path.join(dir, "github_relay.json");
+  const state = makeState();
+  await writeStateFile(statePath, state);
+
+  // 1. Poll sees a fresh PASS -> terminal entered with notification_required.
+  const passSnap = snapshot(HEAD_A, [reviewComment(1, { decision: "PASS", head: HEAD_A })]);
+  const first = await runPoll({
+    repo: REPO, issue: ISSUE, pr: PR, statePath, now: NOW, dryRun: false,
+    fetchSnapshot: async () => passSnap,
+  });
+  assert.equal(first.code, 0);
+  assert.equal(actionOf(first.action), "AWAITING_HUMAN_MERGE");
+  const persisted = await readStateFile(statePath);
+  assert.equal(persisted.terminal.notification_required, true);
+  assert.equal(persisted.terminal.notification_comment_id, null);
+
+  // 2. Simulate a crash window: re-poll the SAME durable state before any
+  //    notification comment was ACKed. The kernel must re-emit NOTIFY_HUMAN
+  //    (repeatable), never silently settle to a permanent NOOP.
+  const second = await runPoll({
+    repo: REPO, issue: ISSUE, pr: PR, statePath, now: NOW, dryRun: true,
+    fetchSnapshot: async () => passSnap,
+  });
+  assert.equal(actionOf(second.action), "NOTIFY_HUMAN");
+  assert.equal(second.action.reason, "TERMINAL_NOTIFICATION_PENDING");
+
+  // 3. Downstream posts the human-intervention comment and ACKs its comment id.
+  const ackOut = applyAck(persisted, { result: "succeeded", notificationCommentId: 9002, now: NOW });
+  assert.equal(ackOut.status, "NOTIFICATION_RECORDED");
+  await writeStateFile(statePath, ackOut.state);
+
+  // 4. Now the terminal is settled -> permanent NOOP on subsequent polls.
+  const third = await runPoll({
+    repo: REPO, issue: ISSUE, pr: PR, statePath, now: NOW, dryRun: true,
+    fetchSnapshot: async () => passSnap,
+  });
+  assert.equal(actionOf(third.action), "NOOP");
+  assert.equal(third.action.reason, "TERMINAL_STATE");
+});
+
 test("poll with corrupt relay state -> exit 4", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "gbb-gh-relay-corrupt-"));
   const statePath = path.join(dir, "github_relay.json");
@@ -553,14 +649,26 @@ test("F001 readyCommentSha binds the head_sha field, never a prior SHA (e.g. bas
   assert.equal(readyCommentSha(comment(12, `## READY_FOR_REVIEW\nbase_sha: ${HEAD_B}\n`)), null);
 });
 
-test("F001 evaluate fails closed when READY marker has no exact head SHA", () => {
+test("F001-R2 evaluate fails closed when READY marker has no exact head SHA", () => {
   const state = makeState();
   // HEAD is live and a READY marker exists, but it carries no head_sha field.
   const snap = snapshot(HEAD_A, [comment(13, `## READY_FOR_REVIEW\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\nbase_sha: ${HEAD_B}\n`)]);
   const d = evaluate(snap, state, NOW);
-  // Must NOT assume the marker refers to the current head.
-  assert.equal(actionOf(d), "NOOP");
-  assert.equal(d.reason, "NO_ACTIONABLE_EVENT");
+  // Must NOT assume the marker refers to the current head. A malformed READY
+  // must fail closed into human intervention, not silently fall through.
+  assert.equal(actionOf(d), "HUMAN_INTERVENTION");
+  assert.equal(d.reason, "READY_EVENT_MALFORMED");
+  assert.equal(d.terminal, true);
+  assert.equal(d.terminal_state, "BLOCKED_FOR_HUMAN");
+});
+
+test("F001-R2 invalid head_sha field also fails closed as READY_EVENT_MALFORMED", () => {
+  const state = makeState();
+  const snap = snapshot(HEAD_A, [comment(14, `## READY_FOR_REVIEW\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\nhead_sha: not-a-sha\n`)]);
+  const d = evaluate(snap, state, NOW);
+  assert.equal(actionOf(d), "HUMAN_INTERVENTION");
+  assert.equal(d.reason, "READY_EVENT_MALFORMED");
+  assert.equal(d.terminal, true);
 });
 
 test("F001 READY bound to a different head than current does not dispatch REQUEST_REVIEW", () => {
