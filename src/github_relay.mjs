@@ -74,6 +74,13 @@ export function isSha40(value) {
   return typeof value === "string" && SHA40_RE.test(value.toLowerCase());
 }
 
+/** A positive integer: non-empty string of digits or an integer > 0. */
+function isPositiveInteger(value) {
+  if (typeof value === "number") return Number.isInteger(value) && value > 0;
+  if (typeof value !== "string") return false;
+  return /^[1-9][0-9]*$/.test(value);
+}
+
 function clone(value) {
   return structuredClone(value);
 }
@@ -217,6 +224,10 @@ const fixEventKey = (repo, pr, head) => `${repo}:${pr}:${head}:FIX_REQUIRED`;
 const passEventKey = (repo, pr, head) => `${repo}:${pr}:${head}:PASS`;
 const requestReviewActionId = (repo, pr, head) => `${repo}:${pr}:${head}:REQUEST_REVIEW`;
 const dispatchFixActionId = (repo, pr, head) => `${repo}:${pr}:${head}:DISPATCH_FIX`;
+// F004-R2: the terminal human-notification action carries a deterministic,
+// stable action id derived from repo:pr:terminal.reason so the downstream
+// adapter can ACK the same id across polls without the id changing per poll.
+const notifyHumanActionId = (repo, pr, reason) => `${repo}:${pr}:${reason ?? "TERMINAL_NOTIFICATION"}:NOTIFY_HUMAN`;
 
 // ---------------------------------------------------------------------------
 // State
@@ -321,6 +332,11 @@ export function evaluate(snapshot, state, now) {
     // applyAck does the terminal settle to a permanent NOOP.
     if (state.terminal.notification_required && !state.terminal.notification_comment_id) {
       return baseAction(snapshot, state, "NOTIFY_HUMAN", "TERMINAL_NOTIFICATION_PENDING", {
+        action_id: notifyHumanActionId(
+          snapshot.repo ?? state.repo,
+          snapshot.pr_number ?? state.pr_number,
+          state.terminal.reason,
+        ),
         terminal: true,
         terminal_state: state.terminal.state,
       });
@@ -478,7 +494,11 @@ export function applyDecision(state, decision, now) {
  *                human-intervention notification comment and clears the
  *                terminal's notification_required flag, settling the terminal
  *                into a permanent NOOP (F004-R2 crash-window durability:
- *                until this ACK the kernel keeps emitting NOTIFY_HUMAN).
+ *                until this ACK the kernel keeps emitting NOTIFY_HUMAN). The
+ *                ACK must MATCH the deterministic NOTIFY_HUMAN action_id, have
+ *                result "succeeded", and provide a positive-integer comment id;
+ *                any wrong/unrelated/malformed ACK is a no-op
+ *                (NOTIFICATION_ACK_INVALID) that never mutates state.
  *   succeeded -> pending event key moves to processed; DISPATCH_FIX increments
  *                repair round exactly once.
  *   failed + terminal reason -> terminal entered, pending cleared, nothing
@@ -488,11 +508,24 @@ export function applyDecision(state, decision, now) {
  */
 export function applyAck(state, { actionId, result, reason = null, now, notificationCommentId = null }) {
   const next = clone(state);
-  if (notificationCommentId && next.terminal.active && next.terminal.notification_required) {
-    next.terminal.notification_comment_id = notificationCommentId;
-    next.terminal.notification_required = false;
-    next.updated_at = now;
-    return { state: next, changed: true, status: "NOTIFICATION_RECORDED" };
+  // F004-R2: a terminal notification ACK must MATCH the deterministic
+  // NOTIFY_HUMAN action_id emitted by evaluate(), have result "succeeded",
+  // and carry a positive-integer GitHub comment id. Any wrong/unrelated/malformed
+  // ACK is a strict no-op that never mutates state (status NOTIFICATION_ACK_INVALID).
+  if (notificationCommentId !== null && notificationCommentId !== undefined) {
+    if (
+      next.terminal.active &&
+      next.terminal.notification_required &&
+      actionId === notifyHumanActionId(next.repo, next.pr_number, next.terminal.reason) &&
+      result === "succeeded" &&
+      isPositiveInteger(notificationCommentId)
+    ) {
+      next.terminal.notification_comment_id = notificationCommentId;
+      next.terminal.notification_required = false;
+      next.updated_at = now;
+      return { state: next, changed: true, status: "NOTIFICATION_RECORDED" };
+    }
+    return { state: next, changed: false, status: "NOTIFICATION_ACK_INVALID" };
   }
   if (!next.pending_action) {
     return { state: next, changed: false, status: "NO_PENDING" };
@@ -675,7 +708,7 @@ poll:
 
 ack:
   node src/github_relay.mjs ack --state <state.json> --action-id <id> --result succeeded|failed [--reason <code>] [--now <ISO8601>]
-  node src/github_relay.mjs ack --state <state.json> --notification-comment-id <commentId> [--now <ISO8601>]`;
+  node src/github_relay.mjs ack --state <state.json> --action-id <notifyHumanId> --notification-comment-id <positiveInt> [--now <ISO8601>]`;
 }
 
 function parseArgs(argv) {
@@ -789,8 +822,12 @@ async function dispatchCommand(command, args) {
   }
 
   if (command === "ack") {
-    const hasNotificationAck = Boolean(args["notification-comment-id"]);
-    requireArgs(args, hasNotificationAck ? ["state"] : ["state", "action-id", "result"]);
+    const hasNotificationAck = args["notification-comment-id"] !== undefined;
+    if (hasNotificationAck && !isPositiveInteger(args["notification-comment-id"])) {
+      process.stderr.write(usage(`--notification-comment-id must be a positive integer, got ${args["notification-comment-id"]}`));
+      return 2;
+    }
+    requireArgs(args, hasNotificationAck ? ["state", "action-id"] : ["state", "action-id", "result"]);
     if (!hasNotificationAck && !["succeeded", "failed"].includes(args.result)) {
       process.stderr.write(usage(`--result must be succeeded|failed, got ${args.result}`));
       return 2;
@@ -808,7 +845,7 @@ async function dispatchCommand(command, args) {
       return 4;
     }
     const out = applyAck(state, {
-      actionId: hasNotificationAck ? null : args["action-id"],
+      actionId: args["action-id"],
       result: hasNotificationAck ? "succeeded" : args.result,
       reason: args.reason ?? null,
       now,

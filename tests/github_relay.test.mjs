@@ -326,7 +326,7 @@ test("17b. settled terminal (notification comment ACKed) -> permanent NOOP (F004
   assert.equal(d.reason, "TERMINAL_STATE");
 });
 
-test("17c. applyAck records notification comment id and settles terminal (F004-R2)", () => {
+test("17c. applyAck matches NOTIFY_HUMAN action id and records notification (F004-R2)", () => {
   const state = makeState({
     terminal: {
       active: true,
@@ -338,7 +338,8 @@ test("17c. applyAck records notification comment id and settles terminal (F004-R
       notification_comment_id: null,
     },
   });
-  const out = applyAck(state, { result: "succeeded", notificationCommentId: 9001, now: NOW });
+  const actionId = `${REPO}:${PR}:FRESH_REVIEW_PASS:NOTIFY_HUMAN`;
+  const out = applyAck(state, { actionId, result: "succeeded", notificationCommentId: 9001, now: NOW });
   assert.equal(out.changed, true);
   assert.equal(out.status, "NOTIFICATION_RECORDED");
   assert.equal(out.state.terminal.notification_required, false);
@@ -350,11 +351,77 @@ test("17c. applyAck records notification comment id and settles terminal (F004-R
   assert.equal(d.reason, "TERMINAL_STATE");
 });
 
-test("17d. notification ACK without a pending notification -> no-op (F004-R2)", () => {
-  const state = makeState();
-  const out = applyAck(state, { result: "succeeded", notificationCommentId: 9001, now: NOW });
+test("17d. notification ACK with wrong action id is a strict no-op (F004-R2)", () => {
+  const state = makeState({
+    terminal: {
+      active: true,
+      state: "PASS_AWAITING_MANUAL_MERGE",
+      reason: "FRESH_REVIEW_PASS",
+      entered_at: NOW,
+      notification_required: true,
+      notification_event_key: null,
+      notification_comment_id: null,
+    },
+  });
+  const frozen = JSON.stringify(state);
+  const wrong = applyAck(state, { actionId: `${REPO}:${PR}:WRONG:NOTIFY_HUMAN`, result: "succeeded", notificationCommentId: 9001, now: NOW });
+  assert.equal(wrong.changed, false);
+  assert.equal(wrong.status, "NOTIFICATION_ACK_INVALID");
+  assert.equal(JSON.stringify(wrong.state), frozen);
+  // unrelated (logical-action) ACK on a notification-pending terminal is also a no-op
+  const unrelated = applyAck(state, { actionId: `${REPO}:${PR}:${HEAD_A}:REQUEST_REVIEW`, result: "succeeded", notificationCommentId: 9001, now: NOW });
+  assert.equal(unrelated.changed, false);
+  assert.equal(unrelated.status, "NOTIFICATION_ACK_INVALID");
+});
+
+test("17e. NOTIFY_HUMAN action carries a stable deterministic action_id", () => {
+  const state = makeState({
+    terminal: {
+      active: true,
+      state: "BLOCKED_FOR_HUMAN",
+      reason: "REVIEW_BLOCKED",
+      entered_at: NOW,
+      notification_required: true,
+      notification_event_key: null,
+      notification_comment_id: null,
+    },
+  });
+  const snap = snapshot(HEAD_A, [reviewComment(1, { decision: "BLOCKED", head: HEAD_A })]);
+  const d1 = evaluate(snap, state, NOW);
+  const d2 = evaluate(snap, state, NOW);
+  assert.equal(actionOf(d1), "NOTIFY_HUMAN");
+  assert.equal(actionOf(d2), "NOTIFY_HUMAN");
+  assert.equal(d1.action_id, `${REPO}:${PR}:REVIEW_BLOCKED:NOTIFY_HUMAN`);
+  assert.equal(d1.action_id, d2.action_id);
+});
+
+test("17f. notification ack with non-succeeded result is a no-op (F004-R2)", () => {
+  const state = makeState({
+    terminal: {
+      active: true,
+      state: "PASS_AWAITING_MANUAL_MERGE",
+      reason: "FRESH_REVIEW_PASS",
+      entered_at: NOW,
+      notification_required: true,
+      notification_event_key: null,
+      notification_comment_id: null,
+    },
+  });
+  const frozen = JSON.stringify(state);
+  const actionId = `${REPO}:${PR}:FRESH_REVIEW_PASS:NOTIFY_HUMAN`;
+  const out = applyAck(state, { actionId, result: "failed", reason: "TRANSPORT_BLOCKED", notificationCommentId: 9001, now: NOW });
   assert.equal(out.changed, false);
-  assert.equal(out.status, "NO_PENDING");
+  assert.equal(out.status, "NOTIFICATION_ACK_INVALID");
+  assert.equal(JSON.stringify(out.state), frozen);
+});
+
+test("17g. notification ack without a pending notification -> no-op (F004-R2)", () => {
+  const state = makeState();
+  const frozen = JSON.stringify(state);
+  const out = applyAck(state, { actionId: `${REPO}:${PR}:FRESH_REVIEW_PASS:NOTIFY_HUMAN`, result: "succeeded", notificationCommentId: 9001, now: NOW });
+  assert.equal(out.changed, false);
+  assert.equal(out.status, "NOTIFICATION_ACK_INVALID");
+  assert.equal(JSON.stringify(out.state), frozen);
 });
 
 test("18. state atomic-write recovery does not accept partial JSON", async () => {
@@ -527,8 +594,11 @@ test("F004-R2 poll crash-window: pending notification re-emits NOTIFY_HUMAN unti
   assert.equal(actionOf(second.action), "NOTIFY_HUMAN");
   assert.equal(second.action.reason, "TERMINAL_NOTIFICATION_PENDING");
 
-  // 3. Downstream posts the human-intervention comment and ACKs its comment id.
-  const ackOut = applyAck(persisted, { result: "succeeded", notificationCommentId: 9002, now: NOW });
+  // 3. Downstream posts the human-intervention comment and ACKs its comment id,
+  //    matching the deterministic NOTIFY_HUMAN action id (persisted terminal
+  //    reason is FRESH_REVIEW_PASS from applyDecision).
+  const notifyActionId = `${REPO}:${PR}:FRESH_REVIEW_PASS:NOTIFY_HUMAN`;
+  const ackOut = applyAck(persisted, { actionId: notifyActionId, result: "succeeded", notificationCommentId: 9002, now: NOW });
   assert.equal(ackOut.status, "NOTIFICATION_RECORDED");
   await writeStateFile(statePath, ackOut.state);
 
@@ -739,4 +809,71 @@ test("F003 CLI unknown subcommand -> exit 2", async () => {
   const r = spawnSync(NODE, [ENTRY, "nope"], { encoding: "utf8" });
   assert.equal(r.status, 2);
   assert.match(r.stderr, /unknown subcommand/);
+});
+
+async function writeTerminalState(dir, { reason = "FRESH_REVIEW_PASS", stateName = "PASS_AWAITING_MANUAL_MERGE" } = {}) {
+  const statePath = path.join(dir, "github_relay.json");
+  await writeStateFile(statePath, makeState({
+    terminal: {
+      active: true,
+      state: stateName,
+      reason,
+      entered_at: NOW,
+      notification_required: true,
+      notification_event_key: null,
+      notification_comment_id: null,
+    },
+  }));
+  return statePath;
+}
+
+test("F004-R2 process-level: CLI notification ACK with wrong action id leaves state byte-identical", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-gh-relay-cli-neg-"));
+  const statePath = await writeTerminalState(dir);
+  const before = await readFile(statePath, "utf8");
+  const r = spawnSync(NODE, [ENTRY, "ack", "--state", statePath, "--action-id", `${REPO}:${PR}:WRONG:NOTIFY_HUMAN`, "--notification-comment-id", "9001"], { encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /NOTIFICATION_ACK_INVALID/);
+  assert.doesNotMatch(r.stdout, /NOTIFICATION_RECORDED/);
+  const after = await readFile(statePath, "utf8");
+  assert.equal(after, before);
+  const reloaded = await readStateFile(statePath);
+  assert.equal(reloaded.terminal.notification_required, true);
+  assert.equal(reloaded.terminal.notification_comment_id, null);
+});
+
+test("F004-R2 process-level: CLI notification ACK with non-positive comment id -> exit 2, no state change", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-gh-relay-cli-negid-"));
+  const statePath = await writeTerminalState(dir);
+  const before = await readFile(statePath, "utf8");
+  for (const bad of ["0", "-5", "abc", "1.5", ""]) {
+    const r = spawnSync(NODE, [ENTRY, "ack", "--state", statePath, "--action-id", `${REPO}:${PR}:FRESH_REVIEW_PASS:NOTIFY_HUMAN`, "--notification-comment-id", bad], { encoding: "utf8" });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /positive integer/);
+    assert.doesNotMatch(r.stderr, /\n\s+at /);
+  }
+  const after = await readFile(statePath, "utf8");
+  assert.equal(after, before);
+});
+
+test("F004-R2 process-level: CLI notification ACK without --action-id -> exit 2", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-gh-relay-cli-noaid-"));
+  const statePath = await writeTerminalState(dir);
+  const before = await readFile(statePath, "utf8");
+  const r = spawnSync(NODE, [ENTRY, "ack", "--state", statePath, "--notification-comment-id", "9001"], { encoding: "utf8" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /missing --action-id/);
+  const after = await readFile(statePath, "utf8");
+  assert.equal(after, before);
+});
+
+test("F004-R2 process-level: CLI notification ACK with matching action id settles terminal", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-gh-relay-cli-ok-"));
+  const statePath = await writeTerminalState(dir);
+  const r = spawnSync(NODE, [ENTRY, "ack", "--state", statePath, "--action-id", `${REPO}:${PR}:FRESH_REVIEW_PASS:NOTIFY_HUMAN`, "--notification-comment-id", "9001"], { encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /NOTIFICATION_RECORDED/);
+  const reloaded = await readStateFile(statePath);
+  assert.equal(reloaded.terminal.notification_required, false);
+  assert.equal(String(reloaded.terminal.notification_comment_id), "9001");
 });
