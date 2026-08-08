@@ -355,6 +355,52 @@ test("missing terminal is rebuilt from checkpoint and receives a deterministic r
   assert.equal(result.events.at(-1).type, "terminal_rebuilt");
 });
 
+test("F006: legacy worker recovery is NOT suppressed by a stale relay executor checkpoint", async (t) => {
+  // GH-02 legacy isolation: recoverActiveTerminal never gates on relay state.
+  // Even a stale valid relay executor checkpoint with dispatch_fix.stage ===
+  // "dispatched" must NOT block legitimate legacy Worker terminal recovery —
+  // relay mode routes Worker ownership entirely through the executor, so the
+  // legacy path stays untouched.
+  const { paths } = await tempRuntime(t);
+  const runDir = path.join(paths.runsDir, "GBB-004-A1");
+  await mkdir(runDir, { recursive: true });
+  await writeFile(path.join(runDir, "dispatch.json"), JSON.stringify({
+    run_id: "GBB-004-A1",
+    task_id: "GBB-004",
+    attempt: 1,
+    worktree: "D:\\AIWORK_WT\\GPT_BROWSER_BRIDGE\\GBB-004-A1",
+    roles: {
+      worker: { title: "GBB-004-A1-worker", command: "codex" },
+    },
+  }));
+  // A stale/valid relay executor checkpoint that claims a mid-flight dispatch.
+  await writeFile(paths.relayExecutorState, JSON.stringify({
+    schema_version: 1,
+    protocol: "GBB_GH_EXECUTOR_V1",
+    dispatch_fix: { action_id: "x", stage: "dispatched", recovery_attempted: false },
+  }));
+  const calls = [];
+  const state = projectState({
+    active_terminal: { role: "worker", handle: "term-worker-old", title: "GBB-004-A1-worker" },
+  });
+  const result = await recoverActiveTerminal({
+    paths,
+    now: () => BASE_MS,
+    gitExec: async () => ({ stdout: "" }),
+    orca: quietOrca({
+      listTerminals: async () => [],
+      createTerminal: async (args) => { calls.push(["create", args]); return { handle: "term-worker-new" }; },
+      sendTerminal: async (args) => { calls.push(["send", args]); return { accepted: true }; },
+    }),
+  }, state, defaultRecoveryState(), "2026-08-01T09:00:00+08:00");
+
+  assert.equal(calls.length, 2, "legacy recovery must still create + resume the Worker terminal");
+  assert.equal(calls[0][0], "create");
+  assert.equal(calls[1][0], "send");
+  assert.equal(result.state.active_terminal.handle, "term-worker-new");
+  assert.equal(result.events.at(-1).type, "terminal_rebuilt");
+});
+
 test("resume prompt names the role skill and durable checkpoint sources", () => {
   const text = buildResumePrompt("reviewer", projectState(), { runId: "GBB-004-A1" });
   assert.match(text, /skills\/reviewer\/SKILL\.md/);

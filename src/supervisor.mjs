@@ -391,37 +391,11 @@ export async function writeDirtyAttributionReport(paths, runId, { worktreePath, 
 // §15 steps 6-9: active-terminal health check and crash recovery.
 // ---------------------------------------------------------------------------
 
-// F005: while the relay executor owns a mid-flight DISPATCH_FIX (stage
-// "dispatched"), the executor is the sole authority over the Worker terminal.
-// The supervisor must never create/send a Worker terminal behind it (that
-// would bypass the executor's at-most-once recovery_attempted guard and allow
-// an unbounded rebuild loop). Reads the relay executor checkpoint defensively:
-// a missing/corrupt checkpoint is NOT a dispatch in flight, so it never blocks
-// legacy recovery.
-export async function relayDispatchInFlight(paths) {
-  try {
-    const raw = await readFile(paths.relayExecutorState, "utf8");
-    const exec = JSON.parse(raw);
-    return exec?.dispatch_fix?.stage === "dispatched";
-  } catch {
-    return false;
-  }
-}
-
 export async function recoverActiveTerminal(ctx, state, recoveryState, isoNow) {
   const events = [];
   const recoveries = [];
   const ref = state.active_terminal;
   if (!ref) return { state, recoveryState, events, recoveries };
-
-  // F005: never rebuild/resume the Worker terminal while the relay executor is
-  // mid-dispatch. The executor owns that lifecycle (and its own at-most-once
-  // recovery); a supervisor rebuild here would create a second authority with
-  // the same exact-title worker and bypass the executor's recovery guard.
-  if (ref.role === "worker" && (await relayDispatchInFlight(ctx.paths))) {
-    events.push({ type: "worker_terminal_owned_by_executor", dispatch_stage: "dispatched" });
-    return { state, recoveryState, events, recoveries };
-  }
 
   let terminals;
   try {
