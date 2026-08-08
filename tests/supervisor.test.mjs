@@ -713,6 +713,14 @@ test("relay mode DISPATCH_FIX stays pending until a strict new-head READY proves
   assert.equal(relayState.repair.rounds, 0, "no repair round before Worker completion");
   assert.ok(!relayState.processed_event_keys.includes(`${RELAY_REPO}:${RELAY_PR}:${RELAY_HEAD}:FIX_REQUIRED`), "no event processed without completion proof");
 
+  // From tick 2 on, the exact-title Worker terminal stays alive: a healthy
+  // stall (F003), so no duplicate launch and no recovery.
+  injected.deps.orca = quietOrca({
+    listTerminals: async () => [{ title: "GBB-GH-4-A1-worker", handle: "term-worker" }],
+    createTerminal: async () => { createCount += 1; return { handle: "term-worker", terminal: { handle: "term-worker" } }; },
+    sendTerminal: async () => ({ accepted: true }),
+  });
+
   // Tick 2: still no new-head READY -> NOOP -> executor continuation stays
   // pending, never launches a second worker, never ACKs.
   const second = await runLoopOnce(relayCtx(root, paths, injected));

@@ -129,6 +129,64 @@ test("Worker CLI crash rebuilds the same worktree from checkpoint without reset,
   assert.doesNotMatch(JSON.stringify(gitCalls), /reset|clean|stash/);
 });
 
+test("F005: supervisor must not create/send a Worker terminal while the relay executor owns a dispatched DISPATCH_FIX", async (t) => {
+  const state = projectState({
+    active_terminal: { role: "worker", handle: "worker-old", title: "GBB-004-A1-worker" },
+  });
+  const { paths } = await tempRuntime(t, state);
+  // Relay executor checkpoint: a DISPATCH_FIX is mid-flight (stage dispatched).
+  await writeFile(paths.relayExecutorState, JSON.stringify({
+    schema_version: 1,
+    protocol: "GBB_GH_EXECUTOR_V1",
+    dispatch_fix: { action_id: "x", stage: "dispatched", recovery_attempted: false },
+  }));
+  let created = false;
+  let sent = false;
+  const result = await recoverActiveTerminal({
+    paths,
+    now: () => BASE_MS,
+    orca: orca({
+      createTerminal: async () => { created = true; return { handle: "should-never-happen" }; },
+      sendTerminal: async () => { sent = true; return { accepted: true }; },
+    }),
+  }, state, defaultRecoveryState(), "2026-08-01T09:00:00+08:00");
+
+  assert.equal(created, false, "supervisor must not create a worker terminal mid-dispatch");
+  assert.equal(sent, false, "supervisor must not send a resume prompt mid-dispatch");
+  assert.equal(result.state.active_terminal.handle, "worker-old", "no handle relink/rebuild by supervisor");
+  assert.ok(result.events.some((e) => e.type === "worker_terminal_owned_by_executor"));
+});
+
+test("F005: supervisor may still recover the worker when the relay executor stage is not dispatched", async (t) => {
+  const state = projectState({
+    active_terminal: { role: "worker", handle: "worker-old", title: "GBB-004-A1-worker" },
+  });
+  const { paths } = await tempRuntime(t, state);
+  // Executor checkpoint with no mid-flight dispatch (completed or absent) must
+  // NOT block legacy recovery.
+  await writeFile(paths.relayExecutorState, JSON.stringify({
+    schema_version: 1,
+    protocol: "GBB_GH_EXECUTOR_V1",
+    dispatch_fix: { action_id: "x", stage: "completion_observed", recovery_attempted: true },
+  }));
+  await writeDispatch(paths, {
+    worker: { title: "GBB-004-A1-worker", command: "codex" },
+  });
+  let created = false;
+  const result = await recoverActiveTerminal({
+    paths,
+    now: () => BASE_MS,
+    gitExec: async () => ({ stdout: "" }),
+    orca: orca({
+      createTerminal: async () => { created = true; return { handle: "worker-new" }; },
+      sendTerminal: async () => ({ accepted: true }),
+    }),
+  }, state, defaultRecoveryState(), "2026-08-01T09:00:00+08:00");
+
+  assert.equal(created, true, "non-dispatched stage must not block supervisor recovery");
+  assert.equal(result.state.active_terminal.handle, "worker-new");
+});
+
 test("Reviewer crash creates a fresh-context terminal and forbids stale conclusion reuse", async (t) => {
   const state = projectState({
     current_phase: "reviewer",

@@ -420,10 +420,11 @@ test("DISPATCH_FIX continuation without a new-head READY stays pending with no A
   const first = await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
   assert.equal(first.status, "pending");
 
-  // Tick 2: NOOP continuation, still no READY on GitHub -> pending, no ACK,
-  // same terminal reused (never a second launch).
+  // Tick 2: NOOP continuation, still no READY on GitHub, Worker terminal still
+  // alive -> pending, no ACK, same terminal reused (never a second launch).
   const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
   deps.fetchSnapshot = async () => snapshot([]);
+  deps.orca.listTerminals = async () => [{ title: "GBB-GH-4-A1-worker", handle: "term-worker" }];
   const second = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
   assert.equal(second.status, "pending");
   assert.equal(second.reason, "WORKER_DISPATCH_WAIT");
@@ -499,7 +500,7 @@ test("DISPATCH_FIX ignores a READY bound to a head that is not the current PR he
   assert.equal(out.ack, null);
 });
 
-test("DISPATCH_FIX stays pending across repeated no-READY ticks (stalled worker keeps the loop alive)", async (t) => {
+test("DISPATCH_FIX stays pending across repeated no-READY ticks (healthy stall keeps the loop alive)", async (t) => {
   const checkpointPath = await tempCheckpoint(t);
   const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
   const relayState = baseRelayState({ pending_action: pendingAction(action) });
@@ -508,6 +509,10 @@ test("DISPATCH_FIX stays pending across repeated no-READY ticks (stalled worker 
 
   await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
 
+  // The exact-title Worker terminal stays alive across stall ticks: a genuine
+  // healthy stall. (Override only AFTER dispatch so dispatch still creates.)
+  deps.orca.listTerminals = async () => [{ title: "GBB-GH-4-A1-worker", handle: "term-worker" }];
+
   const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
   for (let i = 0; i < 5; i += 1) {
     const out = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
@@ -515,7 +520,7 @@ test("DISPATCH_FIX stays pending across repeated no-READY ticks (stalled worker 
     assert.equal(out.reason, "WORKER_DISPATCH_WAIT");
     assert.equal(out.ack, null, "a stalled worker must never be ACKed succeeded");
   }
-  assert.equal(calls.createTerminal, 1, "exactly one terminal across all stall ticks");
+  assert.equal(calls.createTerminal, 1, "a live terminal must never be relaunched");
 });
 
 // ---------------------------------------------------------------------------
@@ -533,6 +538,8 @@ async function dispatchThenContinuation(t, comments, { head = HEAD_B, created_at
   const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
   const commentsArr = typeof comments === "function" ? comments() : comments;
   deps.fetchSnapshot = async () => snapshot(commentsArr, { head: { sha: head, state: "OPEN", draft: true } });
+  // A live Worker terminal isolates these tests to READY validation (F002/F004).
+  deps.orca.listTerminals = async () => [{ title: "GBB-GH-4-A1-worker", handle: "term-worker" }];
   const out = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
   return { out, calls };
 }
@@ -588,6 +595,154 @@ test("F002: a pre-dispatch READY is NOT Worker completion", async (t) => {
   const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: ${PR}\nbase_sha: ${HEAD_A}\nhead_sha: ${HEAD_B}\n`, preDispatch)], { head: HEAD_B });
   assert.equal(out.status, "pending", "a READY older than the dispatch must never ACK completion");
   assert.equal(out.ack, null);
+});
+
+// ---------------------------------------------------------------------------
+// F004: READY contract binds worker_self_review:false and merge_performed:false
+// ---------------------------------------------------------------------------
+
+test("F004: a READY with worker_self_review:true is NOT Worker completion", async (t) => {
+  const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: ${PR}\nbase_sha: ${HEAD_A}\nhead_sha: ${HEAD_B}\nworker_self_review: true\nmerge_performed: false\n`)], { head: HEAD_B });
+  assert.equal(out.status, "pending", "worker_self_review:true must never ACK completion");
+  assert.equal(out.ack, null);
+});
+
+test("F004: a READY with no worker_self_review field is NOT Worker completion", async (t) => {
+  const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: ${PR}\nbase_sha: ${HEAD_A}\nhead_sha: ${HEAD_B}\nmerge_performed: false\n`)], { head: HEAD_B });
+  assert.equal(out.status, "pending", "missing worker_self_review must never ACK completion");
+  assert.equal(out.ack, null);
+});
+
+test("F004: a READY with merge_performed:true is NOT Worker completion", async (t) => {
+  const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: ${PR}\nbase_sha: ${HEAD_A}\nhead_sha: ${HEAD_B}\nworker_self_review: false\nmerge_performed: true\n`)], { head: HEAD_B });
+  assert.equal(out.status, "pending", "merge_performed:true must never ACK completion");
+  assert.equal(out.ack, null);
+});
+
+test("F004: a READY with no merge_performed field is NOT Worker completion", async (t) => {
+  const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: ${PR}\nbase_sha: ${HEAD_A}\nhead_sha: ${HEAD_B}\nworker_self_review: false\n`)], { head: HEAD_B });
+  assert.equal(out.status, "pending", "missing merge_performed must never ACK completion");
+  assert.equal(out.ack, null);
+});
+
+// ---------------------------------------------------------------------------
+// F003: Worker terminal disappearance recovery (find-before-create, at most once)
+// ---------------------------------------------------------------------------
+
+test("F003: a disappeared Worker terminal is recovered once via find-before-create", async (t) => {
+  const checkpointPath = await tempCheckpoint(t);
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
+  const relayState = baseRelayState({ pending_action: pendingAction(action) });
+  const { deps, calls } = fakeDeps();
+  deps.fetchSnapshot = async () => snapshot([]);
+  await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+
+  // Tick 2: no READY, and the exact-title terminal is GONE -> one recovery.
+  const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
+  deps.fetchSnapshot = async () => snapshot([]);
+  const out = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(out.status, "pending");
+  assert.equal(out.reason, "WORKER_DISPATCH_RECOVERED");
+  assert.equal(out.ack, null, "recovery must not ACK completion");
+  assert.equal(calls.createTerminal, 2, "exactly one recovery relaunch");
+
+  const checkpoint = await readExecutorState(checkpointPath);
+  assert.equal(checkpoint.dispatch_fix.recovery_attempted, true);
+  assert.equal(checkpoint.dispatch_fix.stage, "dispatched", "recovery does not complete the dispatch");
+});
+
+test("F003: a second disappearance after recovery fails closed into terminal/HUMAN", async (t) => {
+  const checkpointPath = await tempCheckpoint(t);
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
+  const relayState = baseRelayState({ pending_action: pendingAction(action) });
+  const { deps, calls } = fakeDeps();
+  deps.fetchSnapshot = async () => snapshot([]);
+  await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+
+  const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
+  // First disappearance -> recovery (createTerminal once more).
+  deps.fetchSnapshot = async () => snapshot([]);
+  const recovered = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(recovered.status, "pending");
+  assert.equal(calls.createTerminal, 2);
+
+  // Second disappearance (still gone after recovery) -> fail closed.
+  const out = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(out.status, "failed");
+  assert.equal(out.reason, "OPENCODE_ADAPTER_START_FAILED");
+  assert.deepEqual(out.ack, { actionId: action.action_id, result: "failed", reason: "OPENCODE_ADAPTER_START_FAILED" });
+
+  // The failed ACK with a kernel TERMINAL_FAILURE_REASON moves relay to HUMAN.
+  const ackOut = applyAck(relayState, { actionId: out.ack.actionId, result: out.ack.result, reason: out.ack.reason, now: NOW });
+  assert.equal(ackOut.status, "TERMINAL_FAILURE");
+  assert.equal(ackOut.state.terminal.active, true);
+  assert.equal(ackOut.state.terminal.state, "BLOCKED_FOR_HUMAN");
+  assert.equal(calls.createTerminal, 2, "never a second recovery relaunch");
+});
+
+test("F003: a recovery start failure fails closed into terminal/HUMAN", async (t) => {
+  const checkpointPath = await tempCheckpoint(t);
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
+  const relayState = baseRelayState({ pending_action: pendingAction(action) });
+  const { deps } = fakeDeps();
+  deps.fetchSnapshot = async () => snapshot([]);
+  await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+
+  // Tick 2: terminal gone, and the recovery createTerminal throws.
+  const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
+  deps.fetchSnapshot = async () => snapshot([]);
+  deps.orca.createTerminal = async () => {
+    throw new Error("orca offline during recovery");
+  };
+  const out = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(out.status, "failed");
+  assert.equal(out.reason, "OPENCODE_ADAPTER_START_FAILED");
+  assert.deepEqual(out.ack, { actionId: action.action_id, result: "failed", reason: "OPENCODE_ADAPTER_START_FAILED" });
+});
+
+test("F005: a transient listTerminals throw during recovery defers instead of failing closed", async (t) => {
+  const checkpointPath = await tempCheckpoint(t);
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
+  const relayState = baseRelayState({ pending_action: pendingAction(action) });
+  const { deps, calls } = fakeDeps();
+  deps.fetchSnapshot = async () => snapshot([]);
+  await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+
+  // Tick 2: terminal GONE, and the recovery's find-before-create listTerminals
+  // throws (ORCA adapter transient failure, e.g. ORCA restart). Must NOT fail
+  // closed into HUMAN: defer recovery to the next tick instead (F005).
+  const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
+  deps.fetchSnapshot = async () => snapshot([]);
+  // The healthy-check listTerminals returns [] (terminal gone -> recovery
+  // path), then the find-before-create listTerminals THROWS (transient ORCA
+  // adapter failure). Only the second call may throw (F005).
+  const callsDuringRecovery = calls.listTerminals;
+  let listCalls = 0;
+  deps.orca.listTerminals = async () => {
+    calls.listTerminals += 1;
+    listCalls += 1;
+    if (listCalls >= 2) throw new Error("orca adapter transient failure");
+    return [];
+  };
+  const out = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(out.status, "pending");
+  assert.equal(out.reason, "WORKER_RECOVERY_DEFERRED");
+  assert.equal(out.ack, null, "a deferred recovery must not ACK anything");
+  assert.equal(calls.createTerminal, 1, "no terminal is created on a deferred recovery");
+  assert.equal(calls.listTerminals, callsDuringRecovery + 2, "healthy check + one find-before-create attempt");
+
+  const checkpoint = await readExecutorState(checkpointPath);
+  assert.ok(!checkpoint.dispatch_fix.recovery_attempted, "a deferred recovery must not mark recovery_attempted");
+
+  // Next tick the adapter is healthy again: recovery proceeds.
+  deps.orca.listTerminals = async () => {
+    calls.listTerminals += 1;
+    return [];
+  };
+  const next = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(next.status, "pending");
+  assert.equal(next.reason, "WORKER_DISPATCH_RECOVERED");
+  assert.equal(calls.createTerminal, 2, "recovery completes on the next tick");
 });
 
 // ---------------------------------------------------------------------------

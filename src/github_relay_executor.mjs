@@ -75,6 +75,10 @@ export function strictWorkerReady(comment, { prNumber, cardId, reviewedHead, cur
   if (dispatchedAt !== null && (readyAt === null || Number.isNaN(readyAt) || readyAt < dispatchedAt)) {
     return { ok: false, reason: "pre_dispatch_ready" };
   }
+  // F004: the READY contract also binds worker_self_review and merge_performed
+  // to false. Any other value is NOT a Worker completion proof.
+  if (readyField(comment.body, "worker_self_review") !== "false") return { ok: false, reason: "worker_self_review_not_false" };
+  if (readyField(comment.body, "merge_performed") !== "false") return { ok: false, reason: "merge_performed_not_false" };
   return { ok: true, headSha };
 }
 
@@ -386,33 +390,21 @@ async function handleDispatchFix({ relayState, action, state, deps, nowIso }) {
   const title = workerTerminalTitle(relayState, action);
 
   // Continuation: a durable dispatch checkpoint already exists for this
-  // action. Do NOT relaunch — reuse/find the same terminal and let GitHub
-  // prove Worker completion with a strict READY bound to a NEW PR head.
+  // action. Completion READY is checked FIRST (F002 strict machine shape); if
+  // absent, the Worker terminal health is checked. A terminal that disappears
+  // gets at most ONE durable find-before-create recovery; a second
+  // disappearance or a failed recovery start fails closed into terminal/HUMAN
+  // — never an infinite pending loop (F003).
   if (state.dispatch_fix && state.dispatch_fix.action_id === actionId && state.dispatch_fix.stage === "dispatched") {
     const reviewedHead = state.dispatch_fix.reviewed_head_sha ?? relayState.observed?.current_head_sha ?? action.current_head_sha ?? null;
     const dispatchedAt = state.dispatch_fix.dispatched_at ? Date.parse(state.dispatch_fix.dispatched_at) : null;
 
-    // Reuse/find the same terminal without launching a duplicate.
-    let handle = state.dispatch_fix.handle ?? null;
-    let terminals = [];
-    try {
-      terminals = await deps.orca.listTerminals();
-    } catch (e) {
-      return fail("OPENCODE_ADAPTER_START_FAILED", ackFailed(actionId, "OPENCODE_ADAPTER_START_FAILED"));
-    }
-    const existing = Array.isArray(terminals) ? terminals.find((t) => t?.title === title) : undefined;
-    if (existing && existing.handle) {
-      handle = existing.handle;
-      state.dispatch_fix = { ...state.dispatch_fix, handle };
-      state.updated_at = nowIso;
-      await writeExecutorState(deps.checkpointPath, state);
-    }
-
-    // GitHub completion proof: a strict GBB_GH_READY_FOR_REVIEW_V1 comment
+    // 1) Completion proof first: a strict GBB_GH_READY_FOR_REVIEW_V1 comment
     // bound to the relay PR, the card, and a NEW PR head — a valid 40-hex SHA,
-    // different from the reviewed head, equal to the current PR head, and
-    // posted at/after dispatch. Marker-only or head-only comments are NEVER
-    // completion (F002).
+    // different from the reviewed head, equal to the current PR head, posted
+    // at/after dispatch, with worker_self_review:false and
+    // merge_performed:false. Marker-only or head-only comments are NEVER
+    // completion (F002/F004).
     let snapshot;
     try {
       snapshot = await deps.fetchSnapshot({ repo, issue, pr });
@@ -427,10 +419,8 @@ async function handleDispatchFix({ relayState, action, state, deps, nowIso }) {
       currentHead,
       dispatchedAt,
     });
-    const completed = Boolean(strict && strict.ok);
-    const readySha = strict?.ok ? strict.headSha : null;
-
-    if (completed) {
+    if (strict && strict.ok) {
+      const readySha = strict.headSha;
       state.dispatch_fix = {
         ...state.dispatch_fix,
         stage: "completion_observed",
@@ -442,15 +432,78 @@ async function handleDispatchFix({ relayState, action, state, deps, nowIso }) {
       return executed(
         "WORKER_COMPLETION_OBSERVED",
         ackOk(actionId),
-        { terminal_title: title, head_sha: readySha, handle },
+        { terminal_title: title, head_sha: readySha, handle: state.dispatch_fix.handle ?? null },
         [{ type: "worker_completion_observed", head_sha: readySha }]
       );
     }
 
-    // No proof yet: stay pending. The kernel keeps DISPATCH_FIX as the pending
-    // action so the loop keeps monitoring and can recover — never a premature
-    // succeeded ACK (§F001-R3).
-    return pending("WORKER_DISPATCH_WAIT", { terminal_title: title, handle });
+    // 2) No completion proof yet. Verify the exact-title Worker terminal is
+    // still alive; a live terminal means a healthy stall — keep monitoring
+    // GitHub, never ACK, never relaunch.
+    let terminals = [];
+    try {
+      terminals = await deps.orca.listTerminals();
+    } catch (e) {
+      return fail("OPENCODE_ADAPTER_START_FAILED", ackFailed(actionId, "OPENCODE_ADAPTER_START_FAILED"));
+    }
+    const existing = Array.isArray(terminals) ? terminals.find((t) => t?.title === title) : undefined;
+    if (existing && existing.handle) {
+      state.dispatch_fix = { ...state.dispatch_fix, handle: existing.handle };
+      state.updated_at = nowIso;
+      await writeExecutorState(deps.checkpointPath, state);
+      return pending("WORKER_DISPATCH_WAIT", { terminal_title: title, handle: existing.handle });
+    }
+
+    // 3) The exact-title Worker terminal is GONE. At most ONE durable
+    // find-before-create recovery; a second disappearance or a failed recovery
+    // start fails closed into terminal/HUMAN (OPENCODE_ADAPTER_START_FAILED is
+    // a kernel TERMINAL_FAILURE_REASON) — never an infinite pending loop.
+    if (state.dispatch_fix.recovery_attempted) {
+      return fail("OPENCODE_ADAPTER_START_FAILED", ackFailed(actionId, "OPENCODE_ADAPTER_START_FAILED"), [
+        { type: "worker_terminal_lost", terminal_title: title },
+      ]);
+    }
+
+    const prompt = buildWorkerPrompt({
+      repo,
+      issueNumber: issue,
+      prNumber: pr,
+      headSha: reviewedHead,
+      cardId: deps.cardId ?? null,
+    });
+    try {
+      let relist = [];
+      try {
+        relist = await deps.orca.listTerminals();
+      } catch (e) {
+        // A throw here is almost always a transient ORCA adapter problem (e.g.
+        // ORCA restarting), NOT proof the terminal is dead. Never fail closed
+        // into terminal/HUMAN on a single transient failure — defer the
+        // recovery to the next tick instead (F005).
+        return pending("WORKER_RECOVERY_DEFERRED", { terminal_title: title });
+      }
+      const reFound = Array.isArray(relist) ? relist.find((t) => t?.title === title) : undefined;
+      if (reFound && reFound.handle) {
+        state.dispatch_fix = { ...state.dispatch_fix, handle: reFound.handle, recovery_attempted: true, recovered_at: nowIso };
+      } else {
+        const created = await deps.orca.createTerminal({
+          worktree: deps.worktree ?? null,
+          title,
+          command: deps.workerCommand ?? "opencode",
+        });
+        const handle = created?.handle ?? created?.terminal?.handle;
+        if (!handle) throw new Error("createTerminal returned no handle");
+        await deps.orca.sendTerminal({ handle, text: prompt, enter: true });
+        state.dispatch_fix = { ...state.dispatch_fix, handle, recovery_attempted: true, recovered_at: nowIso };
+      }
+      state.updated_at = nowIso;
+      await writeExecutorState(deps.checkpointPath, state);
+      return pending("WORKER_DISPATCH_RECOVERED", { terminal_title: title, handle: state.dispatch_fix.handle ?? null });
+    } catch (e) {
+      return fail("OPENCODE_ADAPTER_START_FAILED", ackFailed(actionId, "OPENCODE_ADAPTER_START_FAILED"), [
+        { type: "worker_terminal_recovery_failed", error: e?.message ?? "unknown" },
+      ]);
+    }
   }
 
   // Fresh dispatch: deterministic OpenCode Worker terminal (find before
