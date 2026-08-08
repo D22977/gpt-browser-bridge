@@ -128,6 +128,8 @@ jobs:
           Write-Output 'no stale canary workspace detected'
 
       - name: Fail-closed - no GitHub write credential in Worker environment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
           $forbidden = @('GH_TOKEN','GH_ENTERPRISE_TOKEN','GITHUB_PAT','GH_PAT','GIT_ASKPASS','GIT_CREDENTIALS','GHES_TOKEN')
@@ -237,6 +239,7 @@ jobs:
           Write-Output 'all changed paths are within the canary allowlist'
 
       - name: Fail-closed - no residual Worker process after completion
+        if: always()
         run: |
           $ErrorActionPreference = 'Stop'
           $needle = [regex]::Escape($env:GBB_WORKER_RUN_ID)
