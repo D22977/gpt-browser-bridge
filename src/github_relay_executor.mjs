@@ -26,7 +26,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import writeFileAtomic from "write-file-atomic";
-import { parseReviewResults, REVIEW_PROTOCOL } from "./github_relay.mjs";
+import { findReadyComment, isSha40, parseReviewResults, readyCommentSha, REVIEW_PROTOCOL } from "./github_relay.mjs";
 import { buildTerminalTitle } from "./adapters/orca_adapter.mjs";
 
 export const EXECUTOR_SCHEMA_VERSION = 1;
@@ -324,13 +324,88 @@ async function handleDispatchFix({ relayState, action, state, deps, nowIso }) {
   const repo = relayState.repo ?? action.repo;
   const issue = relayState.issue_number ?? action.issue_number;
   const pr = relayState.pr_number ?? action.pr_number;
-  const head = relayState.observed?.current_head_sha ?? action.current_head_sha;
+  const actionId = action.action_id ?? relayState?.pending_action?.action_id ?? state.dispatch_fix?.action_id;
   const title = workerTerminalTitle(relayState, action);
+
+  // Continuation: a durable dispatch checkpoint already exists for this
+  // action. Do NOT relaunch — reuse/find the same terminal and let GitHub
+  // prove Worker completion with a strict READY bound to a NEW PR head.
+  if (state.dispatch_fix && state.dispatch_fix.action_id === actionId && state.dispatch_fix.stage === "dispatched") {
+    const reviewedHead = state.dispatch_fix.reviewed_head_sha ?? relayState.observed?.current_head_sha ?? action.current_head_sha ?? null;
+    const dispatchedAt = state.dispatch_fix.dispatched_at ? Date.parse(state.dispatch_fix.dispatched_at) : null;
+
+    // Reuse/find the same terminal without launching a duplicate.
+    let handle = state.dispatch_fix.handle ?? null;
+    let terminals = [];
+    try {
+      terminals = await deps.orca.listTerminals();
+    } catch (e) {
+      return fail("OPENCODE_ADAPTER_START_FAILED", ackFailed(actionId, "OPENCODE_ADAPTER_START_FAILED"));
+    }
+    const existing = Array.isArray(terminals) ? terminals.find((t) => t?.title === title) : undefined;
+    if (existing && existing.handle) {
+      handle = existing.handle;
+      state.dispatch_fix = { ...state.dispatch_fix, handle };
+      state.updated_at = nowIso;
+      await writeExecutorState(deps.checkpointPath, state);
+    }
+
+    // GitHub completion proof: a strict READY_FOR_REVIEW bound to a NEW PR
+    // head — a valid 40-hex SHA, different from the reviewed head, equal to
+    // the current PR head, and posted after this worker was dispatched.
+    let snapshot;
+    try {
+      snapshot = await deps.fetchSnapshot({ repo, issue, pr });
+    } catch (e) {
+      return fail("TRANSPORT_BLOCKED", ackFailed(actionId, "TRANSPORT_BLOCKED"));
+    }
+    const ready = findReadyComment(snapshot.comments);
+    const readySha = ready ? readyCommentSha(ready) : null;
+    const currentHead = snapshot?.head?.sha ?? null;
+    const readyAt = ready?.created_at ? Date.parse(ready.created_at) : null;
+    const completed = Boolean(
+      readySha &&
+      isSha40(readySha) &&
+      readySha !== reviewedHead &&
+      readySha === currentHead &&
+      dispatchedAt !== null &&
+      readyAt !== null &&
+      readyAt >= dispatchedAt
+    );
+
+    if (completed) {
+      state.dispatch_fix = {
+        ...state.dispatch_fix,
+        stage: "completion_observed",
+        completion_head_sha: readySha,
+        completed_at: nowIso,
+      };
+      state.updated_at = nowIso;
+      await writeExecutorState(deps.checkpointPath, state);
+      return executed(
+        "WORKER_COMPLETION_OBSERVED",
+        ackOk(actionId),
+        { terminal_title: title, head_sha: readySha, handle },
+        [{ type: "worker_completion_observed", head_sha: readySha }]
+      );
+    }
+
+    // No proof yet: stay pending. The kernel keeps DISPATCH_FIX as the pending
+    // action so the loop keeps monitoring and can recover — never a premature
+    // succeeded ACK (§F001-R3).
+    return pending("WORKER_DISPATCH_WAIT", { terminal_title: title, handle });
+  }
+
+  // Fresh dispatch: deterministic OpenCode Worker terminal (find before
+  // create). Terminal start/reuse alone is NOT completion — persist a durable
+  // checkpoint and return pending (no ACK) until GitHub proves a new-head
+  // READY on a later tick (§F001-R3).
+  const reviewedHead = relayState.observed?.current_head_sha ?? action.current_head_sha ?? null;
   const prompt = buildWorkerPrompt({
     repo,
     issueNumber: issue,
     prNumber: pr,
-    headSha: head,
+    headSha: reviewedHead,
     cardId: deps.cardId ?? null,
   });
 
@@ -338,20 +413,23 @@ async function handleDispatchFix({ relayState, action, state, deps, nowIso }) {
   try {
     terminals = await deps.orca.listTerminals();
   } catch (e) {
-    return fail("OPENCODE_ADAPTER_START_FAILED", ackFailed(action.action_id, "OPENCODE_ADAPTER_START_FAILED"));
+    return fail("OPENCODE_ADAPTER_START_FAILED", ackFailed(actionId, "OPENCODE_ADAPTER_START_FAILED"));
   }
 
   const existing = Array.isArray(terminals) ? terminals.find((t) => t?.title === title) : undefined;
   if (existing) {
-    state.dispatch_fix = { action_id: action.action_id, terminal_title: title, reused: true, handle: existing.handle ?? null };
+    state.dispatch_fix = {
+      action_id: actionId,
+      terminal_title: title,
+      reused: true,
+      handle: existing.handle ?? null,
+      reviewed_head_sha: reviewedHead,
+      stage: "dispatched",
+      dispatched_at: nowIso,
+    };
     state.updated_at = nowIso;
     await writeExecutorState(deps.checkpointPath, state);
-    return executed(
-      "WORKER_TERMINAL_REUSED",
-      ackOk(action.action_id),
-      { terminal_title: title, handle: existing.handle ?? null },
-      [{ type: "worker_terminal_reused", title }]
-    );
+    return pending("WORKER_TERMINAL_REUSED", { terminal_title: title, handle: existing.handle ?? null });
   }
 
   let created;
@@ -367,21 +445,24 @@ async function handleDispatchFix({ relayState, action, state, deps, nowIso }) {
   } catch (e) {
     return fail(
       "OPENCODE_ADAPTER_START_FAILED",
-      ackFailed(action.action_id, "OPENCODE_ADAPTER_START_FAILED"),
+      ackFailed(actionId, "OPENCODE_ADAPTER_START_FAILED"),
       [{ type: "worker_terminal_start_failed", error: e?.message ?? "unknown" }]
     );
   }
 
   const handle = created?.handle ?? created?.terminal?.handle;
-  state.dispatch_fix = { action_id: action.action_id, terminal_title: title, reused: false, handle };
+  state.dispatch_fix = {
+    action_id: actionId,
+    terminal_title: title,
+    reused: false,
+    handle,
+    reviewed_head_sha: reviewedHead,
+    stage: "dispatched",
+    dispatched_at: nowIso,
+  };
   state.updated_at = nowIso;
   await writeExecutorState(deps.checkpointPath, state);
-  return executed(
-    "WORKER_TERMINAL_STARTED",
-    ackOk(action.action_id),
-    { terminal_title: title, handle },
-    [{ type: "worker_terminal_started", title }]
-  );
+  return pending("WORKER_TERMINAL_STARTED", { terminal_title: title, handle });
 }
 
 // ---------------------------------------------------------------------------

@@ -493,6 +493,7 @@ const RELAY_REPO = "D22977/MEP-";
 const RELAY_ISSUE = 3;
 const RELAY_PR = 4;
 const RELAY_HEAD = "f8e644871036f190b6e6385f3969f65ec9b016fb";
+const RELAY_HEAD_B = "111122223333444455556666777788889999aaaa";
 const RELAY_NOW = "2026-08-07T16:00:00+08:00";
 
 function relayComment(id, body, created_at = RELAY_NOW) {
@@ -501,6 +502,14 @@ function relayComment(id, body, created_at = RELAY_NOW) {
 
 function relayReadyComment(head = RELAY_HEAD) {
   return relayComment(11, `## READY_FOR_REVIEW\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\nbase_sha: ${RELAY_HEAD}\nhead_sha: ${head}\n`);
+}
+
+function relayReviewComment(id, { decision, head = RELAY_HEAD, pr_number = RELAY_PR, created_at = RELAY_NOW }) {
+  return relayComment(
+    id,
+    `Review:\n\`\`\`json\n${JSON.stringify({ protocol: "MRMP_REVIEW_RESULT_V1", card_id: "GBB-GH-02", pr_number, reviewed_head_sha: head, decision })}\n\`\`\``,
+    created_at
+  );
 }
 
 function relayDeps(overrides = {}) {
@@ -675,6 +684,57 @@ test("relay mode applies the executor ACK back into relay state after a receipt"
   assert.equal(outcome.reason, "REVIEW_RECEIPT_OBSERVED");
   assert.equal(relayState.pending_action, null, "pending action must be cleared by the applied ACK");
   assert.ok(relayState.processed_event_keys.includes(`${RELAY_REPO}:${RELAY_PR}:${RELAY_HEAD}:READY`));
+});
+
+test("relay mode DISPATCH_FIX stays pending until a strict new-head READY proves Worker completion", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const injected = relayDeps();
+  let createCount = 0;
+  injected.deps.orca = quietOrca({
+    createTerminal: async () => { createCount += 1; return { handle: "term-worker", terminal: { handle: "term-worker" } }; },
+    sendTerminal: async () => ({ accepted: true }),
+  });
+
+  const fixReview = () => relayReviewComment(12, { decision: "FIX_REQUIRED" });
+  const snapshotFor = (comments, head) => ({ repo: RELAY_REPO, issue_number: RELAY_ISSUE, pr_number: RELAY_PR, head: { sha: head, state: "OPEN", draft: true }, comments });
+
+  // Tick 1: fresh FIX_REQUIRED on current head -> DISPATCH_FIX -> worker
+  // terminal starts, executor returns pending (no ACK).
+  injected.deps.fetchSnapshot = async () => snapshotFor([fixReview()], RELAY_HEAD);
+  const first = await runLoopOnce(relayCtx(root, paths, injected));
+  assert.equal(first.stop, false);
+  assert.equal(first.action, "DISPATCH_FIX");
+  assert.equal(first.status, "pending", "terminal start must not ACK succeeded");
+  assert.equal(first.reason, "WORKER_TERMINAL_STARTED");
+
+  let relayState = await readJson(paths.relayState);
+  assert.ok(relayState.pending_action, "DISPATCH_FIX must stay pending");
+  assert.equal(relayState.pending_action.action, "DISPATCH_FIX");
+  assert.equal(relayState.repair.rounds, 0, "no repair round before Worker completion");
+  assert.ok(!relayState.processed_event_keys.includes(`${RELAY_REPO}:${RELAY_PR}:${RELAY_HEAD}:FIX_REQUIRED`), "no event processed without completion proof");
+
+  // Tick 2: still no new-head READY -> NOOP -> executor continuation stays
+  // pending, never launches a second worker, never ACKs.
+  const second = await runLoopOnce(relayCtx(root, paths, injected));
+  assert.equal(second.action, "NOOP");
+  assert.equal(second.status, "pending");
+  assert.equal(second.reason, "WORKER_DISPATCH_WAIT");
+  assert.equal(createCount, 1, "must not relaunch a duplicate worker terminal");
+  relayState = await readJson(paths.relayState);
+  assert.equal(relayState.repair.rounds, 0);
+
+  // Tick 3: the Worker pushed a new commit and posted a strict READY for it ->
+  // executor ACKs succeeded -> kernel processes the FIX_REQUIRED event and
+  // increments the repair round exactly once.
+  injected.deps.fetchSnapshot = async () => snapshotFor([fixReview(), relayReadyComment(RELAY_HEAD_B)], RELAY_HEAD_B);
+  const third = await runLoopOnce(relayCtx(root, paths, injected));
+  assert.equal(third.action, "NOOP");
+  assert.equal(third.status, "executed");
+  assert.equal(third.reason, "WORKER_COMPLETION_OBSERVED");
+  relayState = await readJson(paths.relayState);
+  assert.equal(relayState.pending_action, null, "pending must clear only after completion proof");
+  assert.equal(relayState.repair.rounds, 1, "repair round increments exactly once on completion");
+  assert.ok(relayState.processed_event_keys.includes(`${RELAY_REPO}:${RELAY_PR}:${RELAY_HEAD}:FIX_REQUIRED`));
 });
 
 test("relay mode transport failure enters a terminal relay state without crashing the loop", async (t) => {

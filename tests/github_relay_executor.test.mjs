@@ -28,6 +28,7 @@ const REPO = "D22977/MEP-";
 const ISSUE = 3;
 const PR = 4;
 const HEAD_A = "f8e644871036f190b6e6385f3969f65ec9b016fb";
+const HEAD_B = "111122223333444455556666777788889999aaaa";
 const NOW = "2026-08-07T16:00:00+08:00";
 const NOW_MS = Date.parse(NOW);
 
@@ -42,6 +43,14 @@ function baseRelayState(overrides = {}) {
 
 function comment(id, body, created_at = NOW) {
   return { id, body, created_at };
+}
+
+function readyComment(id, head = HEAD_A, created_at = NOW) {
+  return comment(
+    id,
+    `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\nbase_sha: ${HEAD_A}\nhead_sha: ${head}\n`,
+    created_at
+  );
 }
 
 function reviewComment(id, { decision, head = HEAD_A, pr_number = PR, created_at = NOW }) {
@@ -352,30 +361,34 @@ test("NOOP with sent inflight times out into a failed ACK after REVIEW_TIMEOUT_M
 // executeAction: DISPATCH_FIX
 // ---------------------------------------------------------------------------
 
-test("DISPATCH_FIX creates a deterministic worker terminal and ACKs succeeded", async (t) => {
+test("DISPATCH_FIX starts a deterministic worker terminal and stays pending (no premature succeeded ACK)", async (t) => {
   const checkpointPath = await tempCheckpoint(t);
-  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX`, reason: "FRESH_FIX_REQUIRED" });
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
   const relayState = baseRelayState({ pending_action: pendingAction(action) });
   const { deps, calls } = fakeDeps();
   const out = await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
-  assert.equal(out.status, "executed");
+  assert.equal(out.status, "pending", "terminal start must not ACK succeeded");
   assert.equal(out.reason, "WORKER_TERMINAL_STARTED");
-  assert.deepEqual(out.ack, { actionId: action.action_id, result: "succeeded" });
+  assert.equal(out.ack, null, "no ACK until GitHub proves Worker completion");
   assert.equal(calls.listTerminals, 1);
   assert.equal(calls.createTerminal, 1);
   assert.equal(calls.sendTerminal, 1);
   assert.ok(out.receipt.terminal_title.includes("-worker"));
+  const checkpoint = await readExecutorState(checkpointPath);
+  assert.equal(checkpoint.dispatch_fix.stage, "dispatched");
+  assert.equal(checkpoint.dispatch_fix.reviewed_head_sha, HEAD_A);
 });
 
-test("DISPATCH_FIX reuses an existing same-title terminal instead of creating a duplicate", async (t) => {
+test("DISPATCH_FIX reuses an existing same-title terminal and stays pending (no duplicate, no ACK)", async (t) => {
   const checkpointPath = await tempCheckpoint(t);
-  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX`, reason: "FRESH_FIX_REQUIRED" });
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
   const relayState = baseRelayState({ pending_action: pendingAction(action) });
   const { deps, calls } = fakeDeps();
   deps.orca.listTerminals = async () => [{ title: "GBB-GH-4-A1-worker", handle: "term-old" }];
   const out = await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
-  assert.equal(out.status, "executed");
+  assert.equal(out.status, "pending");
   assert.equal(out.reason, "WORKER_TERMINAL_REUSED");
+  assert.equal(out.ack, null);
   assert.equal(calls.createTerminal, 0);
   assert.equal(calls.sendTerminal, 0);
   const state = await readExecutorState(checkpointPath);
@@ -384,7 +397,7 @@ test("DISPATCH_FIX reuses an existing same-title terminal instead of creating a 
 
 test("DISPATCH_FIX with ORCA start failure fails closed with an ACK", async (t) => {
   const checkpointPath = await tempCheckpoint(t);
-  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX`, reason: "FRESH_FIX_REQUIRED" });
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
   const relayState = baseRelayState({ pending_action: pendingAction(action) });
   const { deps } = fakeDeps();
   deps.orca.createTerminal = async () => {
@@ -394,6 +407,115 @@ test("DISPATCH_FIX with ORCA start failure fails closed with an ACK", async (t) 
   assert.equal(out.status, "failed");
   assert.equal(out.reason, "OPENCODE_ADAPTER_START_FAILED");
   assert.deepEqual(out.ack, { actionId: action.action_id, result: "failed", reason: "OPENCODE_ADAPTER_START_FAILED" });
+});
+
+test("DISPATCH_FIX continuation without a new-head READY stays pending with no ACK and no duplicate launch", async (t) => {
+  const checkpointPath = await tempCheckpoint(t);
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
+  const relayState = baseRelayState({ pending_action: pendingAction(action) });
+  const { deps, calls } = fakeDeps();
+
+  // Tick 1: terminal start -> pending (checkpoint persisted, stage dispatched).
+  deps.fetchSnapshot = async () => snapshot([]);
+  const first = await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(first.status, "pending");
+
+  // Tick 2: NOOP continuation, still no READY on GitHub -> pending, no ACK,
+  // same terminal reused (never a second launch).
+  const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
+  deps.fetchSnapshot = async () => snapshot([]);
+  const second = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(second.status, "pending");
+  assert.equal(second.reason, "WORKER_DISPATCH_WAIT");
+  assert.equal(second.ack, null, "no succeeded ACK without GitHub proof");
+  assert.equal(calls.createTerminal, 1, "must not relaunch a duplicate worker terminal");
+
+  const checkpoint = await readExecutorState(checkpointPath);
+  assert.equal(checkpoint.dispatch_fix.stage, "dispatched");
+  assert.equal(checkpoint.dispatch_fix.action_id, action.action_id);
+});
+
+test("DISPATCH_FIX ACKs succeeded only after a strict READY bound to a NEW PR head", async (t) => {
+  const checkpointPath = await tempCheckpoint(t);
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
+  const relayState = baseRelayState({ pending_action: pendingAction(action) });
+  const { deps, calls } = fakeDeps();
+
+  // Tick 1: terminal start -> pending.
+  deps.fetchSnapshot = async () => snapshot([]);
+  const first = await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(first.status, "pending");
+
+  // Tick 2: Worker pushed a new head and posted a strict READY for it.
+  const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
+  deps.fetchSnapshot = async () => snapshot([readyComment(7, HEAD_B)], { head: { sha: HEAD_B, state: "OPEN", draft: true } });
+  const second = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(second.status, "executed");
+  assert.equal(second.reason, "WORKER_COMPLETION_OBSERVED");
+  assert.deepEqual(second.ack, { actionId: action.action_id, result: "succeeded" });
+  assert.equal(calls.createTerminal, 1, "completion must not relaunch the worker");
+
+  const checkpoint = await readExecutorState(checkpointPath);
+  assert.equal(checkpoint.dispatch_fix.stage, "completion_observed");
+  assert.equal(checkpoint.dispatch_fix.completion_head_sha, HEAD_B);
+
+  // The ACK must be applicable by the kernel: event processed, repair round bumped.
+  const ackOut = applyAck(relayState, { actionId: second.ack.actionId, result: second.ack.result, now: NOW });
+  assert.equal(ackOut.status, "PROCESSED");
+  assert.equal(ackOut.state.pending_action, null);
+  assert.ok(ackOut.state.processed_event_keys.includes(action.event_key));
+  assert.equal(ackOut.state.repair.rounds, 1);
+});
+
+test("DISPATCH_FIX ignores a READY bound to the same reviewed head (stall protection)", async (t) => {
+  const checkpointPath = await tempCheckpoint(t);
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
+  const relayState = baseRelayState({ pending_action: pendingAction(action) });
+  const { deps } = fakeDeps();
+  deps.fetchSnapshot = async () => snapshot([]);
+  await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+
+  // A READY for the OLD reviewed head (HEAD_A) must not count as completion.
+  const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
+  deps.fetchSnapshot = async () => snapshot([readyComment(7, HEAD_A)], { head: { sha: HEAD_A, state: "OPEN", draft: true } });
+  const out = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(out.status, "pending", "same-head READY must not ACK completion");
+  assert.equal(out.ack, null);
+});
+
+test("DISPATCH_FIX ignores a READY bound to a head that is not the current PR head (strict binding)", async (t) => {
+  const checkpointPath = await tempCheckpoint(t);
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
+  const relayState = baseRelayState({ pending_action: pendingAction(action) });
+  const { deps } = fakeDeps();
+  deps.fetchSnapshot = async () => snapshot([]);
+  await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+
+  // READY claims HEAD_B but the PR head has NOT advanced -> worker must wait.
+  const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
+  deps.fetchSnapshot = async () => snapshot([readyComment(7, HEAD_B)], { head: { sha: HEAD_A, state: "OPEN", draft: true } });
+  const out = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  assert.equal(out.status, "pending", "READY must be bound to the actual current PR head");
+  assert.equal(out.ack, null);
+});
+
+test("DISPATCH_FIX stays pending across repeated no-READY ticks (stalled worker keeps the loop alive)", async (t) => {
+  const checkpointPath = await tempCheckpoint(t);
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
+  const relayState = baseRelayState({ pending_action: pendingAction(action) });
+  const { deps, calls } = fakeDeps();
+  deps.fetchSnapshot = async () => snapshot([]);
+
+  await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+
+  const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
+  for (let i = 0; i < 5; i += 1) {
+    const out = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+    assert.equal(out.status, "pending");
+    assert.equal(out.reason, "WORKER_DISPATCH_WAIT");
+    assert.equal(out.ack, null, "a stalled worker must never be ACKed succeeded");
+  }
+  assert.equal(calls.createTerminal, 1, "exactly one terminal across all stall ticks");
 });
 
 // ---------------------------------------------------------------------------
