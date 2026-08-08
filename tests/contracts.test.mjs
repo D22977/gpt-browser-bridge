@@ -2,6 +2,7 @@
 // node:test only. No third-party test framework.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import {
   SCHEMA_VERSION,
   jobSchema,
@@ -319,4 +320,29 @@ test("agentReportSchema discriminates on role", () => {
   };
   assert.equal(agentReportSchema.parse(worker).role, "worker");
   assert.equal(agentReportSchema.parse(reviewer).role, "reviewer");
+});
+
+test("Reviewer canary workflow is a static, read-only, fail-closed runner contract", async () => {
+  const source = await readFile(
+    new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(source, /^name:\s+GBB Reviewer Runner Canary$/m);
+  assert.match(source, /^\s+workflow_dispatch:\s*$/m);
+  assert.doesNotMatch(source, /^\s+(push|pull_request|workflow_call):/m);
+  assert.match(source, /runs-on:\s*\[self-hosted,\s*Windows,\s*GBB-REVIEWER\]/);
+  assert.match(source, /timeout-minutes:\s*10\b/);
+  assert.match(source, /permissions:\s*\n\s+contents:\s+read/);
+  assert.match(source, /shell:\s+pwsh/);
+  assert.match(source, /RUNNER_NAME/);
+  assert.match(source, /gbb-reviewer-win-01/);
+  assert.match(source, /whoami/);
+  assert.match(source, /UserInteractive/);
+  assert.match(source, /SessionId/);
+  assert.match(source, /GBBWorker/);
+  assert.doesNotMatch(source, /actions\/checkout|uses:\s+/);
+  assert.doesNotMatch(source, /(^|[\s`])(?:git|gh)\s+(?:add|commit|push|fetch|checkout|api)\b/i);
+  assert.doesNotMatch(source, /(?:Start-Process|&\s*)(?:opencode|chrome|msedge|node)\b/i);
+  assert.doesNotMatch(source, /secrets\.|GITHUB_TOKEN/);
 });

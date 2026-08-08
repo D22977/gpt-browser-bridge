@@ -1,0 +1,93 @@
+name: GBB Reviewer Runner Canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reviewer-runner-canary:
+    name: GBB Reviewer Runner Canary
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Verify interactive Reviewer identity and session
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedUserPattern = '(?i)^d22977\\lupun$'
+          $whoami = (& whoami).Trim()
+          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+          $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+
+          if ($whoami -notmatch $expectedUserPattern) {
+            throw "Unexpected whoami identity: $whoami"
+          }
+          if ($identity -notmatch $expectedUserPattern) {
+            throw "Unexpected Windows identity: $identity"
+          }
+          if (-not [Environment]::UserInteractive) {
+            throw 'Reviewer canary is not running in an interactive user session'
+          }
+          if ($sessionId -eq 0) {
+            throw 'Reviewer canary is running in Session 0'
+          }
+          if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') {
+            throw "Unexpected runner name: $env:RUNNER_NAME"
+          }
+          if ($env:RUNNER_OS -cne 'Windows') {
+            throw "Unexpected runner OS: $env:RUNNER_OS"
+          }
+
+          Write-Output "reviewer_canary_identity: whoami=$whoami windows_identity=$identity session_id=$sessionId interactive=$([Environment]::UserInteractive) runner_name=$env:RUNNER_NAME runner_os=$env:RUNNER_OS"
+
+      - name: Fail closed on Worker identity or forbidden process ancestry
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $processes = @(Get-CimInstance Win32_Process)
+          $currentProcess = $processes | Where-Object ProcessId -eq $PID
+          if (-not $currentProcess) {
+            throw 'Unable to resolve the current canary process'
+          }
+          if ($currentProcess.CommandLine -match '(?i)GBBWorker') {
+            throw 'Current canary process command line indicates GBBWorker'
+          }
+
+          $relatedIds = [System.Collections.Generic.HashSet[int]]::new()
+          $pending = [System.Collections.Generic.Queue[int]]::new()
+          [void]$relatedIds.Add([int]$PID)
+          $pending.Enqueue([int]$PID)
+          while ($pending.Count -gt 0) {
+            $parentId = $pending.Dequeue()
+            foreach ($child in ($processes | Where-Object ParentProcessId -eq $parentId)) {
+              if ($relatedIds.Add([int]$child.ProcessId)) {
+                $pending.Enqueue([int]$child.ProcessId)
+              }
+            }
+          }
+
+          $relatedProcesses = @($processes | Where-Object { $relatedIds.Contains([int]$_.ProcessId) })
+          $forbiddenProcesses = @($relatedProcesses | Where-Object {
+            $_.Name -match '(?i)^(opencode|chrome|msedge|playwright)' -or
+            $_.CommandLine -match '(?i)(opencode|deepseek|gpt_browser_bridge|gpt_send|supervisor|chatgpt|webgpt|playwright|GBBWorker)'
+          })
+          if ($forbiddenProcesses.Count -gt 0) {
+            $details = $forbiddenProcesses | ForEach-Object { "$($_.Name):$($_.ProcessId)" }
+            throw "Forbidden Worker/browser/GBB process in canary process tree: $($details -join ', ')"
+          }
+
+          $relatedServices = @(Get-CimInstance Win32_Service | Where-Object { $_.ProcessId -in @($relatedProcesses.ProcessId) })
+          $workerServices = @($relatedServices | Where-Object {
+            $_.StartName -match '(?i)GBBWorker' -or $_.PathName -match '(?i)gbb-worker|GBBWorker'
+          })
+          if ($workerServices.Count -gt 0) {
+            $details = $workerServices | ForEach-Object { $_.Name }
+            throw "Canary process is hosted by a Worker service: $($details -join ', ')"
+          }
+
+          Write-Output "reviewer_canary_process_tree: process_count=$($relatedProcesses.Count) worker_service_count=$($workerServices.Count) forbidden_process_count=$($forbiddenProcesses.Count)"
