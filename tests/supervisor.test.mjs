@@ -355,6 +355,52 @@ test("missing terminal is rebuilt from checkpoint and receives a deterministic r
   assert.equal(result.events.at(-1).type, "terminal_rebuilt");
 });
 
+test("F006: legacy worker recovery is NOT suppressed by a stale relay executor checkpoint", async (t) => {
+  // GH-02 legacy isolation: recoverActiveTerminal never gates on relay state.
+  // Even a stale valid relay executor checkpoint with dispatch_fix.stage ===
+  // "dispatched" must NOT block legitimate legacy Worker terminal recovery —
+  // relay mode routes Worker ownership entirely through the executor, so the
+  // legacy path stays untouched.
+  const { paths } = await tempRuntime(t);
+  const runDir = path.join(paths.runsDir, "GBB-004-A1");
+  await mkdir(runDir, { recursive: true });
+  await writeFile(path.join(runDir, "dispatch.json"), JSON.stringify({
+    run_id: "GBB-004-A1",
+    task_id: "GBB-004",
+    attempt: 1,
+    worktree: "D:\\AIWORK_WT\\GPT_BROWSER_BRIDGE\\GBB-004-A1",
+    roles: {
+      worker: { title: "GBB-004-A1-worker", command: "codex" },
+    },
+  }));
+  // A stale/valid relay executor checkpoint that claims a mid-flight dispatch.
+  await writeFile(paths.relayExecutorState, JSON.stringify({
+    schema_version: 1,
+    protocol: "GBB_GH_EXECUTOR_V1",
+    dispatch_fix: { action_id: "x", stage: "dispatched", recovery_attempted: false },
+  }));
+  const calls = [];
+  const state = projectState({
+    active_terminal: { role: "worker", handle: "term-worker-old", title: "GBB-004-A1-worker" },
+  });
+  const result = await recoverActiveTerminal({
+    paths,
+    now: () => BASE_MS,
+    gitExec: async () => ({ stdout: "" }),
+    orca: quietOrca({
+      listTerminals: async () => [],
+      createTerminal: async (args) => { calls.push(["create", args]); return { handle: "term-worker-new" }; },
+      sendTerminal: async (args) => { calls.push(["send", args]); return { accepted: true }; },
+    }),
+  }, state, defaultRecoveryState(), "2026-08-01T09:00:00+08:00");
+
+  assert.equal(calls.length, 2, "legacy recovery must still create + resume the Worker terminal");
+  assert.equal(calls[0][0], "create");
+  assert.equal(calls[1][0], "send");
+  assert.equal(result.state.active_terminal.handle, "term-worker-new");
+  assert.equal(result.events.at(-1).type, "terminal_rebuilt");
+});
+
 test("resume prompt names the role skill and durable checkpoint sources", () => {
   const text = buildResumePrompt("reviewer", projectState(), { runId: "GBB-004-A1" });
   assert.match(text, /skills\/reviewer\/SKILL\.md/);
@@ -480,4 +526,322 @@ test("unified project-state writer rejects NEEDS_HUMAN to RUNNING from every cal
     /ILLEGAL_STATE_TRANSITION: NEEDS_HUMAN -> RUNNING/
   );
   assert.deepEqual(await readJson(paths.state), needsHuman);
+});
+
+// ---------------------------------------------------------------------------
+// github_relay_v1 mode (§4): GitHub relay state is the single routing
+// authority. These tests prove the Supervisor routes the kernel action to the
+// actuator executor, applies the executor's ACK back into relay state, and
+// keeps the heartbeat alive across long (`pending`) executor waits.
+// ---------------------------------------------------------------------------
+
+const RELAY_REPO = "D22977/MEP-";
+const RELAY_ISSUE = 3;
+const RELAY_PR = 4;
+const RELAY_HEAD = "f8e644871036f190b6e6385f3969f65ec9b016fb";
+const RELAY_HEAD_B = "111122223333444455556666777788889999aaaa";
+const RELAY_NOW = "2026-08-07T16:00:00+08:00";
+
+function relayComment(id, body, created_at = RELAY_NOW) {
+  return { id, body, created_at };
+}
+
+function relayReadyComment(head = RELAY_HEAD) {
+  return relayComment(11, `## READY_FOR_REVIEW\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: ${RELAY_PR}\nbase_sha: ${RELAY_HEAD}\nhead_sha: ${head}\nworker_self_review: false\nmerge_performed: false\n`);
+}
+
+function relayReviewComment(id, { decision, head = RELAY_HEAD, pr_number = RELAY_PR, created_at = RELAY_NOW }) {
+  return relayComment(
+    id,
+    `Review:\n\`\`\`json\n${JSON.stringify({ protocol: "MRMP_REVIEW_RESULT_V1", card_id: "GBB-GH-02", pr_number, reviewed_head_sha: head, decision })}\n\`\`\``,
+    created_at
+  );
+}
+
+function relayDeps(overrides = {}) {
+  const calls = { fetchSnapshot: 0, postComment: 0, dispatch: 0, createTerminal: 0 };
+  return {
+    deps: {
+      fetchSnapshot: async () => {
+        calls.fetchSnapshot += 1;
+        return { repo: RELAY_REPO, issue_number: RELAY_ISSUE, pr_number: RELAY_PR, head: { sha: RELAY_HEAD, state: "OPEN", draft: true }, comments: [] };
+      },
+      postComment: async () => {
+        calls.postComment += 1;
+        return { id: 9001 };
+      },
+      webgpt: {
+        dispatchReview: async () => {
+          calls.dispatch += 1;
+          return { conversation_url: "https://chatgpt.com/c/abc", conversationUrl: "https://chatgpt.com/c/abc" };
+        },
+      },
+      orca: quietOrca({ createTerminal: async () => { calls.createTerminal += 1; return { handle: "term-worker", terminal: { handle: "term-worker" } }; } }),
+      worktree: null,
+      workerCommand: "opencode",
+      cardId: "GBB-GH-02",
+      checkpointPath: null,
+      ...overrides,
+    },
+    calls,
+  };
+}
+
+function relayCtx(root, paths, injected) {
+  return {
+    runtimeRoot: root,
+    paths,
+    orca: injected.deps.orca,
+    pid: 711,
+    now: () => Date.parse(RELAY_NOW),
+    isAlive: async () => false,
+    mode: "github_relay_v1",
+    relay: { repo: RELAY_REPO, issue: RELAY_ISSUE, pr: RELAY_PR },
+    relayDeps: injected.deps,
+  };
+}
+
+test("relay mode with no relay config fails closed without touching project state", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const before = await readJson(paths.state);
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    paths,
+    orca: quietOrca(),
+    pid: 712,
+    now: () => Date.parse(RELAY_NOW),
+    isAlive: async () => false,
+    mode: "github_relay_v1",
+    relay: null,
+    relayDeps: null,
+  });
+  assert.equal(outcome.reason, "RELAY_CONFIG_MISSING");
+  assert.equal(outcome.stop, false);
+  assert.deepEqual(await readJson(paths.state), before, "project state must be untouched");
+  const heartbeat = await readJson(paths.heartbeat);
+  assert.equal(heartbeat.state, "github_relay_v1");
+});
+
+test("relay mode routes a READY head to WebGPT dispatch and persists the executor checkpoint", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const injected = relayDeps();
+  injected.deps.fetchSnapshot = async () => ({ repo: RELAY_REPO, issue_number: RELAY_ISSUE, pr_number: RELAY_PR, head: { sha: RELAY_HEAD, state: "OPEN", draft: true }, comments: [relayReadyComment()] });
+
+  const outcome = await runLoopOnce(relayCtx(root, paths, injected));
+
+  assert.equal(outcome.stop, false);
+  assert.equal(outcome.action, "REQUEST_REVIEW");
+  assert.equal(injected.calls.dispatch, 1, "WebGPT must be dispatched exactly once");
+
+  // Kernel relay state records the pending action; executor checkpoint holds
+  // the durable stage.
+  const relayState = await readJson(paths.relayState);
+  assert.equal(relayState.pending_action.action, "REQUEST_REVIEW");
+  assert.equal(relayState.pending_action.action_id, `${RELAY_REPO}:${RELAY_PR}:${RELAY_HEAD}:REQUEST_REVIEW`);
+
+  const execState = await readJson(paths.relayExecutorState);
+  assert.equal(execState.request_review.stage, "sent");
+  assert.equal(execState.request_review.head_sha, RELAY_HEAD);
+
+  const heartbeat = await readJson(paths.heartbeat);
+  assert.equal(heartbeat.state, "github_relay_v1");
+});
+
+test("acceptance: a never-resolving WebGPT review waiter never blocks a tick", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const injected = relayDeps();
+
+  // The WebGPT review session never completes: any tick that tried to await
+  // this waiter would hang until the watchdog below rejects it.
+  const never = new Promise(() => {});
+  injected.deps.webgpt.dispatchReview = async () => {
+    injected.calls.dispatch += 1;
+    return { conversation_url: "https://chatgpt.com/c/never", conversationUrl: "https://chatgpt.com/c/never", session: never };
+  };
+  // Bounded GitHub read: the review receipt never appears (session never ends).
+  injected.deps.fetchSnapshot = async () => ({ repo: RELAY_REPO, issue_number: RELAY_ISSUE, pr_number: RELAY_PR, head: { sha: RELAY_HEAD, state: "OPEN", draft: true }, comments: [relayReadyComment()] });
+
+  // Watchdog: if a tick ever awaits the never-resolving waiter, it must fail
+  // within 300ms instead of blocking the Supervisor loop (§6).
+  const guardedTick = () =>
+    Promise.race([
+      runLoopOnce(relayCtx(root, paths, injected)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("SUPERVISOR_TICK_BLOCKED")), 300)),
+    ]);
+
+  // Tick 1: READY -> REQUEST_REVIEW -> dispatch is fire-and-forget fast; the
+  // executor must return pending, not await the WebGPT session.
+  const first = await guardedTick();
+  assert.equal(first.stop, false);
+  assert.equal(first.status, "pending");
+  assert.equal(first.reason, "WEBGPT_DISPATCHED");
+  assert.equal(injected.calls.dispatch, 1, "WebGPT must be dispatched exactly once");
+
+  const execState1 = await readJson(paths.relayExecutorState);
+  assert.equal(execState1.request_review.stage, "sent");
+  assert.equal(execState1.request_review.head_sha, RELAY_HEAD);
+
+  // Tick 2: still no receipt -> NOOP -> same checkpoint reused, pending again.
+  // No second WebGPT session, no ACK applied, nothing processed.
+  const second = await guardedTick();
+  assert.equal(second.stop, false);
+  assert.equal(second.status, "pending");
+  assert.equal(second.reason, "REVIEW_RECEIPT_WAIT");
+  assert.equal(injected.calls.dispatch, 1, "must not open a second WebGPT review session");
+
+  const execState2 = await readJson(paths.relayExecutorState);
+  assert.equal(execState2.request_review.stage, "sent", "checkpoint must be reused, not reset");
+
+  const heartbeat = await readJson(paths.heartbeat);
+  assert.equal(heartbeat.state, "github_relay_v1");
+
+  const relayState = await readJson(paths.relayState);
+  assert.ok(relayState.pending_action, "pending REQUEST_REVIEW must survive the long wait");
+  assert.equal(relayState.pending_action.action, "REQUEST_REVIEW");
+  assert.ok(!relayState.processed_event_keys.includes(`${RELAY_REPO}:${RELAY_PR}:${RELAY_HEAD}:READY`), "no event may be processed without a receipt");
+});
+
+test("relay mode applies the executor ACK back into relay state after a receipt", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const injected = relayDeps();
+
+  // First tick: READY -> REQUEST_REVIEW -> dispatch (no receipt yet).
+  injected.deps.fetchSnapshot = async () => ({ repo: RELAY_REPO, issue_number: RELAY_ISSUE, pr_number: RELAY_PR, head: { sha: RELAY_HEAD, state: "OPEN", draft: true }, comments: [relayReadyComment()] });
+  await runLoopOnce(relayCtx(root, paths, injected));
+  let relayState = await readJson(paths.relayState);
+  assert.ok(relayState.pending_action, "pending REQUEST_REVIEW must exist after dispatch");
+
+  // Second tick: the exact-head receipt is now present -> executor ACKs
+  // succeeded -> Supervisor applies it -> pending clears, event processed.
+  injected.deps.fetchSnapshot = async () => ({
+    repo: RELAY_REPO,
+    issue_number: RELAY_ISSUE,
+    pr_number: RELAY_PR,
+    head: { sha: RELAY_HEAD, state: "OPEN", draft: true },
+    comments: [
+      relayReadyComment(),
+      relayComment(22, `Review:\n\`\`\`json\n${JSON.stringify({ protocol: "MRMP_REVIEW_RESULT_V1", card_id: "GBB-GH-02", pr_number: RELAY_PR, reviewed_head_sha: RELAY_HEAD, decision: "PASS" })}\n\`\`\``),
+    ],
+  });
+  const outcome = await runLoopOnce(relayCtx(root, paths, injected));
+
+  relayState = await readJson(paths.relayState);
+  assert.equal(outcome.status, "executed");
+  assert.equal(outcome.reason, "REVIEW_RECEIPT_OBSERVED");
+  assert.equal(relayState.pending_action, null, "pending action must be cleared by the applied ACK");
+  assert.ok(relayState.processed_event_keys.includes(`${RELAY_REPO}:${RELAY_PR}:${RELAY_HEAD}:READY`));
+});
+
+test("relay mode DISPATCH_FIX stays pending until a strict new-head READY proves Worker completion", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const injected = relayDeps();
+  let createCount = 0;
+  injected.deps.orca = quietOrca({
+    createTerminal: async () => { createCount += 1; return { handle: "term-worker", terminal: { handle: "term-worker" } }; },
+    sendTerminal: async () => ({ accepted: true }),
+  });
+
+  const fixReview = () => relayReviewComment(12, { decision: "FIX_REQUIRED" });
+  const snapshotFor = (comments, head) => ({ repo: RELAY_REPO, issue_number: RELAY_ISSUE, pr_number: RELAY_PR, head: { sha: head, state: "OPEN", draft: true }, comments });
+
+  // Tick 1: fresh FIX_REQUIRED on current head -> DISPATCH_FIX -> worker
+  // terminal starts, executor returns pending (no ACK).
+  injected.deps.fetchSnapshot = async () => snapshotFor([fixReview()], RELAY_HEAD);
+  const first = await runLoopOnce(relayCtx(root, paths, injected));
+  assert.equal(first.stop, false);
+  assert.equal(first.action, "DISPATCH_FIX");
+  assert.equal(first.status, "pending", "terminal start must not ACK succeeded");
+  assert.equal(first.reason, "WORKER_TERMINAL_STARTED");
+
+  let relayState = await readJson(paths.relayState);
+  assert.ok(relayState.pending_action, "DISPATCH_FIX must stay pending");
+  assert.equal(relayState.pending_action.action, "DISPATCH_FIX");
+  assert.equal(relayState.repair.rounds, 0, "no repair round before Worker completion");
+  assert.ok(!relayState.processed_event_keys.includes(`${RELAY_REPO}:${RELAY_PR}:${RELAY_HEAD}:FIX_REQUIRED`), "no event processed without completion proof");
+
+  // From tick 2 on, the exact-title Worker terminal stays alive: a healthy
+  // stall (F003), so no duplicate launch and no recovery.
+  injected.deps.orca = quietOrca({
+    listTerminals: async () => [{ title: "GBB-GH-4-A1-worker", handle: "term-worker" }],
+    createTerminal: async () => { createCount += 1; return { handle: "term-worker", terminal: { handle: "term-worker" } }; },
+    sendTerminal: async () => ({ accepted: true }),
+  });
+
+  // Tick 2: still no new-head READY -> NOOP -> executor continuation stays
+  // pending, never launches a second worker, never ACKs.
+  const second = await runLoopOnce(relayCtx(root, paths, injected));
+  assert.equal(second.action, "NOOP");
+  assert.equal(second.status, "pending");
+  assert.equal(second.reason, "WORKER_DISPATCH_WAIT");
+  assert.equal(createCount, 1, "must not relaunch a duplicate worker terminal");
+  relayState = await readJson(paths.relayState);
+  assert.equal(relayState.repair.rounds, 0);
+
+  // Tick 3: the Worker pushed a new commit and posted a strict READY for it ->
+  // executor ACKs succeeded -> kernel processes the FIX_REQUIRED event and
+  // increments the repair round exactly once.
+  injected.deps.fetchSnapshot = async () => snapshotFor([fixReview(), relayReadyComment(RELAY_HEAD_B)], RELAY_HEAD_B);
+  const third = await runLoopOnce(relayCtx(root, paths, injected));
+  assert.equal(third.action, "NOOP");
+  assert.equal(third.status, "executed");
+  assert.equal(third.reason, "WORKER_COMPLETION_OBSERVED");
+  relayState = await readJson(paths.relayState);
+  assert.equal(relayState.pending_action, null, "pending must clear only after completion proof");
+  assert.equal(relayState.repair.rounds, 1, "repair round increments exactly once on completion");
+  assert.ok(relayState.processed_event_keys.includes(`${RELAY_REPO}:${RELAY_PR}:${RELAY_HEAD}:FIX_REQUIRED`));
+});
+
+test("relay mode transport failure enters a terminal relay state without crashing the loop", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const injected = relayDeps();
+  injected.deps.fetchSnapshot = async () => {
+    throw new Error("gh: API rate limit exceeded");
+  };
+
+  const outcome = await runLoopOnce(relayCtx(root, paths, injected));
+
+  assert.equal(outcome.stop, false);
+  const relayState = await readJson(paths.relayState);
+  assert.equal(relayState.terminal.active, true);
+  assert.equal(relayState.terminal.reason, "TRANSPORT_BLOCKED");
+  const heartbeat = await readJson(paths.heartbeat);
+  assert.equal(heartbeat.state, "github_relay_v1");
+});
+
+test("relay mode with corrupt relay state fails closed without crashing the loop", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.relayState, "{not valid json", "utf8");
+  const injected = relayDeps();
+
+  const outcome = await runLoopOnce(relayCtx(root, paths, injected));
+
+  assert.equal(outcome.reason, "RELAY_POLL_FAILED");
+  assert.equal(outcome.stop, false);
+  const heartbeat = await readJson(paths.heartbeat);
+  assert.equal(heartbeat.state, "github_relay_v1");
+});
+
+test("legacy mode never touches relay state or executor deps", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const injected = relayDeps();
+  let used = false;
+  injected.deps.fetchSnapshot = async () => {
+    used = true;
+    return { comments: [] };
+  };
+
+  await runLoopOnce({
+    runtimeRoot: root,
+    paths,
+    orca: quietOrca(),
+    pid: 713,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    mode: "legacy",
+    relayDeps: injected.deps,
+  });
+
+  assert.equal(used, false, "legacy mode must not call relay deps");
+  await assert.rejects(() => readFile(paths.relayState, "utf8"), /ENOENT/);
+  await assert.rejects(() => readFile(paths.relayExecutorState, "utf8"), /ENOENT/);
 });

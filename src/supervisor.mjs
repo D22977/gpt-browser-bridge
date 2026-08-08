@@ -19,8 +19,9 @@
 // Agent-task rework counting (§15 "Agent 任務失敗") stays the Control
 // Tower's call per §6.2; Supervisor only forwards the events it needs to see.
 
-import { readFile, appendFile, mkdir, stat, readdir } from "node:fs/promises";
-import { execFile, execFileSync } from "node:child_process";
+import { readFile, appendFile, mkdir, stat, readdir, writeFile } from "node:fs/promises";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -30,6 +31,8 @@ import writeFileAtomic from "write-file-atomic";
 import { projectStateSchema } from "./contracts.mjs";
 import { OrcaAdapter, resolveOrcaCli, resolveActiveTerminal } from "./adapters/orca_adapter.mjs";
 import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary.mjs";
+import { runPoll, readStateFile, writeStateFile, applyAck, fetchSnapshotViaGh } from "./github_relay.mjs";
+import { executeAction } from "./github_relay_executor.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -63,6 +66,8 @@ export function resolveRuntimePaths(runtimeRoot) {
     summary: path.join(root, "state", "morning_summary.md"),
     recoveryState: path.join(root, "state", "recovery_state.json"),
     reportCursor: path.join(root, "state", "report_cursor.json"),
+    relayState: path.join(root, "state", "github_relay_state.json"),
+    relayExecutorState: path.join(root, "state", "github_relay_executor_state.json"),
     lock: path.join(root, "locks", "supervisor.lock"),
     events: path.join(root, "events", "events.ndjson"),
     runsDir: path.join(root, "runs"),
@@ -656,6 +661,8 @@ async function maybeWriteMorningSummary(ctx, paths, { state, orcaStatus, recover
 
 function normalizeCtx(ctxIn) {
   const runtimeRoot = ctxIn.runtimeRoot;
+  const env = ctxIn.env ?? process.env;
+  const relay = ctxIn.relay ?? readRelayConfigFromEnv(env);
   return {
     runtimeRoot,
     paths: ctxIn.paths ?? resolveRuntimePaths(runtimeRoot),
@@ -667,6 +674,209 @@ function normalizeCtx(ctxIn) {
     sleep: ctxIn.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     maxIterations: ctxIn.maxIterations ?? Infinity,
     intervalMs: ctxIn.intervalMs ?? HEARTBEAT_INTERVAL_MS,
+    mode: ctxIn.mode ?? env.GBB_SUPERVISOR_MODE ?? "legacy",
+    relay,
+    relayDeps: ctxIn.relayDeps ?? null,
+    workerWorktree: ctxIn.workerWorktree ?? env.GBB_RELAY_WORKTREE ?? null,
+    workerCommand: ctxIn.workerCommand ?? env.GBB_RELAY_WORKER_COMMAND ?? "opencode",
+    cardId: ctxIn.cardId ?? env.GBB_RELAY_CARD_ID ?? null,
+  };
+}
+
+function readRelayConfigFromEnv(env = process.env) {
+  const repo = env.GBB_RELAY_REPO ?? null;
+  const issue = env.GBB_RELAY_ISSUE ?? null;
+  const pr = env.GBB_RELAY_PR ?? null;
+  if (!repo || !issue || !pr) return null;
+  const issueNum = Number(issue);
+  const prNum = Number(pr);
+  if (!Number.isInteger(issueNum) || !Number.isInteger(prNum)) return null;
+  return { repo, issue: issueNum, pr: prNum };
+}
+
+// ---------------------------------------------------------------------------
+// github_relay_v1 mode (§4): GitHub relay state is the single routing
+// authority. This Supervisor is a deterministic executor only - it polls the
+// relay kernel, hands the action to the actuator executor, and applies any ACK
+// the executor produced back into relay state. It never judges
+// PASS/FIX_REQUIRED itself, never writes code, never merges. Long executor
+// waits (`pending`) never block one tick: the durable execution checkpoint
+// carries the stage across ticks.
+// ---------------------------------------------------------------------------
+
+// Production default relay deps: real GitHub read/write via the `gh` CLI, a
+// detached WebGPT actuator child process, and the same ORCA adapter the legacy
+// loop uses. Every part is injectable for tests via `ctx.relayDeps`.
+function defaultRelayDeps({ runtimeRoot, paths, orca, workerWorktree, workerCommand, cardId }) {
+  const actuatorPath = process.env.GBB_WEBGPT_ACTUATOR ?? "C:\\Users\\Lupun\\AppData\\Local\\Temp\\opencode\\pw\\ct-web-review.mjs";
+  return {
+    fetchSnapshot: fetchSnapshotViaGh,
+    postComment: postGitHubComment({ runtimeRoot }),
+    webgpt: {
+      dispatchReview: dispatchWebGPTReview({ actuatorPath, runtimeRoot }),
+    },
+    orca,
+    worktree: workerWorktree ?? null,
+    workerCommand: workerCommand ?? "opencode",
+    cardId: cardId ?? null,
+    checkpointPath: paths.relayExecutorState,
+  };
+}
+
+function postGitHubComment({ runtimeRoot }) {
+  return async function postComment({ repo, issue, body }) {
+    const dir = path.join(runtimeRoot, "runs", "github_relay");
+    await mkdir(dir, { recursive: true });
+    const bodyFile = path.join(dir, `notification_${Date.now()}.txt`);
+    await writeFile(bodyFile, body, "utf8");
+    try {
+      const { stdout } = await execFileAsync(
+        "gh",
+        ["api", "--method", "POST", `repos/${repo}/issues/${issue}/comments`, "-F", `body=@${bodyFile}`],
+        { windowsHide: true, timeout: 60_000 }
+      );
+      const parsed = JSON.parse(stdout);
+      if (!parsed || !Number.isInteger(parsed.id) || parsed.id <= 0) {
+        throw new Error("gh api returned no positive comment id");
+      }
+      return { id: parsed.id };
+    } finally {
+      try {
+        await import("node:fs/promises").then((fs) => fs.rm(bodyFile, { force: true }));
+      } catch {
+        // best effort cleanup
+      }
+    }
+  };
+}
+
+function dispatchWebGPTReview({ actuatorPath, runtimeRoot }) {
+  return async function dispatchReview({ prompt, repo, issue, pr, headSha }) {
+    if (!existsSync(actuatorPath)) {
+      throw new Error(`WEBGPT_FRESH_CONTEXT_ACTUATOR_NOT_REUSABLE: ${actuatorPath}`);
+    }
+    // Node --check gives a cheap deterministic "actuator is runnable" proof
+    // before we detach a child (§9 adapter health).
+    execFileSync(process.execPath, ["--check", actuatorPath], { windowsHide: true, stdio: "ignore" });
+    const dir = path.join(runtimeRoot, "runs", "github_relay");
+    await mkdir(dir, { recursive: true });
+    const packPath = path.join(dir, `review_pack_${Date.now()}_${headSha?.slice(0, 8) ?? "x"}.txt`);
+    const resultPath = path.join(dir, `review_result_${Date.now()}_${headSha?.slice(0, 8) ?? "x"}.json`);
+    await writeFile(packPath, prompt, "utf8");
+    const child = spawn(
+      process.execPath,
+      [actuatorPath, "--pack", packPath, "--result", resultPath, "--timeout-sec", "600"],
+      { detached: true, stdio: "ignore", windowsHide: true }
+    );
+    child.unref();
+    return {
+      ok: true,
+      conversation_url: null,
+      pack_path: packPath,
+      result_path: resultPath,
+      pid: child.pid,
+    };
+  };
+}
+
+export async function runRelayStep(ctx, paths, { nowMs, isoNow }) {
+  const tickEvents = [];
+  const relay = ctx.relay;
+
+  // Heartbeat first: liveness proof continues every tick, independent of
+  // relay config or any long executor wait.
+  await writeHeartbeat(paths, { pid: ctx.pid, isoNow, state: "github_relay_v1" });
+
+  if (!relay) {
+    tickEvents.push({ type: "relay_config_missing", detail: "GBB_RELAY_REPO/ISSUE/PR required" });
+    await appendEvents(paths, tickEvents, isoNow);
+    return { stop: false, at: isoNow, reason: "RELAY_CONFIG_MISSING", events: tickEvents };
+  }
+
+  const deps = ctx.relayDeps ?? defaultRelayDeps({
+    runtimeRoot: ctx.runtimeRoot,
+    paths,
+    orca: ctx.orca,
+    workerWorktree: ctx.workerWorktree,
+    workerCommand: ctx.workerCommand,
+    cardId: ctx.cardId,
+  });
+  // Injected deps may omit the checkpoint path; the executor always writes its
+  // durable stage through deps.checkpointPath, so it must be deterministic.
+  if (!deps.checkpointPath) deps.checkpointPath = paths.relayExecutorState;
+
+  // 1) Poll the kernel: fetch snapshot, evaluate, apply decision (kernel
+  // writes relay state). Transport failure becomes a terminal state here.
+  let poll;
+  try {
+    poll = await runPoll({
+      repo: relay.repo,
+      issue: relay.issue,
+      pr: relay.pr,
+      statePath: paths.relayState,
+      now: isoNow,
+      fetchSnapshot: deps.fetchSnapshot,
+    });
+  } catch (e) {
+    // Corrupt/missing relay state must fail closed, never crash the loop.
+    tickEvents.push({ type: "relay_poll_failed", error: e.message });
+    await appendEvents(paths, tickEvents, isoNow);
+    return { stop: false, at: isoNow, reason: "RELAY_POLL_FAILED", error: e.message, events: tickEvents };
+  }
+  if (!poll.action) {
+    tickEvents.push({ type: "relay_poll_failed", code: poll.code, error: poll.error });
+    await appendEvents(paths, tickEvents, isoNow);
+    return { stop: false, at: isoNow, reason: "RELAY_POLL_FAILED", error: poll.error, events: tickEvents };
+  }
+
+  // 2) Hand the action to the actuator executor (deterministic side effects;
+  // returns `pending` instead of blocking on long waits).
+  const relayState = await readStateFile(paths.relayState);
+  let result;
+  try {
+    result = await executeAction({
+      action: poll.action,
+      relayState,
+      deps,
+      checkpointPath: paths.relayExecutorState,
+      nowMs,
+      nowIso: isoNow,
+    });
+  } catch (e) {
+    // A corrupt executor checkpoint fails closed into an event; never crash
+    // the tick and never trigger a side effect on an unreadable checkpoint.
+    tickEvents.push({ type: "relay_executor_failed", error: e.message });
+    await appendEvents(paths, tickEvents, isoNow);
+    return { stop: false, at: isoNow, reason: "RELAY_EXECUTOR_FAILED", error: e.message, events: tickEvents };
+  }
+
+  // 3) If the executor produced an ACK, apply it into relay state. A failed
+  // ACK never marks an event processed (kernel rule, preserved).
+  if (result.ack) {
+    const ackOut = applyAck(relayState, {
+      actionId: result.ack.actionId,
+      result: result.ack.result,
+      reason: result.ack.reason ?? null,
+      notificationCommentId: result.ack.notificationCommentId ?? null,
+      now: isoNow,
+    });
+    if (ackOut.changed) {
+      await writeStateFile(paths.relayState, ackOut.state);
+    }
+    tickEvents.push({ type: "relay_ack", status: ackOut.status, action: poll.action.action });
+  }
+
+  tickEvents.push({ type: "relay_executor", action: poll.action.action, status: result.status, reason: result.reason });
+  if (Array.isArray(result.events)) tickEvents.push(...result.events);
+  await appendEvents(paths, tickEvents, isoNow);
+
+  return {
+    stop: false,
+    at: isoNow,
+    reason: result.reason,
+    status: result.status,
+    action: poll.action.action,
+    events: tickEvents,
   };
 }
 
@@ -683,6 +893,14 @@ export async function runLoopOnce(ctxIn) {
   const lock = await acquireOrConfirmLock(paths, { pid: ctx.pid, isAlive: ctx.isAlive, isoNow });
   if (!lock.owned) {
     return { stop: true, reason: "LOCK_NOT_OWNED", holder: lock.holder, at: isoNow };
+  }
+
+  // github_relay_v1 mode: GitHub relay state is the single routing authority.
+  // Legacy project_state / static-board logic is bypassed entirely in this
+  // mode (§4). The heartbeat continues every tick; long executor waits return
+  // `pending` so one tick never blocks on a ten-minute WebGPT wait.
+  if (ctx.mode === "github_relay_v1") {
+    return runRelayStep(ctx, paths, { nowMs, isoNow });
   }
 
   // Step 3: read project state.
