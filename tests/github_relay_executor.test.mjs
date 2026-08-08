@@ -48,7 +48,7 @@ function comment(id, body, created_at = NOW) {
 function readyComment(id, head = HEAD_A, created_at = NOW) {
   return comment(
     id,
-    `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\nbase_sha: ${HEAD_A}\nhead_sha: ${head}\n`,
+    `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: ${PR}\nbase_sha: ${HEAD_A}\nhead_sha: ${head}\nworker_self_review: false\nmerge_performed: false\n`,
     created_at
   );
 }
@@ -516,6 +516,78 @@ test("DISPATCH_FIX stays pending across repeated no-READY ticks (stalled worker 
     assert.equal(out.ack, null, "a stalled worker must never be ACKed succeeded");
   }
   assert.equal(calls.createTerminal, 1, "exactly one terminal across all stall ticks");
+});
+
+// ---------------------------------------------------------------------------
+// F002: strict Worker-completion READY validation (machine shape)
+// ---------------------------------------------------------------------------
+
+async function dispatchThenContinuation(t, comments, { head = HEAD_B, created_at = NOW } = {}) {
+  const checkpointPath = await tempCheckpoint(t);
+  const action = requestReviewAction({ action: "DISPATCH_FIX", action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`, event_key: `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`, reason: "FRESH_FIX_REQUIRED" });
+  const relayState = baseRelayState({ pending_action: pendingAction(action) });
+  const { deps, calls } = fakeDeps();
+  deps.fetchSnapshot = async () => snapshot([]);
+  await executeAction({ action, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+
+  const noopAction = { ...action, action: "NOOP", action_id: null, event_key: null, reason: "PENDING_ACTION_AWAITING_ACK" };
+  const commentsArr = typeof comments === "function" ? comments() : comments;
+  deps.fetchSnapshot = async () => snapshot(commentsArr, { head: { sha: head, state: "OPEN", draft: true } });
+  const out = await executeAction({ action: noopAction, relayState, deps: { ...deps, checkpointPath }, checkpointPath, nowMs: NOW_MS, nowIso: NOW });
+  return { out, calls };
+}
+
+test("F002: a READY with the wrong protocol is NOT Worker completion", async (t) => {
+  const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V2\ncard_id: GBB-GH-02\npr_number: ${PR}\nbase_sha: ${HEAD_A}\nhead_sha: ${HEAD_B}\n`)], { head: HEAD_B });
+  assert.equal(out.status, "pending", "wrong protocol must never ACK completion");
+  assert.equal(out.ack, null);
+});
+
+test("F002: a READY with no protocol field is NOT Worker completion", async (t) => {
+  const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\ncard_id: GBB-GH-02\npr_number: ${PR}\nbase_sha: ${HEAD_A}\nhead_sha: ${HEAD_B}\n`)], { head: HEAD_B });
+  assert.equal(out.status, "pending", "missing protocol must never ACK completion");
+  assert.equal(out.ack, null);
+});
+
+test("F002: a READY for the wrong PR is NOT Worker completion", async (t) => {
+  const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: 999\nbase_sha: ${HEAD_A}\nhead_sha: ${HEAD_B}\n`)], { head: HEAD_B });
+  assert.equal(out.status, "pending", "wrong pr_number must never ACK completion");
+  assert.equal(out.ack, null);
+});
+
+test("F002: a READY with no pr_number is NOT Worker completion", async (t) => {
+  const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\nbase_sha: ${HEAD_A}\nhead_sha: ${HEAD_B}\n`)], { head: HEAD_B });
+  assert.equal(out.status, "pending", "missing pr_number must never ACK completion");
+  assert.equal(out.ack, null);
+});
+
+test("F002: a READY with the wrong card_id binding is NOT Worker completion", async (t) => {
+  const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: OTHER-CARD\npr_number: ${PR}\nbase_sha: ${HEAD_A}\nhead_sha: ${HEAD_B}\n`)], { head: HEAD_B });
+  assert.equal(out.status, "pending", "wrong card_id must never ACK completion");
+  assert.equal(out.ack, null);
+});
+
+test("F002: a READY with a missing or malformed head_sha is NOT Worker completion", async (t) => {
+  const missing = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: ${PR}\nbase_sha: ${HEAD_A}\n`)], { head: HEAD_B });
+  assert.equal(missing.out.status, "pending", "missing head_sha must never ACK completion");
+  assert.equal(missing.out.ack, null);
+
+  const malformed = await dispatchThenContinuation(t, [comment(8, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: ${PR}\nbase_sha: ${HEAD_A}\nhead_sha: not-a-sha\n`)], { head: HEAD_B });
+  assert.equal(malformed.out.status, "pending", "non-40-hex head_sha must never ACK completion");
+  assert.equal(malformed.out.ack, null);
+});
+
+test("F002: a marker-only unrelated comment with head_sha is NOT Worker completion", async (t) => {
+  const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nhead_sha: ${HEAD_B}\n`)], { head: HEAD_B });
+  assert.equal(out.status, "pending", "marker + head_sha alone must never ACK completion");
+  assert.equal(out.ack, null);
+});
+
+test("F002: a pre-dispatch READY is NOT Worker completion", async (t) => {
+  const preDispatch = "2026-08-07T15:59:00+08:00";
+  const { out } = await dispatchThenContinuation(t, [comment(7, `READY_FOR_REVIEW\n\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: ${PR}\nbase_sha: ${HEAD_A}\nhead_sha: ${HEAD_B}\n`, preDispatch)], { head: HEAD_B });
+  assert.equal(out.status, "pending", "a READY older than the dispatch must never ACK completion");
+  assert.equal(out.ack, null);
 });
 
 // ---------------------------------------------------------------------------

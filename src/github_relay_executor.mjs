@@ -26,13 +26,71 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import writeFileAtomic from "write-file-atomic";
-import { findReadyComment, isSha40, parseReviewResults, readyCommentSha, REVIEW_PROTOCOL } from "./github_relay.mjs";
+import { isSha40, READY_MARKER, parseReviewResults, REVIEW_PROTOCOL } from "./github_relay.mjs";
 import { buildTerminalTitle } from "./adapters/orca_adapter.mjs";
 
 export const EXECUTOR_SCHEMA_VERSION = 1;
 export const EXECUTOR_PROTOCOL = "GBB_GH_RELAY_EXECUTOR_V1";
 export const HUMAN_NOTIFICATION_PROTOCOL = "GBB_GH_HUMAN_NOTIFICATION_V1";
+export const READY_FOR_REVIEW_PROTOCOL = "GBB_GH_READY_FOR_REVIEW_V1";
 export const REVIEW_TIMEOUT_MS = 10 * 60_000;
+
+// ---------------------------------------------------------------------------
+// Strict GH-02-local Worker-completion READY validator (F002).
+//
+// The kernel's findReadyComment/readyCommentSha deliberately accept any
+// comment carrying the READY_FOR_REVIEW marker with an explicit head_sha; that
+// loose shape is what authorises REQUEST_REVIEW in the kernel. It is NOT a
+// Worker-completion proof. Here the executor demands the full machine shape of
+// a GBB_GH_READY_FOR_REVIEW_V1 comment before it ever ACKs a DISPATCH_FIX
+// succeeded: the exact protocol, the relay PR number, the card binding, an
+// explicit valid 40-hex head_sha, a head that is BOTH different from the
+// reviewed head AND equal to the current PR head, and a comment posted at or
+// after dispatch. Anything weaker (marker-only, wrong/missing protocol,
+// wrong/missing PR, missing/malformed head, same head, non-current head,
+// pre-dispatch READY) is NOT completion.
+// ---------------------------------------------------------------------------
+
+function readyField(body, name) {
+  if (typeof body !== "string") return null;
+  const m = body.match(new RegExp(`(^|[^A-Za-z0-9_])${name}:\\s*([^\\r\\n]+)`));
+  return m ? m[2].trim() : null;
+}
+
+/** Strict, GH-02-local READY validation. Returns { ok, reason, headSha } | { ok: false, reason }. */
+export function strictWorkerReady(comment, { prNumber, cardId, reviewedHead, currentHead, dispatchedAt }) {
+  if (!comment || typeof comment.body !== "string") return { ok: false, reason: "missing_comment" };
+  if (!comment.body.includes(READY_MARKER)) return { ok: false, reason: "missing_marker" };
+  const protocol = readyField(comment.body, "protocol");
+  if (protocol !== READY_FOR_REVIEW_PROTOCOL) return { ok: false, reason: "wrong_or_missing_protocol" };
+  const readyPr = readyField(comment.body, "pr_number");
+  if (readyPr === null || String(readyPr) !== String(prNumber)) return { ok: false, reason: "wrong_or_missing_pr" };
+  if (cardId !== null && readyField(comment.body, "card_id") !== cardId) return { ok: false, reason: "wrong_or_missing_card_id" };
+  const readySha = readyField(comment.body, "head_sha");
+  if (!readySha || !isSha40(readySha)) return { ok: false, reason: "missing_or_malformed_head" };
+  const headSha = readySha.toLowerCase();
+  if (reviewedHead && headSha === String(reviewedHead).toLowerCase()) return { ok: false, reason: "same_reviewed_head" };
+  if (currentHead && headSha !== String(currentHead).toLowerCase()) return { ok: false, reason: "not_current_head" };
+  const readyAt = comment.created_at ? Date.parse(comment.created_at) : null;
+  if (dispatchedAt !== null && (readyAt === null || Number.isNaN(readyAt) || readyAt < dispatchedAt)) {
+    return { ok: false, reason: "pre_dispatch_ready" };
+  }
+  return { ok: true, headSha };
+}
+
+/** Find the strictest Worker-completion READY among all comments, or null. */
+export function findStrictWorkerReady(comments, opts) {
+  const list = Array.isArray(comments) ? comments : [];
+  let best = null;
+  for (const c of list) {
+    const verdict = strictWorkerReady(c, opts);
+    if (!verdict.ok) continue;
+    if (!best || (c.created_at ?? "") > (best.comment.created_at ?? "")) {
+      best = { comment: c, verdict };
+    }
+  }
+  return best ? best.verdict : null;
+}
 
 // ---------------------------------------------------------------------------
 // Durable execution checkpoint (execution evidence only, never authority).
@@ -350,28 +408,27 @@ async function handleDispatchFix({ relayState, action, state, deps, nowIso }) {
       await writeExecutorState(deps.checkpointPath, state);
     }
 
-    // GitHub completion proof: a strict READY_FOR_REVIEW bound to a NEW PR
-    // head — a valid 40-hex SHA, different from the reviewed head, equal to
-    // the current PR head, and posted after this worker was dispatched.
+    // GitHub completion proof: a strict GBB_GH_READY_FOR_REVIEW_V1 comment
+    // bound to the relay PR, the card, and a NEW PR head — a valid 40-hex SHA,
+    // different from the reviewed head, equal to the current PR head, and
+    // posted at/after dispatch. Marker-only or head-only comments are NEVER
+    // completion (F002).
     let snapshot;
     try {
       snapshot = await deps.fetchSnapshot({ repo, issue, pr });
     } catch (e) {
       return fail("TRANSPORT_BLOCKED", ackFailed(actionId, "TRANSPORT_BLOCKED"));
     }
-    const ready = findReadyComment(snapshot.comments);
-    const readySha = ready ? readyCommentSha(ready) : null;
     const currentHead = snapshot?.head?.sha ?? null;
-    const readyAt = ready?.created_at ? Date.parse(ready.created_at) : null;
-    const completed = Boolean(
-      readySha &&
-      isSha40(readySha) &&
-      readySha !== reviewedHead &&
-      readySha === currentHead &&
-      dispatchedAt !== null &&
-      readyAt !== null &&
-      readyAt >= dispatchedAt
-    );
+    const strict = findStrictWorkerReady(snapshot.comments, {
+      prNumber: pr,
+      cardId: deps.cardId ?? null,
+      reviewedHead,
+      currentHead,
+      dispatchedAt,
+    });
+    const completed = Boolean(strict && strict.ok);
+    const readySha = strict?.ok ? strict.headSha : null;
 
     if (completed) {
       state.dispatch_fix = {

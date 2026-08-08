@@ -501,7 +501,7 @@ function relayComment(id, body, created_at = RELAY_NOW) {
 }
 
 function relayReadyComment(head = RELAY_HEAD) {
-  return relayComment(11, `## READY_FOR_REVIEW\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\nbase_sha: ${RELAY_HEAD}\nhead_sha: ${head}\n`);
+  return relayComment(11, `## READY_FOR_REVIEW\nprotocol: GBB_GH_READY_FOR_REVIEW_V1\ncard_id: GBB-GH-02\npr_number: ${RELAY_PR}\nbase_sha: ${RELAY_HEAD}\nhead_sha: ${head}\nworker_self_review: false\nmerge_performed: false\n`);
 }
 
 function relayReviewComment(id, { decision, head = RELAY_HEAD, pr_number = RELAY_PR, created_at = RELAY_NOW }) {
