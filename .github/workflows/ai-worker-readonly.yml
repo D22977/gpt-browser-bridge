@@ -1,0 +1,271 @@
+name: GBB Read-Only AI Worker Dispatcher
+
+on:
+  workflow_dispatch:
+    inputs:
+      card_id:
+        description: GBB card identifier (e.g. GBB-ACT-01)
+        required: true
+        type: string
+      contract_hash:
+        description: SHA-256 of the dispatch contract
+        required: true
+        type: string
+      dispatch_generation:
+        description: Monotonic generation for this dispatch
+        required: true
+        type: string
+      worker_run_id:
+        description: Unique worker run identifier
+        required: true
+        type: string
+      expected_base_sha:
+        description: Exact 40-char base SHA the worker must operate on
+        required: true
+        type: string
+      worker_id:
+        description: Trusted worker identity (must be in GBB_TRUSTED_WORKER_IDS)
+        required: true
+        type: string
+      canary_task:
+        description: Optional canary task prompt; empty uses built-in synthetic canary
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  GBB_WORKER_MODEL: opencode/deepseek-v4-flash-free
+  GBB_TRUSTED_WORKER_IDS: opencode
+  GBB_CANARY_REL: .gbb-canary
+
+jobs:
+  gbb-readonly-worker:
+    name: GBB Read-Only AI Worker Canary
+    runs-on: [self-hosted, Windows, GBB-AI-WORKER]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      GBB_CARD_ID: ${{ inputs.card_id }}
+      GBB_CONTRACT_HASH: ${{ inputs.contract_hash }}
+      GBB_DISPATCH_GENERATION: ${{ inputs.dispatch_generation }}
+      GBB_WORKER_RUN_ID: ${{ inputs.worker_run_id }}
+      GBB_EXPECTED_BASE_SHA: ${{ inputs.expected_base_sha }}
+      GBB_WORKER_ID: ${{ inputs.worker_id }}
+      GBB_CANARY_TASK: ${{ inputs.canary_task }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Fail-closed - validate required dispatch inputs
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Assert-Regex($value, $pattern, $label) {
+            if ([string]::IsNullOrWhiteSpace($value)) { throw "Required input missing: $label" }
+            if ($value -notmatch $pattern) { throw "Malformed input: $label value=$value" }
+          }
+          Assert-Regex $env:GBB_CARD_ID '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' 'card_id'
+          Assert-Regex $env:GBB_CONTRACT_HASH '^[0-9a-fA-F]{64}$' 'contract_hash'
+          Assert-Regex $env:GBB_DISPATCH_GENERATION '^\d+$' 'dispatch_generation'
+          Assert-Regex $env:GBB_WORKER_RUN_ID '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$' 'worker_run_id'
+          Assert-Regex $env:GBB_EXPECTED_BASE_SHA '^[0-9a-fA-F]{40}$' 'expected_base_sha'
+          if ([string]::IsNullOrWhiteSpace($env:GBB_WORKER_ID)) { throw 'Required input missing: worker_id' }
+          $trusted = @(($env:GBB_TRUSTED_WORKER_IDS -split ',') | ForEach-Object { $_.Trim() })
+          if ($trusted -notcontains $env:GBB_WORKER_ID) { throw "Untrusted worker_id: $($env:GBB_WORKER_ID)" }
+          Write-Output "inputs validated: card_id=$($env:GBB_CARD_ID) gen=$($env:GBB_DISPATCH_GENERATION)"
+
+      - name: Fail-closed - no residual OpenCode process for this card
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $needle = [regex]::Escape($env:GBB_WORKER_RUN_ID)
+          $found = @()
+          Get-CimInstance Win32_Process | ForEach-Object {
+            if ($_.Name -match 'opencode' -and $_.CommandLine -match $needle) {
+              $found += "$($_.ProcessId):$($_.Name)"
+            }
+          }
+          if ($found.Count -gt 0) { throw "Residual OpenCode process for this card: $($found -join ', ')" }
+          Write-Output 'no residual OpenCode process detected'
+
+      - name: Fail-closed - no stale residual runtime lock
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lockDir = Join-Path $env:RUNNER_WORKSPACE '.gbb-locks'
+          $lockFile = Join-Path $lockDir "gbb-$($env:GBB_WORKER_RUN_ID).lock"
+          if (Test-Path -LiteralPath $lockFile) { throw "Stale residual runtime lock detected: $lockFile" }
+          Write-Output 'no stale runtime lock detected'
+
+      - name: Checkout exact expected base SHA (persist-credentials false)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.expected_base_sha }}
+          persist-credentials: false
+
+      - name: Fail-closed - checkout resolves to exact expected_base_sha
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:GBB_EXPECTED_BASE_SHA) {
+            throw "Checkout HEAD $head does not match expected_base_sha $($env:GBB_EXPECTED_BASE_SHA)"
+          }
+          Write-Output "checkout HEAD matches expected_base_sha"
+
+      - name: Fail-closed - working tree clean at base
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dirty = git status --porcelain
+          if ($dirty) { throw "Working tree not clean after checkout: $dirty" }
+          Write-Output 'working tree clean'
+
+      - name: Fail-closed - no stale residual canary workspace
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $canaryRoot = Join-Path $env:GITHUB_WORKSPACE $env:GBB_CANARY_REL
+          if (Test-Path -LiteralPath $canaryRoot) { throw "Stale residual canary workspace detected: $canaryRoot" }
+          Write-Output 'no stale canary workspace detected'
+
+      - name: Fail-closed - no GitHub write credential in Worker environment
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $forbidden = @('GH_TOKEN','GH_ENTERPRISE_TOKEN','GITHUB_PAT','GH_PAT','GIT_ASKPASS','GIT_CREDENTIALS','GHES_TOKEN')
+          foreach ($name in $forbidden) {
+            $v = [Environment]::GetEnvironmentVariable($name)
+            if (-not [string]::IsNullOrWhiteSpace($v)) { throw "Write credential env var present in Worker environment: $name" }
+          }
+          if ([string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) { throw 'GITHUB_TOKEN missing' }
+          $uri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY"
+          try {
+            $r = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN"; 'User-Agent' = 'gbb-ai-worker' } -Method Get -TimeoutSec 30
+          } catch {
+            throw "Cannot verify GITHUB_TOKEN scope (fail closed): $($_.Exception.Message)"
+          }
+          if ($r.permissions.push -or $r.permissions.admin) {
+            throw 'GITHUB_TOKEN has write (push/admin) permission; refusing to launch worker'
+          }
+          Write-Output "GITHUB_TOKEN verified read-only: push=$($r.permissions.push) admin=$($r.permissions.admin)"
+
+      - name: Prepare synthetic canary workspace
+        id: prepare
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $canaryRoot = Join-Path $env:GITHUB_WORKSPACE $env:GBB_CANARY_REL
+          $canaryDir = Join-Path $canaryRoot $env:GBB_WORKER_RUN_ID
+          New-Item -ItemType Directory -Force -Path $canaryDir | Out-Null
+          Set-Content -LiteralPath (Join-Path $canaryDir 'fixture.txt') -Value "seed line 1`nseed line 2`n" -Encoding utf8
+          if ([string]::IsNullOrWhiteSpace($env:GBB_CANARY_TASK)) {
+            $task = @(
+              "Synthetic canary task for card $($env:GBB_CARD_ID) run $($env:GBB_WORKER_RUN_ID)."
+              "Work ONLY inside the directory: $canaryDir"
+              "1. Read fixture.txt."
+              "2. Modify fixture.txt (append one line) or create one small new file under this directory."
+              "3. Produce candidate.patch: a unified git diff of your change."
+              "4. Produce worker_result.json with JSON keys: card_id, worker_run_id, expected_base_sha, status (completed or failed)."
+              "Do not modify, create, or delete any file outside $canaryDir."
+              "Do not run git commit, git push, git fetch, gh, or any GitHub API write."
+              "Do not request, read, or print secrets or credentials."
+            ) -join "`n"
+          } else {
+            $task = $env:GBB_CANARY_TASK
+          }
+          Set-Content -LiteralPath (Join-Path $canaryDir 'task.md') -Value $task -Encoding utf8
+          $lockDir = Join-Path $env:RUNNER_WORKSPACE '.gbb-locks'
+          New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
+          $lockFile = Join-Path $lockDir "gbb-$($env:GBB_WORKER_RUN_ID).lock"
+          Set-Content -LiteralPath $lockFile -Value (Get-Date -Format o) -Encoding utf8
+          Write-Output "canary_dir=$canaryDir"
+          "GBB_CANARY_DIR=$canaryDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "canary workspace prepared: $canaryDir"
+
+      - name: Launch OpenCode read-only worker
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $canaryDir = $env:GBB_CANARY_DIR
+          if ([string]::IsNullOrWhiteSpace($canaryDir)) { throw 'Canary workspace not prepared' }
+          $oc = Get-Command opencode -ErrorAction SilentlyContinue
+          if (-not $oc) { throw 'opencode CLI not found on runner' }
+          $prompt = Get-Content -LiteralPath (Join-Path $canaryDir 'task.md') -Raw
+          $title = "gbb-$($env:GBB_WORKER_RUN_ID)"
+          $stdout = Join-Path $canaryDir 'opencode.stdout.log'
+          $stderr = Join-Path $canaryDir 'opencode.stderr.log'
+          Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+          & $oc.Source run --print-logs --model $env:GBB_WORKER_MODEL --title $title $prompt 1> $stdout 2> $stderr
+          $exit = $LASTEXITCODE
+          if ($exit -ne 0) {
+            Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue | Select-Object -First 40
+            throw "opencode run failed with exit code $exit"
+          }
+          Write-Output "opencode run completed with exit code $exit"
+
+      - name: Fail-closed - both required artifacts present
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $canaryDir = $env:GBB_CANARY_DIR
+          $patch = Join-Path $canaryDir 'candidate.patch'
+          $result = Join-Path $canaryDir 'worker_result.json'
+          if (-not (Test-Path -LiteralPath $patch)) { throw 'candidate.patch missing' }
+          if (-not (Test-Path -LiteralPath $result)) { throw 'worker_result.json missing' }
+          if ((Get-Item -LiteralPath $patch).Length -eq 0) { throw 'candidate.patch is empty' }
+          if ((Get-Item -LiteralPath $result).Length -eq 0) { throw 'worker_result.json is empty' }
+          try {
+            $jr = Get-Content -LiteralPath $result -Raw | ConvertFrom-Json
+          } catch {
+            throw "worker_result.json is not valid JSON: $($_.Exception.Message)"
+          }
+          if ($jr.card_id -ne $env:GBB_CARD_ID) { throw "worker_result.json card_id mismatch: $($jr.card_id)" }
+          if ($jr.worker_run_id -ne $env:GBB_WORKER_RUN_ID) { throw "worker_result.json worker_run_id mismatch: $($jr.worker_run_id)" }
+          Write-Output "artifacts present: candidate.patch and worker_result.json"
+
+      - name: Fail-closed - changed paths within canary allowlist
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $allow = "$env:GBB_CANARY_REL/"
+          $bad = @()
+          $statusLines = git status --porcelain --untracked-files=all
+          foreach ($line in $statusLines) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $p = $line.Substring(3)
+            if ($p -notlike "$allow*") { $bad += $p }
+          }
+          $diffNames = git diff --name-only HEAD
+          foreach ($p in $diffNames) {
+            if ($p -notlike "$allow*") { $bad += $p }
+          }
+          if ($bad.Count -gt 0) { throw "Changed paths outside canary allowlist: $($bad -join ', ')" }
+          Write-Output 'all changed paths are within the canary allowlist'
+
+      - name: Fail-closed - no residual Worker process after completion
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $needle = [regex]::Escape($env:GBB_WORKER_RUN_ID)
+          $found = @()
+          Get-CimInstance Win32_Process | ForEach-Object {
+            if ($_.Name -match 'opencode' -and $_.CommandLine -match $needle) {
+              $found += "$($_.ProcessId):$($_.Name)"
+            }
+          }
+          if ($found.Count -gt 0) { throw "Residual Worker process after completion: $($found -join ', ')" }
+          Write-Output 'no residual Worker process detected'
+
+      - name: Upload candidate.patch artifact
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        with:
+          name: gbb-${{ inputs.worker_run_id }}-candidate
+          path: ${{ env.GBB_CANARY_REL }}/${{ inputs.worker_run_id }}/candidate.patch
+          if-no-files-found: error
+
+      - name: Upload worker_result.json artifact
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        with:
+          name: gbb-${{ inputs.worker_run_id }}-result
+          path: ${{ env.GBB_CANARY_REL }}/${{ inputs.worker_run_id }}/worker_result.json
+          if-no-files-found: error
+
+      - name: Cleanup residual runtime lock
+        if: always()
+        run: |
+          $lockFile = Join-Path $env:RUNNER_WORKSPACE (Join-Path '.gbb-locks' "gbb-$($env:GBB_WORKER_RUN_ID).lock")
+          if (Test-Path -LiteralPath $lockFile) { Remove-Item -LiteralPath $lockFile -Force }
+          Write-Output 'runtime lock cleanup done'
