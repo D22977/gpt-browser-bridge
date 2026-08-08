@@ -469,7 +469,16 @@ export function applyDecision(state, decision, now) {
     };
   }
 
-  if (decision.terminal) {
+  // F009: a terminal whose human notification is still pending re-drives
+  // NOTIFY_HUMAN on every poll (TERMINAL_NOTIFICATION_PENDING). That re-drive is
+  // NOT a terminal transition: once terminal state is entered,
+  // state/reason/entered_at/notification_event_key are immutable until the
+  // notification comment is ACKed. Guarding on !next.terminal.active keeps the
+  // original terminal identity so the re-driven NOTIFY_HUMAN action_id is
+  // byte-identical across polls and the executor's action_id-based dedupe never
+  // posts a duplicate human notification. A fresh transition (terminal inactive)
+  // still writes the full terminal block.
+  if (decision.terminal && !next.terminal.active) {
     next.terminal.active = true;
     next.terminal.state = decision.terminal_state;
     next.terminal.reason = decision.reason;

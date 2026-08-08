@@ -877,3 +877,179 @@ test("F004-R2 process-level: CLI notification ACK with matching action id settle
   assert.equal(reloaded.terminal.notification_required, false);
   assert.equal(String(reloaded.terminal.notification_comment_id), "9001");
 });
+
+// ---------------------------------------------------------------------------
+// F009 stable terminal notification identity (GBB-GH-F009)
+//
+// Once terminal state is entered, state/reason/entered_at/notification_event_key
+// are immutable during notification re-drive until the notification comment is
+// ACKed. NOTIFY_HUMAN delivery is NOT a terminal transition. Repeated polls
+// before ACK must always emit the same stable NOTIFY_HUMAN action_id and never
+// post a duplicate human notification for the same terminal transition.
+// ---------------------------------------------------------------------------
+
+function f009Terminal({ reason = "OPENCODE_ADAPTER_START_FAILED", stateName = "BLOCKED_FOR_HUMAN", eventKey = `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED` } = {}) {
+  return {
+    active: true,
+    state: stateName,
+    reason,
+    entered_at: "2026-08-07T16:00:00+08:00",
+    notification_required: true,
+    notification_event_key: eventKey,
+    notification_comment_id: null,
+  };
+}
+
+test("F009-1 failed DISPATCH_FIX ACK with OPENCODE_ADAPTER_START_FAILED enters terminal", () => {
+  const key = `${REPO}:${PR}:${HEAD_A}:FIX_REQUIRED`;
+  const state = makeState({
+    repair: { rounds: 0, max_rounds: 2, cooldown_minutes: 5, last_repair_at: null },
+    pending_action: {
+      action_id: `${REPO}:${PR}:${HEAD_A}:DISPATCH_FIX`,
+      event_key: key,
+      action: "DISPATCH_FIX",
+      head_sha: HEAD_A,
+      created_at: NOW,
+    },
+  });
+  const out = applyAck(state, {
+    actionId: state.pending_action.action_id,
+    result: "failed",
+    reason: "OPENCODE_ADAPTER_START_FAILED",
+    now: NOW,
+  });
+  assert.equal(out.changed, true);
+  assert.equal(out.status, "TERMINAL_FAILURE");
+  assert.equal(out.state.terminal.active, true);
+  assert.equal(out.state.terminal.state, "BLOCKED_FOR_HUMAN");
+  assert.equal(out.state.terminal.reason, "OPENCODE_ADAPTER_START_FAILED");
+  assert.equal(out.state.terminal.notification_required, true);
+  assert.equal(out.state.terminal.notification_event_key, key);
+  assert.equal(out.state.pending_action, null);
+});
+
+test("F009-2 first evaluate emits NOTIFY_HUMAN derived from the original terminal reason", () => {
+  const state = makeState({ terminal: f009Terminal() });
+  const d = evaluate(snapshot(HEAD_A), state, NOW);
+  assert.equal(actionOf(d), "NOTIFY_HUMAN");
+  assert.equal(d.reason, "TERMINAL_NOTIFICATION_PENDING");
+  assert.equal(d.terminal, true);
+  assert.equal(d.terminal_state, "BLOCKED_FOR_HUMAN");
+  assert.equal(d.action_id, `${REPO}:${PR}:OPENCODE_ADAPTER_START_FAILED:NOTIFY_HUMAN`);
+});
+
+test("F009-3 applying the NOTIFY_HUMAN decision must not alter terminal immutables", () => {
+  const terminal = f009Terminal();
+  const state = makeState({ terminal });
+  const d = evaluate(snapshot(HEAD_A), state, NOW);
+  const next = applyDecision(state, d, "2026-08-07T16:05:00+08:00");
+  // reason/state/entered_at/event_key survive the re-drive; entered_at is NOT
+  // reset to the later applyDecision time.
+  assert.equal(next.terminal.reason, terminal.reason);
+  assert.equal(next.terminal.state, terminal.state);
+  assert.equal(next.terminal.entered_at, terminal.entered_at);
+  assert.equal(next.terminal.notification_event_key, terminal.notification_event_key);
+  assert.equal(next.terminal.notification_required, true);
+  assert.equal(next.terminal.notification_comment_id, null);
+});
+
+test("F009-4 five repeated evaluate/applyDecision ticks without ACK produce byte-identical action_id", () => {
+  const terminal = f009Terminal();
+  let state = makeState({ terminal });
+  const expectedId = `${REPO}:${PR}:OPENCODE_ADAPTER_START_FAILED:NOTIFY_HUMAN`;
+  for (let i = 0; i < 5; i += 1) {
+    const d = evaluate(snapshot(HEAD_A), state, NOW);
+    assert.equal(actionOf(d), "NOTIFY_HUMAN");
+    assert.equal(d.action_id, expectedId);
+    state = applyDecision(state, d, NOW);
+    assert.equal(state.terminal.reason, terminal.reason);
+    assert.equal(state.terminal.notification_required, true);
+  }
+});
+
+test("F009-5 exact action id + succeeded + positive comment id records notification and clears notification_required", () => {
+  const terminal = f009Terminal();
+  const state = makeState({ terminal });
+  const out = applyAck(state, {
+    actionId: `${REPO}:${PR}:OPENCODE_ADAPTER_START_FAILED:NOTIFY_HUMAN`,
+    result: "succeeded",
+    notificationCommentId: 9003,
+    now: NOW,
+  });
+  assert.equal(out.changed, true);
+  assert.equal(out.status, "NOTIFICATION_RECORDED");
+  assert.equal(out.state.terminal.notification_required, false);
+  assert.equal(out.state.terminal.notification_comment_id, 9003);
+  // reason/state/entered_at/event_key still intact after settling
+  assert.equal(out.state.terminal.reason, terminal.reason);
+  assert.equal(out.state.terminal.state, terminal.state);
+  assert.equal(out.state.terminal.entered_at, terminal.entered_at);
+});
+
+test("F009-6 next tick after valid ACK is terminal NOOP and emits no notification", () => {
+  const terminal = f009Terminal();
+  const state = makeState({ terminal });
+  const acked = applyAck(state, {
+    actionId: `${REPO}:${PR}:OPENCODE_ADAPTER_START_FAILED:NOTIFY_HUMAN`,
+    result: "succeeded",
+    notificationCommentId: 9003,
+    now: NOW,
+  }).state;
+  const d = evaluate(snapshot(HEAD_A), acked, NOW);
+  assert.equal(actionOf(d), "NOOP");
+  assert.equal(d.reason, "TERMINAL_STATE");
+});
+
+test("F009-7 wrong action id is a no-op", () => {
+  const terminal = f009Terminal();
+  const state = makeState({ terminal });
+  const frozen = JSON.stringify(state.terminal);
+  const out = applyAck(state, {
+    actionId: `${REPO}:${PR}:SOME_OTHER_REASON:NOTIFY_HUMAN`,
+    result: "succeeded",
+    notificationCommentId: 9003,
+    now: NOW,
+  });
+  assert.equal(out.changed, false);
+  assert.equal(out.status, "NOTIFICATION_ACK_INVALID");
+  assert.equal(JSON.stringify(out.state.terminal), frozen);
+});
+
+test("F009-8 zero/negative/missing comment id is a no-op", () => {
+  for (const bad of [0, -5, undefined, null]) {
+    const terminal = f009Terminal();
+    const state = makeState({ terminal });
+    const frozen = JSON.stringify(state.terminal);
+    const out = applyAck(state, {
+      actionId: `${REPO}:${PR}:OPENCODE_ADAPTER_START_FAILED:NOTIFY_HUMAN`,
+      result: "succeeded",
+      notificationCommentId: bad,
+      now: NOW,
+    });
+    assert.equal(out.changed, false);
+    assert.equal(JSON.stringify(out.state.terminal), frozen);
+  }
+});
+
+test("F009-9 PASS terminal and BLOCKED terminal follow the same immutable notification invariant", () => {
+  const passTerminal = f009Terminal({
+    reason: "FRESH_REVIEW_PASS",
+    stateName: "PASS_AWAITING_MANUAL_MERGE",
+    eventKey: `${REPO}:${PR}:${HEAD_A}:PASS`,
+  });
+  const blockedTerminal = f009Terminal();
+  for (const terminal of [passTerminal, blockedTerminal]) {
+    const expectedId = `${REPO}:${PR}:${terminal.reason}:NOTIFY_HUMAN`;
+    let state = makeState({ terminal });
+    for (let i = 0; i < 3; i += 1) {
+      const d = evaluate(snapshot(HEAD_A), state, NOW);
+      assert.equal(actionOf(d), "NOTIFY_HUMAN");
+      assert.equal(d.action_id, expectedId);
+      state = applyDecision(state, d, NOW);
+      assert.equal(state.terminal.reason, terminal.reason);
+      assert.equal(state.terminal.state, terminal.state);
+      assert.equal(state.terminal.entered_at, terminal.entered_at);
+      assert.equal(state.terminal.notification_event_key, terminal.notification_event_key);
+    }
+  }
+});
