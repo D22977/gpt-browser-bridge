@@ -1,0 +1,5 @@
+{
+  "protocol": "GBB_GH_03_SYNTHETIC_V1",
+  "expected_value": "PASS",
+  "actual_value": "FAIL"
+}
