@@ -106,9 +106,20 @@ function extractPowerShellBlock(source, condition) {
 function topLevelPowerShellKeywords(block) {
   let depth = 0;
   let quote = null;
+  let blockCommentDepth = 0;
   const keywords = [];
   for (let index = 0; index < block.length; index += 1) {
     const character = block[index];
+    if (blockCommentDepth > 0) {
+      if (character === "<" && block[index + 1] === "#") {
+        blockCommentDepth += 1;
+        index += 1;
+      } else if (character === "#" && block[index + 1] === ">") {
+        blockCommentDepth -= 1;
+        index += 1;
+      }
+      continue;
+    }
     if (quote) {
       if (character === "`" && quote === '"') {
         index += 1;
@@ -125,6 +136,11 @@ function topLevelPowerShellKeywords(block) {
     }
     if (character === "'" || character === '"') {
       quote = character;
+      continue;
+    }
+    if (character === "<" && block[index + 1] === "#") {
+      blockCommentDepth = 1;
+      index += 1;
       continue;
     }
     if (character === "#") {
@@ -619,6 +635,16 @@ throw "unrelated"`;
 }`;
     assert.throws(
       () => assertDirectPowerShellThrow(commentOnlyThrow, condition),
+      /direct terminating throw/
+    );
+
+    const blockCommentOnlyThrow = `if (${condition}) {
+  <#
+    throw "comment-only"
+  #>
+}`;
+    assert.throws(
+      () => assertDirectPowerShellThrow(blockCommentOnlyThrow, condition),
       /direct terminating throw/
     );
   }
