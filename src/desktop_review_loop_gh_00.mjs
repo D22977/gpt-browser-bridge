@@ -24,5 +24,6 @@ export function validateReadyReceipt(receipt) {
     && nonEmptyStringArray(receipt.changed_paths)
     && nonEmptyStringArray(receipt.tests_run)
     && receipt.desktop_agent_identity === "CODEX_DESKTOP_AGENT"
-    && receipt.manual_relay_count === 0;
+    && receipt.manual_relay_count === 0
+    && receipt.request_fresh_reviewer === true;
 }

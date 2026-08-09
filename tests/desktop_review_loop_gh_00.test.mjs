@@ -62,6 +62,10 @@ test("DESKTOP-REVIEW-LOOP-GH-00 rejects manual review-result relay", () => {
   assert.equal(validateReadyReceipt(validReceipt({ manual_relay_count: 1 })), false);
 });
 
+test("DESKTOP-REVIEW-LOOP-GH-00 rejects a request without a fresh reviewer", () => {
+  assert.equal(validateReadyReceipt(validReceipt({ request_fresh_reviewer: false })), false);
+});
+
 test("DESKTOP-REVIEW-LOOP-GH-00 rejects malformed receipts", () => {
   assert.equal(validateReadyReceipt(null), false);
   assert.equal(validateReadyReceipt("not-an-object"), false);
