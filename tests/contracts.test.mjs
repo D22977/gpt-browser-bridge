@@ -365,7 +365,26 @@ test("Reviewer canary proves ancestry by walking parents upward with a distinct 
   assert.match(ancestorBlock, /\$parentId\s*=\s*\[int\]\$currentProcess\.ParentProcessId/);
   assert.match(ancestorBlock, /while\s*\(\$parentId\s*-ne\s*0\)/);
   assert.match(ancestorBlock, /\$parentProcess\s*=\s*\$processById\[\$parentId\]/);
-  assert.match(ancestorBlock, /if\s*\(-not\s*\$parentProcess\)/);
+  assert.match(
+    ancestorBlock,
+    /if\s*\(-not\s*\$parentProcess\)\s*\{\s*throw\b/s,
+    "an unresolved parent must fail closed"
+  );
+  assert.match(
+    ancestorBlock,
+    /if\s*\(-not\s*\$cycleGuard\.Add\(\$parentId\)\)\s*\{\s*throw\b/s,
+    "an ancestry cycle must fail closed"
+  );
+  assert.match(
+    ancestorBlock,
+    /if\s*\(-not\s*\$ancestorIds\.Add\(\$parentId\)\)\s*\{\s*throw\b/s,
+    "duplicate ancestry state must fail closed"
+  );
+  assert.doesNotMatch(
+    ancestorBlock,
+    /if\s*\([^\n]+\)\s*\{\s*break\s*\}/s,
+    "only reaching PID 0 may terminate ancestry traversal successfully"
+  );
   assert.match(ancestorBlock, /\$parentId\s*=\s*\[int\]\$parentProcess\.ParentProcessId/);
   assert.match(
     ancestorBlock,
@@ -386,9 +405,25 @@ test("Reviewer canary applies Worker services and forbidden process checks to an
     source,
     /\$ancestorServices\s*=\s*@\(Get-CimInstance\s+Win32_Service\s*\|\s*Where-Object\s*\{\s*\$_.ProcessId\s+-in\s+@\(\$ancestorProcesses\.ProcessId\)/
   );
-  assert.match(source, /\$workerAncestorServices/);
-  assert.match(source, /\$forbiddenAncestorProcesses/);
-  assert.match(source, /orca/i);
+  const workerServiceStart = source.indexOf("$workerAncestorServices");
+  const evidenceStart = source.indexOf("Write-Output \"reviewer_canary_ancestry:");
+  assert.notEqual(workerServiceStart, -1, "workflow must classify ancestor services");
+  assert.ok(workerServiceStart < evidenceStart, "service classification must precede evidence");
+  const workerServiceBlock = source.slice(workerServiceStart, evidenceStart);
+  for (const field of ["Name", "DisplayName", "StartName", "PathName"]) {
+    assert.match(
+      workerServiceBlock,
+      new RegExp(`\\$_\\.${field}\\s+-match`, "i"),
+      `Worker service classification must inspect ${field}`
+    );
+  }
+  const forbiddenStart = source.indexOf("$forbiddenAncestorProcesses");
+  const servicesStart = source.indexOf("$ancestorServices");
+  const forbiddenBlock = source.slice(forbiddenStart, servicesStart);
+  const namePredicate = forbiddenBlock.match(/\$_.Name\s+-match\s+'([^']+)'/i);
+  assert.ok(namePredicate, "forbidden process identity must inspect Name");
+  assert.match(namePredicate[1], /orca/i, "ORCA must be rejected by Name independently");
+  assert.match(forbiddenBlock, /\$_.CommandLine\s+-match/i, "CommandLine remains an additional signal");
   assert.match(source, /ancestor_count=\$\(\$ancestorProcesses\.Count\)/);
   assert.match(source, /worker_ancestor_service_count=\$\(\$workerAncestorServices\.Count\)/);
   assert.match(source, /forbidden_ancestor_count=\$\(\$forbiddenAncestorProcesses\.Count\)/);

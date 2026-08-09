@@ -69,21 +69,21 @@ jobs:
           $parentId = [int]$currentProcess.ParentProcessId
           while ($parentId -ne 0) {
             if (-not $cycleGuard.Add($parentId)) {
-              break
+              throw "Cycle detected in canary process ancestry at PID $parentId"
             }
             $parentProcess = $processById[$parentId]
             if (-not $parentProcess) {
-              break
+              throw "Unable to resolve expected canary ancestor PID $parentId"
             }
             if (-not $ancestorIds.Add($parentId)) {
-              break
+              throw "Duplicate canary ancestor PID $parentId"
             }
             $parentId = [int]$parentProcess.ParentProcessId
           }
 
           $ancestorProcesses = @($processes | Where-Object { $ancestorIds.Contains([int]$_.ProcessId) })
           $forbiddenAncestorProcesses = @($ancestorProcesses | Where-Object {
-            $_.Name -match '(?i)^(opencode|chrome|msedge|playwright)' -or
+            $_.Name -match '(?i)^(opencode|chrome|msedge|playwright|orca)' -or
             $_.CommandLine -match '(?i)(opencode|deepseek|gpt_browser_bridge|gpt_send|supervisor|chatgpt|webgpt|playwright|orca|GBBWorker)'
           })
           if ($forbiddenAncestorProcesses.Count -gt 0) {
@@ -93,7 +93,10 @@ jobs:
 
           $ancestorServices = @(Get-CimInstance Win32_Service | Where-Object { $_.ProcessId -in @($ancestorProcesses.ProcessId) })
           $workerAncestorServices = @($ancestorServices | Where-Object {
-            $_.StartName -match '(?i)GBBWorker' -or $_.PathName -match '(?i)gbb-worker|GBBWorker'
+            $_.Name -match '(?i)gbb-worker|GBBWorker' -or
+            $_.DisplayName -match '(?i)gbb-worker|GBBWorker' -or
+            $_.StartName -match '(?i)GBBWorker' -or
+            $_.PathName -match '(?i)gbb-worker|GBBWorker'
           })
           if ($workerAncestorServices.Count -gt 0) {
             $details = $workerAncestorServices | ForEach-Object { $_.Name }
