@@ -410,20 +410,46 @@ test("Reviewer canary applies Worker services and forbidden process checks to an
   assert.notEqual(workerServiceStart, -1, "workflow must classify ancestor services");
   assert.ok(workerServiceStart < evidenceStart, "service classification must precede evidence");
   const workerServiceBlock = source.slice(workerServiceStart, evidenceStart);
+  const workerIdentityPattern = /gbb-worker|gbbworker/i;
   for (const field of ["Name", "DisplayName", "StartName", "PathName"]) {
+    const fieldPredicate = workerServiceBlock.match(
+      new RegExp(`\\$_\\.${field}\\s+-match\\s+'([^']+)'`, "i")
+    );
+    assert.ok(fieldPredicate, `Worker service classification must inspect ${field}`);
     assert.match(
-      workerServiceBlock,
-      new RegExp(`\\$_\\.${field}\\s+-match`, "i"),
-      `Worker service classification must inspect ${field}`
+      fieldPredicate[1],
+      workerIdentityPattern,
+      `${field} must match the Worker identity pattern`
     );
   }
   const forbiddenStart = source.indexOf("$forbiddenAncestorProcesses");
   const servicesStart = source.indexOf("$ancestorServices");
   const forbiddenBlock = source.slice(forbiddenStart, servicesStart);
+  assert.match(
+    forbiddenBlock,
+    /@\(\$ancestorProcesses\s*\|\s*Where-Object/,
+    "forbidden process checks must remain ancestor-only"
+  );
   const namePredicate = forbiddenBlock.match(/\$_.Name\s+-match\s+'([^']+)'/i);
   assert.ok(namePredicate, "forbidden process identity must inspect Name");
   assert.match(namePredicate[1], /orca/i, "ORCA must be rejected by Name independently");
   assert.match(forbiddenBlock, /\$_.CommandLine\s+-match/i, "CommandLine remains an additional signal");
+  const forbiddenDecisionStart = source.indexOf("if ($forbiddenAncestorProcesses.Count -gt 0)");
+  assert.notEqual(forbiddenDecisionStart, -1, "forbidden ancestor detection must have a decision branch");
+  const forbiddenDecisionBlock = source.slice(forbiddenDecisionStart, servicesStart);
+  assert.match(
+    forbiddenDecisionBlock,
+    /\bthrow\b/,
+    "forbidden ancestor detection must terminate with throw"
+  );
+  const workerDecisionStart = source.indexOf("if ($workerAncestorServices.Count -gt 0)");
+  assert.notEqual(workerDecisionStart, -1, "Worker ancestor service detection must have a decision branch");
+  const workerDecisionBlock = source.slice(workerDecisionStart, evidenceStart);
+  assert.match(
+    workerDecisionBlock,
+    /\bthrow\b/,
+    "Worker ancestor service detection must terminate with throw"
+  );
   assert.match(source, /ancestor_count=\$\(\$ancestorProcesses\.Count\)/);
   assert.match(source, /worker_ancestor_service_count=\$\(\$workerAncestorServices\.Count\)/);
   assert.match(source, /forbidden_ancestor_count=\$\(\$forbiddenAncestorProcesses\.Count\)/);
