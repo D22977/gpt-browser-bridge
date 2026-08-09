@@ -9,9 +9,9 @@ import { createReviewResultPublisher } from '../src/review_result_idempotency.mj
 
 const BASE_SHA = 'a'.repeat(40);
 const CANDIDATE_HEAD_SHA = 'b'.repeat(40);
-const READY_RECEIPT_ID = 'READY-DESKTOP-REVIEW-LOOP-GH-01-G1-R1-bbbbbbbb';
-const REVIEW_REQUEST_ID = 'DESKTOP-REVIEW-LOOP-GH-01-G1-R1-bbbbbbbb';
-const REVIEW_SESSION_ID = 'WEBGPT-FRESH-I46-G1-R1-bbbbbbbb';
+const READY_RECEIPT_ID = 'READY-DESKTOP-REVIEW-LOOP-GH-01-G1-R2-bbbbbbbb';
+const REVIEW_REQUEST_ID = 'DESKTOP-REVIEW-LOOP-GH-01-G1-R2-bbbbbbbb';
+const REVIEW_SESSION_ID = 'WEBGPT-FRESH-I46-G1-R2-bbbbbbbb';
 
 function validReady(overrides = {}) {
   return {
@@ -30,6 +30,7 @@ function validReady(overrides = {}) {
     review_generation: 1,
     review_request_id: REVIEW_REQUEST_ID,
     ready_receipt_id: READY_RECEIPT_ID,
+    review_session_id: REVIEW_SESSION_ID,
     ...overrides,
   };
 }
@@ -46,6 +47,7 @@ function expectedAuthority(overrides = {}) {
     review_generation: 1,
     review_request_id: REVIEW_REQUEST_ID,
     ready_receipt_id: READY_RECEIPT_ID,
+    review_session_id: REVIEW_SESSION_ID,
     ...overrides,
   };
 }
@@ -85,6 +87,7 @@ test('DESKTOP-REVIEW-LOOP-GH-01 rejects malformed READY gates', () => {
     ['review_generation', 0],
     ['review_request_id', ''],
     ['ready_receipt_id', ''],
+    ['review_session_id', ''],
   ]) {
     const outcome = validateRecoveryReadyReceipt(
       validReady({ [field]: value }),
@@ -127,7 +130,7 @@ test('DESKTOP-REVIEW-LOOP-GH-01 binds #45 publication authority to the exact REA
   assert.equal(outcome.valid, true);
   assert.equal(
     outcome.idempotency_key,
-    'DESKTOP-REVIEW-LOOP-GH-01::DESKTOP-REVIEW-LOOP-GH-01-G1-R1-bbbbbbbb',
+    'DESKTOP-REVIEW-LOOP-GH-01::DESKTOP-REVIEW-LOOP-GH-01-G1-R2-bbbbbbbb',
   );
   assert.deepEqual(outcome.authority, {
     review_request_id: REVIEW_REQUEST_ID,
@@ -136,6 +139,57 @@ test('DESKTOP-REVIEW-LOOP-GH-01 binds #45 publication authority to the exact REA
     source_ready_receipt_id: READY_RECEIPT_ID,
     reviewed_head_sha: CANDIDATE_HEAD_SHA,
     review_session_id: REVIEW_SESSION_ID,
+  });
+});
+
+test('DESKTOP-REVIEW-LOOP-GH-01 validates the durable GitHub READY field shape', () => {
+  const durableReadyReceipt = {
+    card_id: 'DESKTOP-REVIEW-LOOP-GH-01',
+    task_id: 'TASK-A',
+    recovery_generation: 1,
+    review_generation: 2,
+    round: 2,
+    repo: 'D22977/gpt-browser-bridge',
+    exact_base_sha: BASE_SHA,
+    candidate_head_sha: CANDIDATE_HEAD_SHA,
+    changed_paths: [
+      'src/desktop_review_loop_gh_01.mjs',
+      'tests/desktop_review_loop_gh_01.test.mjs',
+    ],
+    tests_run: [
+      'node --check src/desktop_review_loop_gh_01.mjs',
+      'node --check tests/desktop_review_loop_gh_01.test.mjs',
+      'node --test tests/desktop_review_loop_gh_01.test.mjs',
+      'npm test',
+      'git diff --check',
+    ],
+    desktop_agent_identity: 'CODEX_DESKTOP_AGENT',
+    manual_relay_count: 0,
+    request_fresh_reviewer: true,
+    review_request_id: REVIEW_REQUEST_ID,
+    ready_receipt_id: READY_RECEIPT_ID,
+    review_session_id: REVIEW_SESSION_ID,
+  };
+  const authority = expectedAuthority({
+    round: 2,
+    review_generation: 2,
+  });
+  const outcome = validateRecoveryReadyReceipt(durableReadyReceipt, authority);
+
+  assert.deepEqual(outcome, { valid: true });
+});
+
+test('DESKTOP-REVIEW-LOOP-GH-01 rejects a stale or mismatched fresh review session', () => {
+  const outcome = buildRecoveryReviewAuthority({
+    readyReceipt: validReady({ review_session_id: 'stale-session' }),
+    expectedAuthority: expectedAuthority(),
+    reviewSessionId: REVIEW_SESSION_ID,
+  });
+
+  assert.deepEqual(outcome, {
+    valid: false,
+    reason: 'AUTHORITY_MISMATCH',
+    field: 'review_session_id',
   });
 });
 

@@ -14,6 +14,7 @@ const EXPECTED_AUTHORITY_FIELDS = Object.freeze([
   'review_generation',
   'review_request_id',
   'ready_receipt_id',
+  'review_session_id',
 ]);
 
 function isRecord(value) {
@@ -77,6 +78,9 @@ function validateShape(receipt) {
   if (!isNonEmptyString(receipt.ready_receipt_id)) {
     return invalid('INVALID_READY_RECEIPT_ID', 'ready_receipt_id');
   }
+  if (!isNonEmptyString(receipt.review_session_id)) {
+    return invalid('INVALID_REVIEW_SESSION_ID', 'review_session_id');
+  }
   return null;
 }
 
@@ -128,6 +132,9 @@ export function buildRecoveryReviewAuthority({
   if (!validation.valid) return validation;
   if (!isNonEmptyString(reviewSessionId)) {
     return invalid('FRESH_REVIEW_SESSION_REQUIRED', 'review_session_id');
+  }
+  if (reviewSessionId !== readyReceipt.review_session_id) {
+    return invalid('AUTHORITY_MISMATCH', 'review_session_id');
   }
 
   return {
