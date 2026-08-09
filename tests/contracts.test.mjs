@@ -334,7 +334,8 @@ test("Reviewer canary workflow is a static, read-only, fail-closed runner contra
   assert.match(source, /runs-on:\s*\[self-hosted,\s*Windows,\s*GBB-REVIEWER\]/);
   assert.match(source, /timeout-minutes:\s*10\b/);
   assert.match(source, /permissions:\s*\n\s+contents:\s+read/);
-  assert.match(source, /shell:\s+pwsh/);
+  assert.match(source, /shell:\s+pwsh\s+-NoProfile\s+-File\s+\{0\}/);
+  assert.doesNotMatch(source, /^\s+shell:\s+pwsh\s*$/m);
   assert.match(source, /RUNNER_NAME/);
   assert.match(source, /gbb-reviewer-win-01/);
   assert.match(source, /whoami/);

@@ -15,7 +15,7 @@ jobs:
       contents: read
     defaults:
       run:
-        shell: pwsh
+        shell: pwsh -NoProfile -File {0}
     steps:
       - name: Verify interactive Reviewer identity and session
         run: |
