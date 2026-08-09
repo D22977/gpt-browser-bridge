@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   buildRecoveryReviewAuthority,
+  createRecoveryReviewPublisher,
   validateRecoveryReadyReceipt,
 } from '../src/desktop_review_loop_gh_01.mjs';
-import { createReviewResultPublisher } from '../src/review_result_idempotency.mjs';
 
 const BASE_SHA = 'a'.repeat(40);
 const CANDIDATE_HEAD_SHA = 'b'.repeat(40);
@@ -207,12 +207,53 @@ test('DESKTOP-REVIEW-LOOP-GH-01 fails closed when the fresh session identity is 
   });
 });
 
-test('DESKTOP-REVIEW-LOOP-GH-01 uses #45 duplicate-safe publication for replay', async () => {
-  const authority = buildRecoveryReviewAuthority({
+test('DESKTOP-REVIEW-LOOP-GH-01 rejects a wrong-session first publication before #45', async () => {
+  let publishAttempts = 0;
+  let created = 0;
+  const records = new Map();
+  const adapter = {
+    async publishIfAbsent({ idempotency_key, fingerprint }) {
+      publishAttempts += 1;
+      const existing = records.get(idempotency_key);
+      if (existing) return { created: false, pointer: existing.pointer };
+      const pointer = { receipt_id: 'gh01-receipt-1' };
+      records.set(idempotency_key, { fingerprint, pointer });
+      created += 1;
+      return { created: true, pointer };
+    },
+    async read({ idempotency_key }) {
+      const record = records.get(idempotency_key);
+      return record
+        ? { idempotency_key, fingerprint: record.fingerprint, pointer: record.pointer }
+        : null;
+    },
+  };
+  const publisher = createRecoveryReviewPublisher({
     readyReceipt: validReady(),
     expectedAuthority: expectedAuthority(),
     reviewSessionId: REVIEW_SESSION_ID,
-  }).authority;
+    adapter,
+  });
+  const outcome = await publisher.publish({
+    ...publisher.authority,
+    review_session_id: 'stale-session',
+    decision: 'PASS',
+    findings: [],
+    next_state: 'READY_FOR_NEXT_TASK',
+  });
+
+  assert.deepEqual(outcome, {
+    ok: false,
+    idempotency_disposition: 'REJECTED',
+    idempotency_key: publisher.idempotency_key,
+    reason: 'AUTHORITY_MISMATCH',
+    field: 'review_session_id',
+  });
+  assert.equal(publishAttempts, 0);
+  assert.equal(created, 0);
+});
+
+test('DESKTOP-REVIEW-LOOP-GH-01 uses #45 duplicate-safe publication for replay', async () => {
   const records = new Map();
   let created = 0;
   const adapter = {
@@ -231,17 +272,22 @@ test('DESKTOP-REVIEW-LOOP-GH-01 uses #45 duplicate-safe publication for replay',
         : null;
     },
   };
-  const publisher = createReviewResultPublisher({ authority, adapter });
+  const integratedPublisher = createRecoveryReviewPublisher({
+    readyReceipt: validReady(),
+    expectedAuthority: expectedAuthority(),
+    reviewSessionId: REVIEW_SESSION_ID,
+    adapter,
+  });
   const result = {
-    ...authority,
+    ...integratedPublisher.authority,
     decision: 'PASS',
     findings: [],
     next_state: 'READY_FOR_NEXT_TASK',
   };
 
   const [first, replay] = await Promise.all([
-    publisher.publish(result),
-    publisher.publish(result),
+    integratedPublisher.publish(result),
+    integratedPublisher.publish(result),
   ]);
 
   assert.deepEqual(

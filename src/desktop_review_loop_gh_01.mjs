@@ -1,4 +1,7 @@
-import { reviewResultIdempotencyKey } from './review_result_idempotency.mjs';
+import {
+  createReviewResultPublisher,
+  reviewResultIdempotencyKey,
+} from './review_result_idempotency.mjs';
 
 const READY_CARD_ID = 'DESKTOP-REVIEW-LOOP-GH-01';
 const READY_REPOSITORY = 'D22977/gpt-browser-bridge';
@@ -150,6 +153,72 @@ export function buildRecoveryReviewAuthority({
       source_ready_receipt_id: readyReceipt.ready_receipt_id,
       reviewed_head_sha: readyReceipt.candidate_head_sha,
       review_session_id: reviewSessionId,
+    },
+  };
+}
+
+function publicationAdmissionError(result, authority) {
+  if (!isRecord(result)) {
+    return {
+      ok: false,
+      idempotency_disposition: 'BLOCKED',
+      reason: 'INVALID_RESULT',
+      field: 'result',
+    };
+  }
+  if (result.review_session_id !== authority.review_session_id) {
+    let idempotencyKey;
+    try {
+      idempotencyKey = reviewResultIdempotencyKey(result);
+    } catch {
+      return {
+        ok: false,
+        idempotency_disposition: 'BLOCKED',
+        reason: 'INVALID_RESULT',
+        field: 'card_id',
+      };
+    }
+    return {
+      ok: false,
+      idempotency_disposition: 'REJECTED',
+      idempotency_key: idempotencyKey,
+      reason: 'AUTHORITY_MISMATCH',
+      field: 'review_session_id',
+    };
+  }
+  return null;
+}
+
+/**
+ * Bind the durable READY/session tuple before delegating Reviewer publication to #45.
+ * The explicit session admission closes #45's legacy comparison gap before first create.
+ */
+export function createRecoveryReviewPublisher({
+  readyReceipt,
+  expectedAuthority,
+  reviewSessionId,
+  adapter,
+}) {
+  const bound = buildRecoveryReviewAuthority({
+    readyReceipt,
+    expectedAuthority,
+    reviewSessionId,
+  });
+  if (!bound.valid) return bound;
+
+  const publisher = createReviewResultPublisher({
+    authority: bound.authority,
+    adapter,
+  });
+
+  return {
+    valid: true,
+    idempotency_key: bound.idempotency_key,
+    authority: bound.authority,
+    publish(result) {
+      const admissionError = publicationAdmissionError(result, bound.authority);
+      if (admissionError) return Promise.resolve(admissionError);
+      return publisher.publish(result);
     },
   };
 }
