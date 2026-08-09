@@ -69,6 +69,100 @@ function validProjectState(overrides = {}) {
   };
 }
 
+function extractPowerShellBlock(source, condition) {
+  const conditionStart = source.indexOf(`if (${condition})`);
+  assert.notEqual(conditionStart, -1, `missing PowerShell decision branch for ${condition}`);
+  const openBrace = source.indexOf("{", conditionStart);
+  assert.notEqual(openBrace, -1, `missing PowerShell block for ${condition}`);
+
+  let depth = 0;
+  let quote = null;
+  for (let index = openBrace; index < source.length; index += 1) {
+    const character = source[index];
+    if (quote) {
+      if (character === quote) {
+        if (source[index + 1] === quote) {
+          index += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+    } else if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(openBrace + 1, index);
+      }
+    }
+  }
+  assert.fail(`unterminated PowerShell block for ${condition}`);
+}
+
+function hasTopLevelPowerShellThrow(block) {
+  let depth = 0;
+  let quote = null;
+  for (let index = 0; index < block.length; index += 1) {
+    const character = block[index];
+    if (quote) {
+      if (character === quote) {
+        if (block[index + 1] === quote) {
+          index += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "{") {
+      depth += 1;
+      continue;
+    }
+    if (character === "}") {
+      depth -= 1;
+      continue;
+    }
+    if (
+      depth === 0 &&
+      /^throw\b/.test(block.slice(index)) &&
+      (index === 0 || /[\s;]/.test(block[index - 1]))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function assertDirectPowerShellThrow(source, condition) {
+  const block = extractPowerShellBlock(source, condition);
+  assert.ok(
+    hasTopLevelPowerShellThrow(block),
+    `${condition} must contain a direct terminating throw`
+  );
+}
+
+function assertWorkerServicePattern(patternSource, positiveIdentities, negativeIdentity) {
+  const caseInsensitive = patternSource.startsWith("(?i)");
+  const expression = caseInsensitive ? patternSource.slice(4) : patternSource;
+  const pattern = new RegExp(expression, caseInsensitive ? "i" : undefined);
+  for (const identity of positiveIdentities) {
+    assert.ok(pattern.test(identity), `pattern must match canonical Worker identity ${identity}`);
+  }
+  assert.equal(
+    pattern.test(negativeIdentity),
+    false,
+    "pattern must reject a non-Worker control service identity"
+  );
+}
+
 test("job.json schema accepts a valid job", () => {
   const parsed = jobSchema.parse(validJob());
   assert.equal(parsed.job_id, uuid);
@@ -454,4 +548,66 @@ test("Reviewer canary applies Worker services and forbidden process checks to an
   assert.match(source, /worker_ancestor_service_count=\$\(\$workerAncestorServices\.Count\)/);
   assert.match(source, /forbidden_ancestor_count=\$\(\$forbiddenAncestorProcesses\.Count\)/);
   assert.doesNotMatch(source, /reviewer_canary_process_tree:.*ancestor/);
+});
+
+test("Reviewer canary contract binds each positive ancestor count to a direct terminating throw", async () => {
+  const source = await readFile(
+    new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
+    "utf8"
+  );
+
+  for (const condition of [
+    "$forbiddenAncestorProcesses.Count -gt 0",
+    "$workerAncestorServices.Count -gt 0",
+  ]) {
+    assertDirectPowerShellThrow(source, condition);
+  }
+
+  const unreachableThrow = `if ($forbiddenAncestorProcesses.Count -gt 0) {
+  $details = @()
+  if ($false) {
+    throw "unreachable"
+  }
+}`;
+  assert.throws(
+    () => assertDirectPowerShellThrow(unreachableThrow, "$forbiddenAncestorProcesses.Count -gt 0"),
+    /direct terminating throw/
+  );
+
+  const unrelatedThrow = `if ($workerAncestorServices.Count -gt 0) {
+  $details = @()
+}
+throw "unrelated"`;
+  assert.throws(
+    () => assertDirectPowerShellThrow(unrelatedThrow, "$workerAncestorServices.Count -gt 0"),
+    /direct terminating throw/
+  );
+});
+
+test("Reviewer canary contract validates Worker service predicates by behavior", async () => {
+  const source = await readFile(
+    new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
+    "utf8"
+  );
+  const serviceStart = source.indexOf("$workerAncestorServices");
+  const evidenceStart = source.indexOf("Write-Output \"reviewer_canary_ancestry:");
+  const serviceBlock = source.slice(serviceStart, evidenceStart);
+  const expectedIdentities = {
+    Name: ["GBBWorker", "gbb-worker"],
+    DisplayName: ["GBBWorker", "gbb-worker"],
+    StartName: ["GBBWorker"],
+    PathName: ["GBBWorker", "gbb-worker"],
+  };
+
+  for (const [field, identities] of Object.entries(expectedIdentities)) {
+    const predicate = serviceBlock.match(
+      new RegExp(`\\$_\\.${field}\\s+-match\\s+'([^']+)'`, "i")
+    );
+    assert.ok(predicate, `Worker service classification must inspect ${field}`);
+    assertWorkerServicePattern(predicate[1], identities, "ControlService");
+    assert.throws(
+      () => assertWorkerServicePattern("(?i)GBBWorkerX", identities, "ControlService"),
+      /canonical Worker identity/
+    );
+  }
 });
