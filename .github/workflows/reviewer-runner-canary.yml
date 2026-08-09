@@ -58,36 +58,46 @@ jobs:
             throw 'Current canary process command line indicates GBBWorker'
           }
 
-          $relatedIds = [System.Collections.Generic.HashSet[int]]::new()
-          $pending = [System.Collections.Generic.Queue[int]]::new()
-          [void]$relatedIds.Add([int]$PID)
-          $pending.Enqueue([int]$PID)
-          while ($pending.Count -gt 0) {
-            $parentId = $pending.Dequeue()
-            foreach ($child in ($processes | Where-Object ParentProcessId -eq $parentId)) {
-              if ($relatedIds.Add([int]$child.ProcessId)) {
-                $pending.Enqueue([int]$child.ProcessId)
-              }
+          $processById = @{}
+          foreach ($process in $processes) {
+            $processById[[int]$process.ProcessId] = $process
+          }
+
+          $ancestorIds = [System.Collections.Generic.HashSet[int]]::new()
+          $cycleGuard = [System.Collections.Generic.HashSet[int]]::new()
+          [void]$ancestorIds.Add([int]$PID)
+          $parentId = [int]$currentProcess.ParentProcessId
+          while ($parentId -ne 0) {
+            if (-not $cycleGuard.Add($parentId)) {
+              break
             }
+            $parentProcess = $processById[$parentId]
+            if (-not $parentProcess) {
+              break
+            }
+            if (-not $ancestorIds.Add($parentId)) {
+              break
+            }
+            $parentId = [int]$parentProcess.ParentProcessId
           }
 
-          $relatedProcesses = @($processes | Where-Object { $relatedIds.Contains([int]$_.ProcessId) })
-          $forbiddenProcesses = @($relatedProcesses | Where-Object {
+          $ancestorProcesses = @($processes | Where-Object { $ancestorIds.Contains([int]$_.ProcessId) })
+          $forbiddenAncestorProcesses = @($ancestorProcesses | Where-Object {
             $_.Name -match '(?i)^(opencode|chrome|msedge|playwright)' -or
-            $_.CommandLine -match '(?i)(opencode|deepseek|gpt_browser_bridge|gpt_send|supervisor|chatgpt|webgpt|playwright|GBBWorker)'
+            $_.CommandLine -match '(?i)(opencode|deepseek|gpt_browser_bridge|gpt_send|supervisor|chatgpt|webgpt|playwright|orca|GBBWorker)'
           })
-          if ($forbiddenProcesses.Count -gt 0) {
-            $details = $forbiddenProcesses | ForEach-Object { "$($_.Name):$($_.ProcessId)" }
-            throw "Forbidden Worker/browser/GBB process in canary process tree: $($details -join ', ')"
+          if ($forbiddenAncestorProcesses.Count -gt 0) {
+            $details = $forbiddenAncestorProcesses | ForEach-Object { "$($_.Name):$($_.ProcessId)" }
+            throw "Forbidden Worker/browser/GBB/ORCA ancestor process: $($details -join ', ')"
           }
 
-          $relatedServices = @(Get-CimInstance Win32_Service | Where-Object { $_.ProcessId -in @($relatedProcesses.ProcessId) })
-          $workerServices = @($relatedServices | Where-Object {
+          $ancestorServices = @(Get-CimInstance Win32_Service | Where-Object { $_.ProcessId -in @($ancestorProcesses.ProcessId) })
+          $workerAncestorServices = @($ancestorServices | Where-Object {
             $_.StartName -match '(?i)GBBWorker' -or $_.PathName -match '(?i)gbb-worker|GBBWorker'
           })
-          if ($workerServices.Count -gt 0) {
-            $details = $workerServices | ForEach-Object { $_.Name }
-            throw "Canary process is hosted by a Worker service: $($details -join ', ')"
+          if ($workerAncestorServices.Count -gt 0) {
+            $details = $workerAncestorServices | ForEach-Object { $_.Name }
+            throw "Canary process has a Worker ancestor service: $($details -join ', ')"
           }
 
-          Write-Output "reviewer_canary_process_tree: process_count=$($relatedProcesses.Count) worker_service_count=$($workerServices.Count) forbidden_process_count=$($forbiddenProcesses.Count)"
+          Write-Output "reviewer_canary_ancestry: ancestor_count=$($ancestorProcesses.Count) worker_ancestor_service_count=$($workerAncestorServices.Count) forbidden_ancestor_count=$($forbiddenAncestorProcesses.Count)"

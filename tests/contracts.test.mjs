@@ -347,3 +347,50 @@ test("Reviewer canary workflow is a static, read-only, fail-closed runner contra
   assert.doesNotMatch(source, /(?:Start-Process|&\s*)(?:opencode|chrome|msedge|node)\b/i);
   assert.doesNotMatch(source, /secrets\.|GITHUB_TOKEN/);
 });
+
+test("Reviewer canary proves ancestry by walking parents upward with a distinct ancestor set", async () => {
+  const source = await readFile(
+    new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
+    "utf8"
+  );
+
+  const ancestorStart = source.indexOf("$ancestorIds");
+  const forbiddenStart = source.indexOf("$forbiddenAncestorProcesses");
+  assert.notEqual(ancestorStart, -1, "workflow must define an explicit ancestor set");
+  assert.notEqual(forbiddenStart, -1, "workflow must name forbidden ancestor evidence");
+  assert.ok(ancestorStart < forbiddenStart, "ancestor evidence must be built before it is evaluated");
+
+  const ancestorBlock = source.slice(ancestorStart, forbiddenStart);
+  assert.match(ancestorBlock, /HashSet\[int\]/, "cycle guard must be independent state");
+  assert.match(ancestorBlock, /\$parentId\s*=\s*\[int\]\$currentProcess\.ParentProcessId/);
+  assert.match(ancestorBlock, /while\s*\(\$parentId\s*-ne\s*0\)/);
+  assert.match(ancestorBlock, /\$parentProcess\s*=\s*\$processById\[\$parentId\]/);
+  assert.match(ancestorBlock, /if\s*\(-not\s*\$parentProcess\)/);
+  assert.match(ancestorBlock, /\$parentId\s*=\s*\[int\]\$parentProcess\.ParentProcessId/);
+  assert.match(
+    ancestorBlock,
+    /\$ancestorProcesses\s*=\s*@\(\$processes\s*\|\s*Where-Object\s*\{\s*\$ancestorIds\.Contains\(\[int\]\$_.ProcessId\)/
+  );
+  assert.doesNotMatch(ancestorBlock, /Where-Object\s+ParentProcessId\s+-eq/);
+  assert.doesNotMatch(source, /Where-Object\s+ParentProcessId\s+-eq\s+\$parentId/);
+  assert.doesNotMatch(source, /\$relatedIds|\$relatedProcesses|\$pending/);
+});
+
+test("Reviewer canary applies Worker services and forbidden process checks to ancestors and emits separate evidence", async () => {
+  const source = await readFile(
+    new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(
+    source,
+    /\$ancestorServices\s*=\s*@\(Get-CimInstance\s+Win32_Service\s*\|\s*Where-Object\s*\{\s*\$_.ProcessId\s+-in\s+@\(\$ancestorProcesses\.ProcessId\)/
+  );
+  assert.match(source, /\$workerAncestorServices/);
+  assert.match(source, /\$forbiddenAncestorProcesses/);
+  assert.match(source, /orca/i);
+  assert.match(source, /ancestor_count=\$\(\$ancestorProcesses\.Count\)/);
+  assert.match(source, /worker_ancestor_service_count=\$\(\$workerAncestorServices\.Count\)/);
+  assert.match(source, /forbidden_ancestor_count=\$\(\$forbiddenAncestorProcesses\.Count\)/);
+  assert.doesNotMatch(source, /reviewer_canary_process_tree:.*ancestor/);
+});
