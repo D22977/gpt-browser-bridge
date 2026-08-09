@@ -103,12 +103,17 @@ function extractPowerShellBlock(source, condition) {
   assert.fail(`unterminated PowerShell block for ${condition}`);
 }
 
-function hasTopLevelPowerShellThrow(block) {
+function topLevelPowerShellKeywords(block) {
   let depth = 0;
   let quote = null;
+  const keywords = [];
   for (let index = 0; index < block.length; index += 1) {
     const character = block[index];
     if (quote) {
+      if (character === "`" && quote === '"') {
+        index += 1;
+        continue;
+      }
       if (character === quote) {
         if (block[index + 1] === quote) {
           index += 1;
@@ -122,6 +127,12 @@ function hasTopLevelPowerShellThrow(block) {
       quote = character;
       continue;
     }
+    if (character === "#") {
+      while (index < block.length && block[index] !== "\n") {
+        index += 1;
+      }
+      continue;
+    }
     if (character === "{") {
       depth += 1;
       continue;
@@ -130,15 +141,22 @@ function hasTopLevelPowerShellThrow(block) {
       depth -= 1;
       continue;
     }
-    if (
-      depth === 0 &&
-      /^throw\b/.test(block.slice(index)) &&
-      (index === 0 || /[\s;]/.test(block[index - 1]))
-    ) {
-      return true;
+    if (depth === 0 && /[A-Za-z_]/.test(character)) {
+      const token = block.slice(index).match(/^[A-Za-z_][A-Za-z0-9_-]*/)[0];
+      keywords.push(token.toLowerCase());
+      index += token.length - 1;
     }
   }
-  return false;
+  return keywords;
+}
+
+function hasTopLevelPowerShellThrow(block) {
+  const keywords = topLevelPowerShellKeywords(block);
+  const throwIndex = keywords.indexOf("throw");
+  const exitIndex = keywords.findIndex((keyword) =>
+    ["return", "exit", "break", "continue"].includes(keyword)
+  );
+  return throwIndex !== -1 && (exitIndex === -1 || exitIndex > throwIndex);
 }
 
 function assertDirectPowerShellThrow(source, condition) {
@@ -582,6 +600,28 @@ throw "unrelated"`;
     () => assertDirectPowerShellThrow(unrelatedThrow, "$workerAncestorServices.Count -gt 0"),
     /direct terminating throw/
   );
+
+  for (const condition of [
+    "$forbiddenAncestorProcesses.Count -gt 0",
+    "$workerAncestorServices.Count -gt 0",
+  ]) {
+    const returnBeforeThrow = `if (${condition}) {
+  return
+  throw "unreachable"
+}`;
+    assert.throws(
+      () => assertDirectPowerShellThrow(returnBeforeThrow, condition),
+      /direct terminating throw/
+    );
+
+    const commentOnlyThrow = `if (${condition}) {
+  # throw "comment-only"
+}`;
+    assert.throws(
+      () => assertDirectPowerShellThrow(commentOnlyThrow, condition),
+      /direct terminating throw/
+    );
+  }
 });
 
 test("Reviewer canary contract validates Worker service predicates by behavior", async () => {
