@@ -27,6 +27,10 @@ historical context unless a current card explicitly activates a compatible path.
 - Authority precedence is: direct platform/user instruction; current exact
   GitHub card and non-superseded receipts; this stable bootstrap; architecture
   and development documentation; background examples.
+- Before publishing any formal verdict, a fresh Reviewer must directly reread
+  the exact GitHub card/PR and current non-superseded receipts, then verify the
+  exact base, exact head, and exact allowed paths for that review identity. Fail
+  closed on drift, supersession, duplicate identity, or scope mismatch.
 
 ## V10.6 Worker boundary
 
@@ -47,14 +51,17 @@ Worker stops for one NEW fresh Reviewer.
 
 ## Roles (do not mix)
 
-- Control Tower — only decision point; never edits source directly.
+- Control — V10.6 activation, dependency, and transport exception boundary;
+  never edits source directly or replaces the Worker or formal Reviewer.
 - Worker — edits source inside its allowed paths; must run tests; writes a report; commits.
 - Reviewer — NEW fresh context from a different family; never edits code or
   substitutes for the Worker; owns the formal `PASS` / `FIX_REQUIRED` / `BLOCKED`
   decision for the exact READY/head.
 - Browser Action Runner (Sender) — browser writes only.
 - Watcher — browser reads only; must contain no write APIs.
-- Supervisor — deterministic process; recovers terminals; never decides pass/rework.
+- LEGACY/NON-CURRENT Supervisor and Control Tower — historical GBB-001 … GBB-005
+  process labels only; they are not V10.6 roles, persistent authority, or a
+  current critical path.
 
 No role may self-review, merge, release, invoke ORCA, claim unassigned work, or
 expand the architecture unless the current exact card explicitly authorizes it.
