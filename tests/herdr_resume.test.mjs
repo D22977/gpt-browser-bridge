@@ -230,3 +230,36 @@ test("createHerdrPrompter and createGhReader wire the real CLI boundaries", asyn
 test("default protocol constant matches the receipt protocol", () => {
   assert.equal(HERDR_RESUME_DELIVERY_PROTOCOL, "HERDR_RESUME_DELIVERY_V1");
 });
+
+test("a published delivery receipt is immediately duplicate-detectable (regression: malformed @path body)", async () => {
+  const wt = waitTuple();
+  const body = decisionBody();
+  const prompts = [];
+  const publishedReceipts = [];
+  const herdr = { prompt: async () => { prompts.push(1); return { accepted: true }; } };
+  // The publisher must emit a body that contains the protocol token and the
+  // logical_event_key, so a subsequent run can detect it as a duplicate.
+  let publishedBody = null;
+  const publishReceipt = async (receipt) => {
+    publishedBody = Object.entries(receipt)
+      .map(([k, v]) => `${k}: ${String(v ?? "").replace(/\n/g, " ")}`)
+      .join("\n");
+    publishedReceipts.push(receipt);
+    return { id: 5309002001 };
+  };
+  const first = await deliverResumeOnce({ waitTuple: wt, decisionBody: body, comments: [], herdr, publishReceipt });
+  assert.equal(first.decision, "DELIVERED");
+  assert.equal(prompts.length, 1);
+
+  // The published body must be parseable as a real delivery receipt that
+  // findExistingDelivery recognizes (this is the exact regression the live
+  // specimen caught: the old publisher wrote a literal "@<path>" body).
+  assert.match(publishedBody, /HERDR_RESUME_DELIVERY_V1/);
+  assert.match(publishedBody, new RegExp(`logical_event_key: ${first.logical_key.replace(/[|]/g, "\\|")}`));
+
+  const commentsWithReceipt = [{ id: 5309002001, body: publishedBody }];
+  const second = await deliverResumeOnce({ waitTuple: wt, decisionBody: body, comments: commentsWithReceipt, herdr, publishReceipt });
+  assert.equal(second.decision, "NO_OP_DUPLICATE");
+  assert.equal(prompts.length, 1, "must not send a second prompt once a real receipt exists");
+  assert.equal(publishedReceipts.length, 1, "must not publish twice for one logical event");
+});

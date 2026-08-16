@@ -260,7 +260,10 @@ export function buildLogicalEventKey(waitTuple, decision) {
 export function findExistingDelivery(comments, logicalKey, protocol = HERDR_RESUME_DELIVERY_PROTOCOL) {
   for (const comment of Array.isArray(comments) ? comments : []) {
     const body = String(comment?.body ?? "");
-    if (!body.startsWith(protocol)) continue;
+    // Match the protocol token anywhere in the body (first-line header or a
+    // `schema:`/`protocol:` field), so receipts stay duplicate-detectable
+    // regardless of exact formatting.
+    if (!body.includes(protocol)) continue;
     const m = /logical_event_key:\s*(\S+)/.exec(body);
     if (m && m[1] === logicalKey) {
       return { receipt_id: comment?.id ?? null, created_at: comment?.created_at ?? null };
@@ -290,32 +293,43 @@ export function createGhReader({ gh = DEFAULT_GH, exec = defaultExec } = {}) {
       return stdout.trim();
     },
     // Fetches the full comment list (id/created_at/body) for an issue.
+    // `gh api --paginate --jq ".[] | {...}"` emits one JSON object per line
+    // per page (NDJSON), which is robust across many pages. Each non-empty
+    // line is parsed independently; any malformed line fails closed.
     readComments: async ({ repo, issue }) => {
       const { stdout } = await exec(gh, [
         "api",
         `repos/${repo}/issues/${issue}/comments`,
         "--paginate",
         "--jq",
-        "[.[] | {id, created_at, body}]",
+        ".[] | {id, created_at, body}",
       ]);
-      let parsed;
-      try {
-        parsed = JSON.parse(stdout);
-      } catch {
-        throw new ResumeDeliveryError("GITHUB_COMMENTS_INVALID_JSON");
+      const comments = [];
+      for (const rawLine of String(stdout).split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        let parsed;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          throw new ResumeDeliveryError("GITHUB_COMMENTS_INVALID_JSON");
+        }
+        if (parsed && typeof parsed === "object") comments.push(parsed);
       }
-      return Array.isArray(parsed) ? parsed : [];
+      return comments;
     },
-    // Publishes a comment and returns its id.
+    // Publishes a comment and returns its id. Writes a JSON payload
+    // ({"body": <text>}) to a temp file and posts it with `gh api --input`,
+    // which expands file contents reliably on Windows (unlike `-f body=@file`).
     publishComment: async ({ repo, issue, body }) => {
-      const file = `C:\\Users\\Lupun\\AppData\\Local\\Temp\\opencode\\herdr_resume_receipt_${Date.now()}.md`;
+      const file = `C:\\Users\\Lupun\\AppData\\Local\\Temp\\opencode\\herdr_resume_payload_${Date.now()}.json`;
       const { writeFile } = await import("node:fs/promises");
-      await writeFile(file, body, "utf8");
+      await writeFile(file, JSON.stringify({ body }), "utf8");
       const { stdout } = await exec(gh, [
         "api",
         `repos/${repo}/issues/${issue}/comments`,
-        "-f",
-        `body=@${file}`,
+        "--input",
+        file,
         "--jq",
         ".id",
       ]);
