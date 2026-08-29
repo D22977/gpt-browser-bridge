@@ -66,6 +66,40 @@ Every entry carries a type, exact repository-qualified source and receipt, sourc
   - immutable plan/design authority is not execution, capability PASS, or reviewer verdict.
 - non_authority: no plan entry can substitute for a current scheduler binding, Herdr/local Control consumer, Browser TRANSPORT/SENDER, independent Reviewer dispatcher, or terminal receipt.
 - freshness: preserve exact plan receipt identity and reread current plan/card state before use.
+
+## Entry IL-ROUTE — Bounded multi-AI and multi-executor routing
+
+- type: BOUNDED_DISPATCH_INVARIANT
+- source: D22977/cad-pid-reconstruction#2 comment 5449557775; D22977/gpt-browser-bridge#81 comments 5463209769 and 5463211114
+- source_state: ACCEPTED_BOUNDED for Herdr/GitHub/GPT Luna child routing; `OPTIONAL_BLOCKED_RUNTIME_ROUTE` for the exact OpenCode/DeepSeek Free route in the CAD admission record
+- authority_effect: preserves only exact role-compatible child routing when a current card/registry authorizes it; it does not grant semantic Control, formal-review, product, merge, release, or successor authority.
+- reusable_invariants:
+  - GitHub is the task authority and a child receives a minimal pointer, then rereads GitHub independently.
+  - Bind executor role, exact instance/surface, repo/card, task class, and current capability/liveness; model/provider names are evidence, not identity.
+  - Keep `DISPATCH_CAPABILITY`, `MODEL_PROVIDER_CURRENT_AVAILABILITY`, and `CURRENT_LIVENESS` as independent dimensions.
+  - An unavailable provider does not erase Herdr dispatch capability; substitution requires current durable card/Control authority, otherwise return Control/fail closed.
+  - Do not create a generic router, queue, or orchestrator to compensate for provider unavailability.
+- DeepSeek nuance: CAD #2 comment 5449557775 recorded `OPTIONAL_BLOCKED_RUNTIME_ROUTE`; CAD #8 comment 5450389802 recorded `BLOCKED_EXACT_MODEL_UNAVAILABLE_OR_UNREACHABLE`; CAD #17 comment 5452707104 recorded `BLOCKED_NO_ELIGIBLE_FREE_ROUTE`. Historical OpenCode/DeepSeek work is therefore not a current exact `opencode/deepseek-v4-flash-free` PASS. Issue #81's newer provider-agnostic OpenCode amendment may be used only for model-independent cards with a normal current access preflight; it does not re-admit or retest that exact route.
+- non_authority: this mixed routing evidence proves neither universal AI reachability nor a named-provider current route, and it cannot authorize a new executor, router, or silent substitution.
+- freshness: reread the current Issue #81 registry and the exact card before using any executor or provider state; historical CAD receipts remain evidence-state records, not current liveness.
+
+## Entry IL-CLEANUP — Exact-owned disposable CLI/process lifecycle safety
+
+- type: EXACT_OWNED_LIFECYCLE_SAFETY_LESSON
+- source: D22977/gpt-browser-bridge#81 comments 5411436689, 5411707697, and 5411732428; corroborating local bounded smoke `fixtures/orca/WINDOWS_RESUME_SMOKE_20260801.md`
+- source_state: CURRENT_LIFECYCLE_AMENDMENTS with bounded smoke corroboration; safety contract only, not a universal cleanup capability PASS
+- authority_effect: permits lifecycle hygiene only for a disposable CLI/pane/process that the launcher/watchdog/runtime owner created or can bind exactly. It grants no semantic, product, review, merge, release, or successor authority.
+- reusable_lessons:
+  - Normal retirement occurs only after the required durable result/READY is published and read back, and only when no explicitly authorized same-card use remains.
+  - A bounded timeout may terminate an exact-owned Worker with preserved timeout/kill evidence and no blind resend.
+  - A duplicate or stale child may be rejected/terminated only when exact ownership is certain; preserve the valid owner.
+  - Strong ownership binds executor/card/run identity, PID and process start where available, pane/session/terminal identity, and isolated runtime identity.
+  - Broad process-name/model/tool kills are forbidden; unknown/shared processes and active scheduler/wake, Control, and independent Reviewer surfaces are not disposable child resources.
+  - Ownership or PID/session ambiguity resolves to `NO_OP` or `CONTROL_REQUIRED`, never a kill.
+  - The Windows smoke corroborates exact cleanup of a project-specific scheduled task, canary PIDs, and a validated isolated runtime while checking unrelated processes were untouched; it does not prove permission to clean arbitrary runtime resources.
+- non_authority: cleanup cannot select BEST_NEXT, judge a review, mutate product state, or convert transport/resource evidence into semantic success.
+- freshness: current card, binding, and lifecycle state must be reread before any cleanup; local smoke is immutable historical corroboration and does not replace current ownership evidence.
+
 ## Consolidated non-inflation rule
 
-This file is default-readable because non-PASS lessons must not disappear between SUCCESS and current routing. It is not a success index. A later exact PASS may supersede a lesson only for the bounded scope it explicitly proves; no source-state label is changed retroactively.
+This file is default-readable because non-PASS lessons and bounded safety invariants must not disappear between SUCCESS and current routing. It is not a success index. A later exact PASS may supersede a lesson only for the bounded scope it explicitly proves; no source-state label is changed retroactively.

@@ -95,11 +95,74 @@ For an unattended card that expects a future READY or review transition, the pla
 
 The process test must terminate the active parent after child dispatch. After the child publishes READY, an existing scheduled wake must resume the exact successor exactly once with user_relay_count=0, or durably publish the precise missing-binding blocker. This tests current plan binding and parent/child continuation; it does not re-prove generic #62 capability. CONSUMED_STARTED alone cannot pass this test.
 
-## 8. Forbidden changes
+## 8. Bounded multi-AI and multi-executor dispatch
+
+Control/Herdr may route a bounded card to any currently admitted,
+role-compatible AI/executor lane that the card and current registry authorize.
+Examples may include GPT Luna, OpenCode/DeepSeek, Codex/Connector, a fresh
+WebGPT lane, or Grok when the exact card permits that lane. This is bounded
+dispatch, not permission to create a router or to infer an executor from a
+model name.
+
+The dispatch contract is:
+
+- GitHub is the task authority. The child receives only a minimal GitHub
+  pointer and independently rereads the live card, dependencies, and newer
+  superseding receipts.
+- Bind `executor_role`, exact `executor_instance_id` or logical instance,
+  `surface`, repo/card, task class, and current capability/liveness. A model
+  or provider name alone never authorizes action.
+- Classify `DISPATCH_CAPABILITY`,
+  `MODEL_PROVIDER_CURRENT_AVAILABILITY`, and `CURRENT_LIVENESS` separately.
+  A provider/model being unavailable does not erase an admitted Herdr
+  dispatch capability.
+- Executor substitution is permitted only when current durable card/Control
+  authority explicitly allows it. Otherwise return `CONTROL_REQUIRED` or the
+  card's equivalent fail-closed result; do not silently substitute.
+- Do not create a generic model router, queue, orchestrator, or admission
+  service merely because one provider or executor is unavailable.
+
+The exact DeepSeek classification remains narrow and evidence-bound. Historical
+OpenCode/DeepSeek use does not prove current reachability of
+`opencode/deepseek-v4-flash-free`: CAD #2 recorded an
+`OPTIONAL_BLOCKED_RUNTIME_ROUTE`, CAD #8 recorded
+`BLOCKED_EXACT_MODEL_UNAVAILABLE_OR_UNREACHABLE`, and CAD #17 recorded
+`BLOCKED_NO_ELIGIBLE_FREE_ROUTE`. These observations are not an exact-route
+PASS and this candidate does not re-admit or retest that provider. Separately,
+the current Issue #81 registry amendment admits a provider-agnostic generic
+OpenCode Worker for cards that do not depend on a named model, subject to the
+normal per-attempt access and exact-session checks. Keep those dimensions
+separate.
+
+## 9. Exact-owned disposable CLI and process cleanup
+
+The launcher/watchdog/runtime lifecycle owner owns lifecycle only for an
+execution surface it created or can bind exactly. Cleanup is a transport and
+resource-hygiene operation, never semantic Control authority.
+
+- When a disposable CLI/pane/process reaches its normal terminal or READY and
+  no explicitly authorized same-card use remains, publish the required durable
+  result first, read it back, then retire/close only that exact owned surface.
+- On a bounded timeout, an exact-owned Worker may be terminated by its
+  lifecycle owner only with timeout/kill evidence preserved and with no blind
+  resend. A duplicate or stale child launch may be rejected or terminated only
+  when it is the exact duplicate and ownership is certain; preserve the valid
+  owner.
+- Never broad-kill by process name, model, or tool. Never close an
+  unknown/shared process, the active scheduler/wake consumer, active Control,
+  or an independent Reviewer surface merely because one child card ended.
+- Strong ownership evidence should bind the executor/card/run identity, PID
+  and process start where available, pane/session/terminal identity, and
+  isolated runtime identity. Ambiguity is `NO_OP` or `CONTROL_REQUIRED`, not a
+  kill.
+- Cleanup cannot choose `BEST_NEXT`, judge review, mutate product state, or
+  grant merge/release/successor authority.
+
+## 10. Forbidden changes
 
 This candidate authorizes no new wake service, reviewer queue service, Router/admission framework, generic browser engine, persistent AI Control daemon, mandatory local adapter, runtime infrastructure, CAD/product mutation, merge/integration/release, self-review, proxy verdict, or capability re-proof of #62/#83 solely for this documentation repair.
 
-## 9. Acceptance tests (14)
+## 11. Acceptance tests (18)
 
 A fresh independent reviewer must verify at least these exact reconciliation tests:
 
@@ -117,5 +180,9 @@ A fresh independent reviewer must verify at least these exact reconciliation tes
 12. FAILURE_ARCHIVE remains default-excluded while high-value FIX_REQUIRED lessons remain reachable through INVARIANTS_AND_LESSONS.
 13. Skill consolidation invariant-preservation fails when a mandatory prior admitted invariant is dropped.
 14. The restart-boundary parent/child process contract is explicit: parent exit after child dispatch, child READY, existing scheduler resume exactly once with exact legal successor binding and zero user relay, or a precise missing-binding terminal.
+15. Given a valid card targeting an admitted different AI/executor, fresh Control selects the exact role/instance/surface lane and emits only a GitHub pointer; it does not paste task history or create a router service.
+16. Given Herdr dispatch capability plus unavailable exact DeepSeek Flash Free runtime, Control returns `MODEL_PROVIDER_CURRENT_AVAILABILITY=BLOCKED` or `OPTIONAL_BLOCKED` (or an equivalent typed state) without declaring Herdr dispatch capability missing and without silently substituting an unauthorized executor.
+17. Given a disposable CLI with exact ownership and no legal need to remain resident, the lifecycle owner retires only that exact surface after durable result publication/readback; the active scheduler/Control and unrelated CLI remain untouched.
+18. Given unknown/shared CLI ownership or PID/session ambiguity, cleanup fails closed as `NO_OP` or `CONTROL_REQUIRED` and never performs a broad process-name kill.
 
 These tests are documentation/contract acceptance checks. They do not authorize a runtime implementation, a new orchestrator, or later reviewer execution.
