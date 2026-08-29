@@ -1,90 +1,85 @@
 # Control Tower Failure Archive
 
-Status: CANDIDATE diagnostic archive. **Do not read this file during normal rehydration or capability selection.**
+Status: CANDIDATE diagnostic archive. Default-excluded from normal rehydration and capability selection.
 
 ## Default exclusion rule
 
-Archived failures are retained for auditability, root-cause analysis, and external review lineage, but they are excluded from the normal Control reading path.
+Archived records are retained for auditability, matching diagnostics, reviewer lineage, and explicit owner requests. Do not read this file during normal handoff. Open only the exact entry when the current error signature matches the same executor/surface, an independent reviewer requires historical lineage, a current success/correction receipt points to it, or the owner explicitly requests it.
 
-Open only the exact relevant archived entry when at least one is true:
+Never use an archived record to infer current capability absence when a newer exact success or correction exists. Never create a Router, admission card, capability canary, wake service, reviewer queue, or repair merely because an archived record exists.
 
-1. the current task produces the same error signature on the same executor/surface;
-2. a fresh independent reviewer explicitly requires historical lineage;
-3. a success/correction receipt explicitly points back to the failure for comparison;
-4. the owner explicitly asks to inspect historical failures.
+## Mutable lifecycle freshness
 
-Never use an archived failure to infer current capability absence when a newer exact success/correction exists for the relevant executor/surface/task class.
+Every mutable lifecycle reference in this archive is historical evidence only. Before using a status as current, require all of:
 
-Never create a new Router, admission card, capability canary, or repair merely because an archived failure exists.
+- observed_identity: exact repository-qualified issue/PR/card/branch/head or receipt identity;
+- observed_time: the source time when it is available;
+- live_reread_required: true when the source time is unavailable or the status can change;
+- current-use rule: a live GitHub reread must win over this archived snapshot.
+
+A receipt identity alone proves what that receipt said; it does not freeze a branch, card, review, or runtime state. If the identity or time cannot be bound, use the record only as historical context and fail closed for current-state decisions.
 
 ## Archived / superseded records
 
 ### FA-001 — fixed CDP endpoint unavailable during old WebGPT wake path
 
-- historical source: `D22977/gpt-browser-bridge#83` receipt `5252554961`
-- symptom: configured `127.0.0.1:9225` route returned `CONNECTION_REFUSED`
+- historical_source: D22977/gpt-browser-bridge#83 receipt 5252554961
+- symptom: configured 127.0.0.1:9225 route returned CONNECTION_REFUSED
 - classification: historical runtime-path failure
-- superseded_by:
-  - `D22977/gpt-browser-bridge#83` receipt `5252595723` — app-managed IAB route `PROVEN_BOUNDED`, runtime reachability PASS
-  - `D22977/gpt-browser-bridge#83` receipt `5252645117` — restore result PASS and exactly-once fresh WebGPT wake
-- current rule: do not retry fixed-CDP proof merely because this failure exists; use the proven app-managed Desktop route when task-applicable.
+- superseded_by: D22977/gpt-browser-bridge#83 receipt 5252595723 and receipt 5252645117
+- current_rule: do not retry fixed-CDP proof merely because this record exists; use the admitted bounded Desktop route only when its exact current target/liveness is bound.
+- live_reread_required: true
 
 ### FA-002 — CAD Review Router / CLI surface reported IAB unavailable
 
-- historical source: CAD diagnostic route associated with `D22977/cad-pid-reconstruction#13`
-- symptom: `CODEX_API_AGENT / Herdr CLI` reported browser/IAB unavailable
+- historical_source: D22977/cad-pid-reconstruction#13
+- symptom: CODEX_API_AGENT / Herdr CLI reported browser/IAB unavailable
 - classification: wrong-executor-surface diagnostic, not Desktop capability invalidation
-- superseded_by:
-  - `D22977/cad-pid-reconstruction#3` receipt `5453135973` — `CONTROL_REVIEW_TRANSPORT_REUSE_CORRECTION_V1`
-  - GBB #83 success receipts `5252595723` + `5252645117`
-  - CAD correction receipt `5454020442`
-- current rule: do not repair/re-run #13 as Router work. A CLI/API failure must not be used to disprove the proven Desktop app-managed browser route.
+- superseded_by: D22977/cad-pid-reconstruction#3 receipt 5453135973; GBB #83 receipts 5252595723 and 5252645117; CAD correction receipt 5454020442
+- current_rule: do not repair or rerun #13 as Router work. A CLI/API failure cannot disprove the admitted Desktop transport route.
+- live_reread_required: true
 
 ### FA-003 — old Issue #7 transport status with no prompt sent
 
-- historical source: `D22977/cad-pid-reconstruction#7` receipt `5450391991`
-- symptom: `prompt_sent=false`, reviewer not started, no terminal verdict
+- historical_source: D22977/cad-pid-reconstruction#7 receipt 5450391991
+- symptom: prompt_sent=false, reviewer not started, no terminal verdict
 - classification: superseded delivery-status snapshot
-- superseded_by:
-  - owner send confirmation `D22977/cad-pid-reconstruction#3` receipt `5452923535`
-  - transport reuse correction `5453135973`
-  - Control 002 evidence-reuse correction `5454020442`
-- current rule: do not ask the owner again and do not infer that the formal review capability is unproven from this old snapshot.
+- superseded_by: D22977/cad-pid-reconstruction#3 receipts 5452923535 and 5453135973; Control correction 5454020442
+- current_rule: do not infer current review capability from this old delivery snapshot.
+- live_reread_required: true
 
 ### FA-004 — DeepSeek Flash Free unavailable
 
-- historical source: `D22977/cad-pid-reconstruction#17` receipt `5452707104`
-- result: `BLOCKED_NO_ELIGIBLE_FREE_ROUTE`
+- historical_source: D22977/cad-pid-reconstruction#17 receipt 5452707104
+- result: BLOCKED_NO_ELIGIBLE_FREE_ROUTE
 - classification: optional runtime/model-route failure
-- superseded/current disposition: nonblocking for CAD critical path; no paid fallback authorized by that card
-- current rule: do not let this model-route failure block CAD, Control handoff, or formal Web review work when another admitted lane exists.
+- disposition: nonblocking for the CAD critical path; no paid fallback is authorized by that card
+- current_rule: do not let this model-route failure block another admitted lane.
+- live_reread_required: true
 
 ### FA-005 — stale project HANDOFF.md claims
 
-- historical file: `D22977/cad-pid-reconstruction/HANDOFF.md` blob `04843d7b5d97bc64c5e8d720c3349da4aad9a483`
-- stale claims: Phase 0; CAD not started; `WAIT_USER_SCOPE_CONFIRMATION`; ask owner before preliminary generation
-- classification: `STALE_POINTER_ONLY`
-- superseded_by:
-  - CAD-first owner priority `D22977/cad-pid-reconstruction#3` receipt `5449555714`
-  - candidate `ed50890bc783a05b162120b84f5a21c5424ebf44`
-  - Control 002 rehydration `5453837257`
-  - generation switch `5453887915`
-- current rule: project HANDOFF remains a navigation pointer only until legally refreshed; stale claims do not override current durable GitHub authority.
+- historical_file: D22977/cad-pid-reconstruction/HANDOFF.md blob 04843d7b5d97bc64c5e8d720c3349da4aad9a483
+- stale_claims: Phase 0; CAD not started; WAIT_USER_SCOPE_CONFIRMATION
+- classification: STALE_POINTER_ONLY
+- superseded_by: CAD-first owner priority D22977/cad-pid-reconstruction#3 receipt 5449555714; candidate ed50890bc783a05b162120b84f5a21c5424ebf44; Control 002 rehydration 5453837257; generation switch 5453887915
+- current_rule: project HANDOFF remains a pointer only until legally refreshed; stale claims do not override current durable authority.
+- live_reread_required: true
 
-## Pending is not failure
+## Current lifecycle correction — #97
 
-Do not place unresolved-but-not-terminal work in this archive merely because it is incomplete. Example:
+The current exact terminal for D22977/gpt-browser-bridge#97 is:
 
-- `D22977/gpt-browser-bridge#97` local Control adapter synchronization is currently `DISPATCH_REQUEST_WRITTEN` only. It is `NOT_ADMITTED_PENDING_SYNC`, not a terminal failure. Canonical GitHub bytes remain usable directly by Web Control.
+- source: Issue #97 comment 5454371697
+- protocol: CONTROL_TOWER_LOCAL_ADAPTER_SYNC_RESULT_V1
+- state: NO_OP_NO_LOCAL_ADAPTER_FOUND
+- observed_identity: D22977/gpt-browser-bridge#97 comment 5454371697
+- observed_time: not supplied by the source receipt
+- live_reread_required: true
+- meaning: no bound local gbb-control-tower adapter was found under the examined roots; no write occurred. This is an allowed no-adapter mode when canonical GitHub bytes are used directly. It is not a request to create an adapter and does not block direct canonical Skill use.
 
-## Archive handling
+The terminal #97 record replaces any earlier lifecycle wording. Do not treat #97 as pending, incomplete, or a current failure merely because local synchronization was not performed.
 
-Each future archived entry should include:
+## Archive handling contract
 
-- archive ID;
-- exact repo-qualified receipt/file identity;
-- executor/surface;
-- error signature or stale claim;
-- classification;
-- exact `superseded_by` receipt(s), if any;
-- current rule explaining why normal Control should not select it as present authority.
+Every future record must include an archive ID, exact repo-qualified receipt or file identity, executor/surface, exact error or stale claim, classification, superseded_by receipts when applicable, current selection rule, and the observed identity/time or live_reread_required rule. The archive remains default-excluded.

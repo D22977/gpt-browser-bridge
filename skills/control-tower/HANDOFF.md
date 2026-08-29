@@ -1,52 +1,29 @@
-# Control Tower Handoff — first-read landing contract
+# Control Tower Handoff — navigation landing contract
 
-Status: CANDIDATE until independently reviewed and integrated into the admitted canonical Control Tower skill.
+Status: CANDIDATE only. This document is a navigation pointer, not a replacement for live GitHub authority.
 
-## Purpose
+## Fresh reading order (exact)
 
-This file is the **first navigation read** for a fresh/recovered Control generation. It is deliberately small. It tells the new Control where the current authoritative material lives without requiring it to replay historical failures.
+Read these items in this order after a new Control conversation, generation handoff, process restart, recovered session, or local-adapter transition:
 
-**Reading this file first does not make it authority.** It is a landing pointer only. If anything here conflicts with current durable GitHub Control authority, current owner instruction, or the admitted canonical `SKILL.md`, the newer authoritative source wins and this file is treated as stale.
+1. HANDOFF navigation only: use this file to locate the authoritative material; do not use its phase, gate, or next-action wording as authority.
+2. Admitted canonical Skill identity: read the live D22977/gpt-browser-bridge skills/control-tower/SKILL.md and bind its current ref, commit head, and Git blob SHA. The candidate-base identity recorded here is review-base/gbb-gh-01, head 50cd14c941072de5ea04690f286683c05eac1d81, blob babbb3f704b852f499d96d2cb1ac7493e71cc851; fail closed if a live reread differs.
+3. SUCCESS_EVIDENCE_INDEX: admit only exact PASS or PROVEN_BOUNDED evidence and read the exact receipt needed for the current task.
+4. INVARIANTS_AND_LESSONS: read the typed source-state lessons after SUCCESS; they preserve constraints but grant no capability authority.
+5. Current project durable Control/current-start-here + product/card identity: read the newest non-superseded GitHub Control/current-start-here pointer, then bind the current product or candidate, Issue #100 card, PR #98, branch, base, and head.
+6. Exact task evidence/liveness: read only the receipts and current liveness needed by this task; classify capability, binding/liveness, transport, and reviewer orchestration separately.
+7. FAILURE_ARCHIVE only for matching diagnostic/reviewer lineage/owner request: open only the exact matching entry when a current error, independent reviewer, or explicit owner request requires it.
 
-## Fresh handoff reading order
+The seventh item is conditional. Do not replay the archive during normal rehydration.
 
-1. Read this `HANDOFF.md` first for navigation only.
-2. Read the admitted canonical `skills/control-tower/SKILL.md` and bind its exact ref/head/blob.
-3. Read `SUCCESS_EVIDENCE_INDEX.md`; reuse still-valid PASS/proven receipts instead of re-testing them.
-4. Read the current project's durable Control landing issue / `CURRENT_START_HERE` / latest generation-switch receipt.
-5. Read the current project product/card identity, mutable branch/head metadata, and only the exact evidence required by the active task.
-6. Read a project-local `HANDOFF.md` only as a pointer; reconcile it against current durable authority before using any phase/gate/next-action claim.
-7. Do **not** read `FAILURE_ARCHIVE.md` by default. Open only the exact archived entry needed when the current error signature matches, an independent reviewer requires historical lineage, or the owner explicitly requests it.
+## Authority and freshness
 
-## Default evidence policy
+Reading order does not change authority precedence. Current owner instruction for the live interaction and current durable GitHub authority outrank this pointer. A stale pointer must be ignored and reported as stale rather than used to choose work.
 
-- Newer exact PASS/proven evidence outranks older failure evidence for capability selection.
-- A failure that has a durable `superseded_by` success/correction is diagnostic history, not a current blocker.
-- Unknown current liveness does not invalidate a proven bounded capability.
-- Never recreate Router/capability-discovery work merely because an archived failure exists.
-- Never infer current state from stale chat memory, stale terminal prose, or stale project handoff text.
+This candidate is the exact PR #98 artifact on branch control-tower/handoff-success-index-v1. The input head for this repair is f8924416552bc7eb805087e3349bc89009a0eb4d; a fresh Control must reread the live head before use. Mutable branch, card, review, and lifecycle claims require an observed identity and time or an explicit live_reread_required rule.
 
-## Current canonical pointers at candidate creation
+## Direct canonical use and exit facts
 
-- canonical repo: `D22977/gpt-browser-bridge`
-- canonical path: `skills/control-tower/SKILL.md`
-- admitted ref at candidate base: `review-base/gbb-gh-01`
-- admitted head at candidate base: `50cd14c941072de5ea04690f286683c05eac1d81`
-- admitted Git blob at candidate base: `babbb3f704b852f499d96d2cb1ac7493e71cc851`
+A local gbb-control-tower adapter is optional. If no adapter exists, the terminal NO_OP_NO_LOCAL_ADAPTER_FOUND receipt D22977/gpt-browser-bridge#97 comment 5454371697 does not block direct use of the canonical GitHub Skill and does not authorize adapter creation. An unverified local adapter never overrides canonical GitHub bytes.
 
-These identities are **not permanent constants**. A fresh Control must read the current admitted canonical identity and fail closed if this candidate landing file is stale.
-
-## Local adapter rule
-
-A local `~/.agents/skills`, `~/.codex/skills`, or equivalent adapter is optional. If used, it must match the admitted canonical bytes. An unverified/stale local adapter never overrides canonical GitHub bytes. If canonical GitHub bytes are directly available, Web Control semantic work may proceed while local adapter synchronization is pending, unless a newer exact authority says otherwise.
-
-## Exit condition
-
-After the reading order above, the Control should be able to state, without replaying archived failures:
-
-- active Control generation and exact switch receipt;
-- canonical Skill identity;
-- current product/candidate identity;
-- strongest still-valid success/proven capability evidence for the active task;
-- current liveness only where task execution actually needs it;
-- BEST_NEXT and forbidden actions.
+After the exact reading order, the successor must be able to state the current Control generation and durable landing pointer, canonical Skill identity, product/card identity, strongest bounded success evidence, task-required liveness, legal successor binding, and forbidden actions. If not, fail closed and repair only the authorized landing artifact.
