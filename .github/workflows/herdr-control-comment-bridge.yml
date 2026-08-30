@@ -55,20 +55,30 @@ jobs:
           if ($sourceReceipt -cne '5467493162') { throw "Wrong source dispatch $sourceReceipt" }
 
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-herdr-control-bridge'; Accept = 'application/vnd.github+json' }
-          $all = @()
+          $all = [System.Collections.Generic.List[object]]::new()
+          function Add-Flat([object]$value) {
+            if ($null -eq $value) { return }
+            if ($value -is [System.Array]) {
+              foreach ($nested in $value) { Add-Flat $nested }
+              return
+            }
+            [void]$all.Add($value)
+          }
           for ($page = 1; $page -le 20; $page++) {
+            $before = $all.Count
             $uri = "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$page"
-            $batch = @(Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 30)
-            $all += $batch
-            if ($batch.Count -lt 100) { break }
+            $rawBatch = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 30
+            Add-Flat $rawBatch
+            $added = $all.Count - $before
+            if ($added -lt 100) { break }
           }
           $switches = @($all | Where-Object {
             $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
             $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
             $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
-          } | Sort-Object id)
+          } | Sort-Object { [int64]$_.id })
           if ($switches.Count -eq 0) { throw 'No ACTIVE Control switch found' }
-          $latest = $switches[-1]
+          $latest = $switches[$switches.Count - 1]
           $activeMatch = [regex]::Match([string]$latest.body, '(?m)^new_generation:\s*(\d{3})\s*$')
           if (-not $activeMatch.Success) { throw 'Latest Control switch missing new_generation' }
           $activeGeneration = $activeMatch.Groups[1].Value
@@ -90,7 +100,7 @@ jobs:
           "BRIDGE_SOURCE_RECEIPT=$sourceReceipt" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "BRIDGE_ACTION=$action" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "BRIDGE_SWITCH_RECEIPT=$($latest.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Output "validated bridge event comment=$($event.comment.id) generation=$activeGeneration action=$action"
+          Write-Output "validated bridge event comment=$($event.comment.id) generation=$activeGeneration switch=$($latest.id) action=$action"
 
       - name: Resolve exact safe Herdr target and deliver once
         id: deliver
@@ -213,12 +223,22 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-herdr-control-bridge'; Accept = 'application/vnd.github+json' }
-          $all = @()
+          $all = [System.Collections.Generic.List[object]]::new()
+          function Add-Flat([object]$value) {
+            if ($null -eq $value) { return }
+            if ($value -is [System.Array]) {
+              foreach ($nested in $value) { Add-Flat $nested }
+              return
+            }
+            [void]$all.Add($value)
+          }
           for ($page = 1; $page -le 20; $page++) {
+            $before = $all.Count
             $uri = "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/103/comments?per_page=100&page=$page"
-            $batch = @(Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 30)
-            $all += $batch
-            if ($batch.Count -lt 100) { break }
+            $rawBatch = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 30
+            Add-Flat $rawBatch
+            $added = $all.Count - $before
+            if ($added -lt 100) { break }
           }
           $needle = "source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)"
           $matches = @($all | Where-Object { $_.body -match '(?m)^HERDR_GITHUB_EVENT_BRIDGE_DELIVERY_V1\s*$' -and $_.body.Contains($needle) })
