@@ -1,0 +1,226 @@
+name: GBB Herdr Control Comment Bridge
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: gbb-herdr-control-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  herdr-control-wake:
+    name: GBB Herdr Control Wake Transport
+    if: >-
+      github.event.issue.number == 103 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'HERDR_CONTROL_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Validate transport event and current Control generation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          if ($event.repository.full_name -cne 'D22977/gpt-browser-bridge') { throw 'Wrong repository' }
+          if ([int]$event.issue.number -ne 103) { throw 'Wrong issue' }
+          if ($event.comment.user.login -cne 'D22977') { throw 'Wrong comment actor' }
+          if ($event.comment.author_association -cne 'OWNER') { throw 'Comment actor is not OWNER' }
+
+          $body = [string]$event.comment.body
+          if ($body -notmatch '(?m)^HERDR_CONTROL_WAKE_V1\s*$') { throw 'Missing protocol header' }
+          $genMatch = [regex]::Match($body, '(?m)^control_generation:\s*(\d{3})\s*$')
+          $cardMatch = [regex]::Match($body, '(?m)^card_id:\s*([A-Za-z0-9_-]+)\s*$')
+          $sourceMatch = [regex]::Match($body, '(?m)^source_dispatch_receipt:\s*(\d+)\s*$')
+          $actionMatch = [regex]::Match($body, '(?m)^action:\s*(TRANSPORT_CANARY|REPAIR_INBOUND)\s*$')
+          if (-not ($genMatch.Success -and $cardMatch.Success -and $sourceMatch.Success -and $actionMatch.Success)) {
+            throw 'Malformed bridge comment fields'
+          }
+          $requestedGeneration = $genMatch.Groups[1].Value
+          $cardId = $cardMatch.Groups[1].Value
+          $sourceReceipt = $sourceMatch.Groups[1].Value
+          $action = $actionMatch.Groups[1].Value
+          if ($requestedGeneration -cne '007') { throw "Unsupported generation $requestedGeneration" }
+          if ($cardId -cne 'HERDR-CONTROL-AUTONOMOUS-SEAM-RESTORE-G7-01') { throw "Wrong card $cardId" }
+          if ($sourceReceipt -cne '5467493162') { throw "Wrong source dispatch $sourceReceipt" }
+
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-herdr-control-bridge'; Accept = 'application/vnd.github+json' }
+          $all = @()
+          for ($page = 1; $page -le 20; $page++) {
+            $uri = "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$page"
+            $batch = @(Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 30)
+            $all += $batch
+            if ($batch.Count -lt 100) { break }
+          }
+          $switches = @($all | Where-Object {
+            $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+            $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
+            $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
+          } | Sort-Object id)
+          if ($switches.Count -eq 0) { throw 'No ACTIVE Control switch found' }
+          $latest = $switches[-1]
+          $activeMatch = [regex]::Match([string]$latest.body, '(?m)^new_generation:\s*(\d{3})\s*$')
+          if (-not $activeMatch.Success) { throw 'Latest Control switch missing new_generation' }
+          $activeGeneration = $activeMatch.Groups[1].Value
+          if ($activeGeneration -cne $requestedGeneration) {
+            throw "Stale Control generation requested=$requestedGeneration active=$activeGeneration switch=$($latest.id)"
+          }
+
+          $whoami = (& whoami).Trim()
+          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+          $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+          if ($whoami -notmatch '(?i)^d22977\\lupun$') { throw "Unexpected Windows user: $whoami" }
+          if ($identity -notmatch '(?i)^d22977\\lupun$') { throw "Unexpected Windows identity: $identity" }
+          if (-not [Environment]::UserInteractive -or $sessionId -eq 0) { throw 'Bridge is not in interactive user session' }
+          if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "Unexpected runner: $env:RUNNER_NAME" }
+
+          "BRIDGE_COMMENT_ID=$($event.comment.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "BRIDGE_GENERATION=$requestedGeneration" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "BRIDGE_CARD_ID=$cardId" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "BRIDGE_SOURCE_RECEIPT=$sourceReceipt" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "BRIDGE_ACTION=$action" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "BRIDGE_SWITCH_RECEIPT=$($latest.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "validated bridge event comment=$($event.comment.id) generation=$activeGeneration action=$action"
+
+      - name: Resolve exact safe Herdr target and deliver once
+        id: deliver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          if (-not (Test-Path -LiteralPath $herdr)) { throw "Herdr CLI missing: $herdr" }
+
+          $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\github-event-herdr-bridge\state'
+          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+          $statePath = Join-Path $stateRoot "$($env:BRIDGE_COMMENT_ID).json"
+
+          function Publish-Receipt([string]$body) {
+            $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-herdr-control-bridge'; Accept = 'application/vnd.github+json' }
+            $payload = @{ body = $body } | ConvertTo-Json -Compress
+            $uri = 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/103/comments'
+            $r = Invoke-RestMethod -Uri $uri -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            return [string]$r.id
+          }
+
+          if (Test-Path -LiteralPath $statePath) {
+            $existing = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            if ($existing.status -eq 'SENT') {
+              $receipt = @(
+                'HERDR_GITHUB_EVENT_BRIDGE_DELIVERY_V1'
+                'state: NO_OP_DUPLICATE'
+                "control_generation: $($env:BRIDGE_GENERATION)"
+                "source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)"
+                "source_dispatch_receipt: $($env:BRIDGE_SOURCE_RECEIPT)"
+                "action: $($env:BRIDGE_ACTION)"
+                "target_pane: $($existing.pane_id)"
+                "target_agent_session: $($existing.agent_session)"
+                'second_prompt_sent: false'
+                "workflow_run_id: $env:GITHUB_RUN_ID"
+              ) -join "`n"
+              $id = Publish-Receipt $receipt
+              Write-Output "duplicate state SENT; published no-op receipt=$id"
+              exit 0
+            }
+            if ($existing.status -eq 'SENDING') {
+              throw 'Prior state is SENDING; uncertain prior send, NO_BLIND_RETRY'
+            }
+          }
+
+          $listRaw = & $herdr agent list
+          if ($LASTEXITCODE -ne 0) { throw "herdr agent list failed exit=$LASTEXITCODE" }
+          $list = $listRaw | ConvertFrom-Json
+          $agents = @($list.result.agents)
+          $eligible = @($agents | Where-Object {
+            $_.agent -eq 'codex' -and
+            $_.agent_status -eq 'idle' -and
+            $_.cwd -match '(?i)^C:\\WINDOWS\\system32$' -and
+            ([string]::IsNullOrWhiteSpace([string]$_.name) -or $_.name -notmatch '(?i)(pr98|ai160|mep|review)') -and
+            $_.pane_id -and $_.agent_session.value
+          })
+          if ($eligible.Count -ne 1) {
+            $summary = ($agents | ForEach-Object { "$($_.pane_id):$($_.agent):$($_.agent_status):$($_.cwd):$($_.name)" }) -join '; '
+            throw "Expected exactly one safe idle generic Codex target; eligible=$($eligible.Count); agents=$summary"
+          }
+          $target = $eligible[0]
+          $pane = [string]$target.pane_id
+          $session = [string]$target.agent_session.value
+
+          $state = @{
+            status = 'SENDING'
+            source_wake_comment_id = $env:BRIDGE_COMMENT_ID
+            source_dispatch_receipt = $env:BRIDGE_SOURCE_RECEIPT
+            action = $env:BRIDGE_ACTION
+            pane_id = $pane
+            agent_session = $session
+            workflow_run_id = $env:GITHUB_RUN_ID
+            observed_at = (Get-Date).ToString('o')
+          }
+          $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+          if ($env:BRIDGE_ACTION -eq 'TRANSPORT_CANARY') {
+            $prompt = "Read GitHub directly. D22977/gpt-browser-bridge Issue #105 and Issue #103. Source wake comment $($env:BRIDGE_COMMENT_ID), source dispatch $($env:BRIDGE_SOURCE_RECEIPT). Transport canary only: publish/read-back exactly one HERDR_GITHUB_EVENT_BRIDGE_TARGET_ACK_V1 bound to source_wake_comment_id $($env:BRIDGE_COMMENT_ID); do not mutate files, runtime config, review, merge, release, or infer successor. GitHub is authority."
+          } else {
+            $prompt = "Read GitHub directly. Rehydrate D22977/gpt-browser-bridge Issue #105 and Issue #103. Source wake comment $($env:BRIDGE_COMMENT_ID), source dispatch $($env:BRIDGE_SOURCE_RECEIPT). Execute only the current authorized inbound Control-return/doorbell repair after confirming outbound bridge proof; publish/read-back durable start/result; no product or canonical Skill mutation, review, merge, release, or successor inference. GitHub is authority."
+          }
+
+          $promptRaw = & $herdr agent prompt $pane $prompt
+          $exit = $LASTEXITCODE
+          if ($exit -ne 0) { throw "herdr agent prompt failed exit=$exit; state remains SENDING; NO_BLIND_RETRY" }
+          $promptResult = $promptRaw | ConvertFrom-Json
+          if ($promptResult.result.type -ne 'agent_prompted') { throw "Unexpected Herdr prompt result type: $($promptResult.result.type)" }
+          if ([string]$promptResult.result.agent.pane_id -cne $pane) { throw 'Herdr prompt result pane mismatch' }
+          if ([string]$promptResult.result.agent.agent_session.value -cne $session) { throw 'Herdr prompt result session mismatch' }
+
+          $state.status = 'SENT'
+          $state.sent_at = (Get-Date).ToString('o')
+          $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+          $receipt = @(
+            'HERDR_GITHUB_EVENT_BRIDGE_DELIVERY_V1'
+            'state: CONSUMED_STARTED'
+            'decision: PASS'
+            "control_generation: $($env:BRIDGE_GENERATION)"
+            "active_switch_receipt: $($env:BRIDGE_SWITCH_RECEIPT)"
+            "source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)"
+            "source_dispatch_receipt: $($env:BRIDGE_SOURCE_RECEIPT)"
+            "card_id: $($env:BRIDGE_CARD_ID)"
+            "action: $($env:BRIDGE_ACTION)"
+            "target_pane: $pane"
+            "target_agent_session: $session"
+            "runner_name: $env:RUNNER_NAME"
+            "workflow_run_id: $env:GITHUB_RUN_ID"
+            'user_relay_count: 0'
+            'duplicate_prompt_count: 0'
+            'readback_required: true'
+          ) -join "`n"
+          $receiptId = Publish-Receipt $receipt
+          Write-Output "Herdr prompt delivered; receipt=$receiptId pane=$pane session=$session"
+
+      - name: Verify durable delivery receipt read-back
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-herdr-control-bridge'; Accept = 'application/vnd.github+json' }
+          $all = @()
+          for ($page = 1; $page -le 20; $page++) {
+            $uri = "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/103/comments?per_page=100&page=$page"
+            $batch = @(Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 30)
+            $all += $batch
+            if ($batch.Count -lt 100) { break }
+          }
+          $needle = "source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)"
+          $matches = @($all | Where-Object { $_.body -match '(?m)^HERDR_GITHUB_EVENT_BRIDGE_DELIVERY_V1\s*$' -and $_.body.Contains($needle) })
+          if ($matches.Count -lt 1) { throw 'Durable bridge delivery receipt missing on read-back' }
+          Write-Output "delivery receipt read-back ok count=$($matches.Count) latest=$($matches[-1].id)"
