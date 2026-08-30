@@ -306,7 +306,7 @@ jobs:
       - name: Auto-return terminal to ACTIVE Control deterministically
         if: env.BRIDGE_ACTION != 'OBSERVE_INBOUND'
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
           $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
