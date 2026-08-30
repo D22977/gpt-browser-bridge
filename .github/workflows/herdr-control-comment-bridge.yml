@@ -526,9 +526,15 @@ jobs:
     name: GBB Control Return Doorbell Transport
     if: >-
       github.event.issue.number == 103 &&
-      github.event.comment.user.login == 'D22977' &&
-      github.event.comment.author_association == 'OWNER' &&
-      startsWith(github.event.comment.body, 'CONTROL_RETURN_REQUEST_V1')
+      startsWith(github.event.comment.body, 'CONTROL_RETURN_REQUEST_V1') &&
+      (
+        (github.event.comment.user.login == 'D22977' &&
+         github.event.comment.author_association == 'OWNER') ||
+        (github.event.comment.user.login == 'github-actions[bot]' &&
+         contains(github.event.comment.body, 'recorded_by_role: HERDR_AUTORETURN_GUARD') &&
+         contains(github.event.comment.body, 'semantic_control_authority: false') &&
+         contains(github.event.comment.body, 'source_dispatch_receipt: 5467493162'))
+      )
     runs-on: [self-hosted, Windows, GBB-REVIEWER]
     timeout-minutes: 8
     defaults:
@@ -543,10 +549,13 @@ jobs:
           $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
           if ($event.repository.full_name -cne 'D22977/gpt-browser-bridge') { throw 'Wrong repository' }
           if ([int]$event.issue.number -ne 103) { throw 'Wrong issue' }
-          if ($event.comment.user.login -cne 'D22977') { throw 'Wrong comment actor' }
-          if ($event.comment.author_association -cne 'OWNER') { throw 'Comment actor is not OWNER' }
-
           $body = [string]$event.comment.body
+          $isOwnerComment = $event.comment.user.login -ceq 'D22977' -and $event.comment.author_association -ceq 'OWNER'
+          $isGuardComment = $event.comment.user.login -ceq 'github-actions[bot]' -and
+            $body -match '(?m)^recorded_by_role:\s*HERDR_AUTORETURN_GUARD\s*$' -and
+            $body -match '(?m)^semantic_control_authority:\s*false\s*$' -and
+            $body -match '(?m)^source_dispatch_receipt:\s*5467493162\s*$'
+          if (-not ($isOwnerComment -or $isGuardComment)) { throw 'Comment actor is not an authorized owner or auto-return guard' }
           if ($body -notmatch '(?m)^CONTROL_RETURN_REQUEST_V1\s*$') { throw 'Missing return protocol header' }
           $gen = [regex]::Match($body, '(?m)^control_generation:\s*(\d{3})\s*$')
           $card = [regex]::Match($body, '(?m)^source_card_id:\s*([A-Za-z0-9_-]+)\s*$')
