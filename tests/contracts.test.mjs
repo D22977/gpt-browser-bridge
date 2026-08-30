@@ -322,6 +322,138 @@ test("agentReportSchema discriminates on role", () => {
   assert.equal(agentReportSchema.parse(reviewer).role, "reviewer");
 });
 
+const CONTROL_TOWER_DIR = new URL("../skills/control-tower/", import.meta.url);
+
+async function readControlBundle() {
+  const names = [
+    "HANDOFF.md",
+    "SKILL_V4_1_CANDIDATE.md",
+    "CONTROL_HANDOFF_PROTOCOL.md",
+    "INVARIANTS_AND_LESSONS.md",
+  ];
+  const entries = await Promise.all(
+    names.map(async (name) => [name, await readFile(new URL(name, CONTROL_TOWER_DIR), "utf8")])
+  );
+  return Object.fromEntries(entries);
+}
+
+function scenario(bundle, id) {
+  const source = Object.values(bundle).join("\n");
+  const match = source.match(new RegExp(`### ${id}\\b[\\s\\S]*?(?=### R\\d{2}\\b|$)`));
+  assert.ok(match, `missing control-return regression ${id}`);
+  return match[0];
+}
+
+test("Control-return contract keeps HANDOFF navigation-only and preserves canonical Skill freeze", async () => {
+  const bundle = await readControlBundle();
+  assert.match(bundle["HANDOFF.md"], /navigation pointer|navigation only/i);
+  assert.match(bundle["HANDOFF.md"], /latest valid ACTIVE CONTROL|ACTIVE CONTROL/i);
+  assert.match(bundle["SKILL_V4_1_CANDIDATE.md"], /SKILL\.md.*MUST NOT be modified|canonical.*SKILL\.md.*not.*modif/i);
+});
+
+test("R01 head drift returns CONTROL_REQUIRED before mutation and owner relay", async () => {
+  const text = scenario(await readControlBundle(), "R01");
+  assert.match(text, /head drift/i);
+  assert.match(text, /CONTROL_REQUIRED|LOCAL_CONTROL_RETURN_V1/);
+  assert.match(text, /mutation_state[^\n]*NO_MUTATION|no mutation/i);
+  assert.match(text, /user_relay_count[^\n]*0|no owner relay/i);
+});
+
+test("R02 unexpected implementation branch never resets or deletes", async () => {
+  const text = scenario(await readControlBundle(), "R02");
+  assert.match(text, /existing implementation branch|unexpected.*branch/i);
+  assert.match(text, /CONTROL_REQUIRED|LOCAL_CONTROL_RETURN_V1/);
+  assert.match(text, /no reset|no delete|reset\/delete/i);
+});
+
+test("R03 unavailable Worker requires Control rebinding and forbids silent substitution", async () => {
+  const text = scenario(await readControlBundle(), "R03");
+  assert.match(text, /Worker unavailable|worker.*unavailable/i);
+  assert.match(text, /REBIND_EXECUTOR|CONTROL_REQUIRED/);
+  assert.match(text, /no silent substitute|silent substitution.*forbidden/i);
+});
+
+test("R04 ambiguous test failure returns before any repair", async () => {
+  const text = scenario(await readControlBundle(), "R04");
+  assert.match(text, /non-preauthorized test failure|ambiguous.*test failure/i);
+  assert.match(text, /before repair|repair.*forbidden/i);
+  assert.match(text, /CONTROL_REQUIRED|LOCAL_CONTROL_RETURN_V1/);
+});
+
+test("R05 newer malformed or conflicting authority fails closed without older fallback", async () => {
+  const text = scenario(await readControlBundle(), "R05");
+  assert.match(text, /newer malformed|conflicting authority/i);
+  assert.match(text, /fail closed|FAIL_CLOSED/i);
+  assert.match(text, /never.*older|no older.*fallback/i);
+});
+
+test("R06 Herdr cannot invent BEST_NEXT or repair scope", async () => {
+  const text = scenario(await readControlBundle(), "R06");
+  assert.match(text, /Herdr/i);
+  assert.match(text, /BEST_NEXT/);
+  assert.match(text, /repair scope|repair.*decision/i);
+  assert.match(text, /semantic authority[\s\S]*NONE|no semantic authority/i);
+});
+
+test("R07 return payload binds the exact current event and idempotency key", async () => {
+  const bundle = await readControlBundle();
+  const text = scenario(bundle, "R07");
+  for (const field of [
+    "event_id",
+    "idempotency_key",
+    "card_id",
+    "phase",
+    "generation",
+    "dispatch",
+    "head",
+    "branch",
+    "problem_class",
+    "mutation_state",
+    "last_known_safe_point",
+  ]) {
+    assert.match(text, new RegExp(`\\b${field}\\b`), `R07 missing ${field}`);
+  }
+  assert.match(bundle["CONTROL_HANDOFF_PROTOCOL.md"], /LOCAL_CONTROL_RETURN_V1/);
+});
+
+test("R08 duplicate return delivery is NO_OP_DUPLICATE", async () => {
+  const text = scenario(await readControlBundle(), "R08");
+  assert.match(text, /duplicate return delivery|duplicate.*return/i);
+  assert.match(text, /NO_OP_DUPLICATE|NO_OP/);
+  assert.match(text, /no second semantic decision|no second.*decision/i);
+});
+
+test("R09 Control response binds the return event before resume", async () => {
+  const text = scenario(await readControlBundle(), "R09");
+  assert.match(text, /Control response/i);
+  assert.match(text, /bind[\s\S]*return event|return event[\s\S]*bind/i);
+  assert.match(text, /before.*resume|resume.*only after/i);
+});
+
+test("R10 Control-delivery transport failure never becomes user relay", async () => {
+  const text = scenario(await readControlBundle(), "R10");
+  assert.match(text, /transport failure/i);
+  assert.match(text, /user relay|user_relay_count/);
+  assert.match(text, /CONTROL_DELIVERY_BLOCKED_V1/);
+  assert.match(text, /deterministic route|admitted.*route/i);
+});
+
+test("R11 HUMAN_REQUIRED is last resort for genuinely human-only conditions", async () => {
+  const text = scenario(await readControlBundle(), "R11");
+  assert.match(text, /HUMAN_REQUIRED/);
+  assert.match(text, /credential|payment|security consent/i);
+  assert.match(text, /irreversible owner choice|product.*scope/i);
+  assert.match(text, /last resort|last-resort/i);
+  assert.match(text, /not.*carry.*result|no.*courier|user_relay_count[^\\n]*0/i);
+});
+
+test("R12 Reviewer FIX_REQUIRED cannot silently route to an unauthorized Worker", async () => {
+  const text = scenario(await readControlBundle(), "R12");
+  assert.match(text, /Reviewer FIX_REQUIRED|FIX_REQUIRED/);
+  assert.match(text, /not.*silently.*route|silent.*route.*forbidden/i);
+  assert.match(text, /ACTIVE CONTROL|explicitly authorized deterministic edge/i);
+});
+
 test("Reviewer canary workflow is a static, read-only, fail-closed runner contract", async () => {
   const source = await readFile(
     new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
