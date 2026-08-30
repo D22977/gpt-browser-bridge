@@ -19,6 +19,7 @@ import {
   readDispatchCheckpoint,
   recoverActiveTerminal,
   resolveRuntimePaths,
+  runResumeDeliveryCheck,
   runLoopOnce,
   runSupervisor,
   scanDurableReports,
@@ -145,6 +146,70 @@ test("runSupervisor writes and refreshes heartbeat without a real interval", asy
   assert.equal(heartbeat.pid, 41004);
   assert.equal(Date.parse(heartbeat.at) - Date.parse("2026-08-01T09:00:00+08:00"), 15_000);
   assert.equal(heartbeat.state, "RUNNING");
+});
+
+test("resume delivery hook uses one bound consumer and emits a physical consume event", async () => {
+  const waitTuple = {
+    source_terminal_receipt: 5467000101,
+    control_generation: 7,
+    card_id: "HERDR-CONTROL-AUTONOMOUS-SEAM-RESTORE-G7-01",
+    allowed_action_class: "CONTROL_AUTONOMOUS_SEAM_REPAIR",
+    target: {
+      agent_name: "LOCAL_HERDR_CODEX_GENERIC",
+      executor_instance_id: "HERDR-CONTROL-AUTONOMOUS-SEAM-RESTORE-G7-01",
+      surface: "HERDR",
+      herdr_agent: "codex",
+      herdr_workspace_id: "w2",
+      herdr_pane_id: "w2:p1",
+      herdr_agent_session: "01a04f6c-bd0f-7b42-8b56-ab876c720aad",
+      herdr_agent_kind: "codex",
+    },
+  };
+  const decisionBody = `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 7
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #103 receipt 5467000101
+source_control_generation: 7
+resume_card_id: HERDR-CONTROL-AUTONOMOUS-SEAM-RESTORE-G7-01
+
+EXACT_TARGET
+agent_name: LOCAL_HERDR_CODEX_GENERIC
+executor_instance_id: HERDR-CONTROL-AUTONOMOUS-SEAM-RESTORE-G7-01
+surface: HERDR
+minimal_wake: Read GitHub directly and execute only the exact bounded card.
+`;
+  const events = [];
+  const result = await runResumeDeliveryCheck({
+    resumeDelivery: {
+      futureConsumerBinding: { resident: true, restartable: true, source: "existing-supervisor", event_classes: ["CONTROL_DECISION_V1"] },
+      waitTuple,
+      readDecisionBody: async () => decisionBody,
+      readComments: async () => [],
+      herdr: { prompt: async (target) => ({ accepted: true, ...target, runtime: "herdr 0.8" }) },
+      publishReceipt: async (receipt) => { events.push(receipt); return { id: 5467000111 }; },
+    },
+  }, { isoNow: "2026-08-30T14:00:00.000Z" });
+  assert.equal(result.delivered, true);
+  assert.equal(result.events[0].type, "resume_delivery_delivered");
+  assert.equal(events[0].state, "CONSUMED_STARTED");
+  assert.equal(events[0].target_herdr_pane_id, "w2:p1");
+});
+
+test("resume delivery hook stops when no restartable future consumer is bound", async () => {
+  let promptCount = 0;
+  const result = await runResumeDeliveryCheck({
+    resumeDelivery: {
+      futureConsumerBinding: { resident: false, restartable: false, process_alive: true },
+      herdr: { prompt: async () => { promptCount += 1; } },
+    },
+  }, { isoNow: "2026-08-30T14:00:00.000Z" });
+  assert.equal(result.delivered, false);
+  assert.equal(result.reason, "CONTROL_REQUIRED_FUTURE_CONSUMER_BINDING_MISSING");
+  assert.equal(promptCount, 0);
+  assert.equal(result.events[0].type, "resume_delivery_future_consumer_binding_missing");
 });
 
 test("live lock owner stops a duplicate Supervisor before ORCA or agent actions", async (t) => {

@@ -29,6 +29,15 @@ import writeFileAtomic from "write-file-atomic";
 
 import { projectStateSchema } from "./contracts.mjs";
 import { OrcaAdapter, resolveOrcaCli, resolveActiveTerminal } from "./adapters/orca_adapter.mjs";
+import {
+  classifyFutureConsumerBinding,
+  buildLogicalEventKey,
+  deliverResumeOnce,
+  findExistingDelivery,
+  matchWaitToDecision,
+  parseControlDecision,
+  validateWaitTuple,
+} from "./adapters/herdr_resume.mjs";
 import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -667,7 +676,137 @@ function normalizeCtx(ctxIn) {
     sleep: ctxIn.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     maxIterations: ctxIn.maxIterations ?? Infinity,
     intervalMs: ctxIn.intervalMs ?? HEARTBEAT_INTERVAL_MS,
+    resumeDelivery: ctxIn.resumeDelivery,
   };
+}
+
+export async function runResumeDeliveryCheck(ctx, { isoNow = new Date().toISOString() } = {}) {
+  const cfg = ctx?.resumeDelivery;
+  if (!cfg) return { events: [], delivered: false, duplicate: false };
+  const events = [];
+
+  const consumer = classifyFutureConsumerBinding(cfg.futureConsumerBinding);
+  if (!consumer.bound) {
+    events.push({
+      type: "resume_delivery_future_consumer_binding_missing",
+      reason: consumer.state,
+    });
+    return { events, delivered: false, duplicate: false, reason: consumer.state };
+  }
+
+  const tupleCheck = validateWaitTuple(cfg.waitTuple);
+  if (!tupleCheck.ok) {
+    events.push({
+      type: "resume_delivery_wait_tuple_invalid",
+      reason: "INVALID_WAIT_TUPLE",
+      errors: tupleCheck.errors,
+    });
+    return { events, delivered: false, duplicate: false, reason: "INVALID_WAIT_TUPLE" };
+  }
+  const waitTuple = tupleCheck.waitTuple;
+
+  let decisionBody;
+  try {
+    decisionBody = await cfg.readDecisionBody({
+      sourceTerminalReceipt: waitTuple.source_terminal_receipt,
+      waitTuple,
+    });
+  } catch (error) {
+    events.push({
+      type: "resume_delivery_decision_read_failed",
+      reason: "CONTROL_REQUIRED_DECISION_READ_FAILED",
+      error: String(error?.message ?? error),
+    });
+    return { events, delivered: false, duplicate: false, reason: "CONTROL_REQUIRED_DECISION_READ_FAILED" };
+  }
+
+  const parsed = parseControlDecision(decisionBody);
+  const matched = matchWaitToDecision(waitTuple, parsed);
+  if (!matched.ok) {
+    events.push({
+      type: "resume_delivery_decision_not_applicable",
+      reason: matched.reason,
+    });
+    return { events, delivered: false, duplicate: false, reason: matched.reason };
+  }
+
+  let comments;
+  try {
+    comments = await cfg.readComments({ waitTuple, decision: parsed.decision });
+  } catch (error) {
+    events.push({
+      type: "resume_delivery_comments_read_failed",
+      reason: "CONTROL_REQUIRED_COMMENTS_READ_FAILED",
+      error: String(error?.message ?? error),
+    });
+    return { events, delivered: false, duplicate: false, reason: "CONTROL_REQUIRED_COMMENTS_READ_FAILED" };
+  }
+  const logicalKey = buildLogicalEventKey(waitTuple, parsed);
+  const existing = findExistingDelivery(comments, logicalKey, cfg.protocol);
+  if (existing) {
+    events.push({
+      type: "resume_delivery_duplicate",
+      decision: "NO_OP_DUPLICATE",
+      receipt_id: existing.receipt_id,
+    });
+    return { events, delivered: false, duplicate: true, reason: "NO_OP_DUPLICATE" };
+  }
+
+  try {
+    const result = await deliverResumeOnce({
+      waitTuple,
+      decisionBody,
+      comments,
+      herdr: cfg.herdr,
+      publishReceipt: cfg.publishReceipt,
+      protocol: cfg.protocol,
+      now: () => isoNow,
+    });
+    if (result.decision === "DELIVERED") {
+      events.push({
+        type: "resume_delivery_delivered",
+        decision: result.decision,
+        logical_event_key: result.logical_key,
+        receipt_id: result.receipt_id,
+        target: {
+          herdr_workspace_id: result.receipt.target_herdr_workspace_id,
+          herdr_pane_id: result.receipt.target_herdr_pane_id,
+          herdr_agent_session: result.receipt.target_herdr_agent_session,
+        },
+      });
+      return { events, delivered: true, duplicate: false, receipt: result.receipt };
+    }
+    if (result.decision === "NO_OP_DUPLICATE") {
+      events.push({
+        type: "resume_delivery_duplicate",
+        decision: result.decision,
+        receipt_id: result.existing_receipt_id,
+      });
+      return { events, delivered: false, duplicate: true, reason: result.decision };
+    }
+    if (result.decision === "NO_BLIND_RETRY") {
+      events.push({
+        type: "resume_delivery_no_blind_retry",
+        decision: result.decision,
+        logical_event_key: result.logical_key,
+        receipt_id: result.receipt_id ?? null,
+      });
+      return { events, delivered: false, duplicate: false, noBlindRetry: true, reason: result.decision };
+    }
+    events.push({
+      type: "resume_delivery_rejected",
+      decision: result.decision,
+      reason: result.reason,
+    });
+    return { events, delivered: false, duplicate: false, reason: result.reason ?? result.decision };
+  } catch (error) {
+    events.push({
+      type: "resume_delivery_failed",
+      reason: "CONTROL_REQUIRED_RESUME_DELIVERY_FAILED",
+      error: String(error?.message ?? error),
+    });
+    return { events, delivered: false, duplicate: false, reason: "CONTROL_REQUIRED_RESUME_DELIVERY_FAILED" };
+  }
 }
 
 export async function runLoopOnce(ctxIn) {
@@ -750,6 +889,11 @@ export async function runLoopOnce(ctxIn) {
   if (reportScan.authRequired && !isStopState(state.state)) {
     state = escalateToNeedsHuman(state, "AUTH_REQUIRED", reportScan.authRequiredDetail, isoNow);
     tickEvents.push({ type: "escalate_needs_human", reason: "AUTH_REQUIRED" });
+  }
+
+  if (ctx.resumeDelivery) {
+    const resume = await runResumeDeliveryCheck(ctx, { isoNow });
+    tickEvents.push(...resume.events);
   }
 
   if (JSON.stringify(state) !== JSON.stringify(stateResult.state)) {
