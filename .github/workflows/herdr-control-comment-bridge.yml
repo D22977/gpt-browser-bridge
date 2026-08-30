@@ -360,7 +360,7 @@ jobs:
               'HERDR_G7_AUTORETURN_GUARD_RESULT_V1'
               "state: $state"
               "decision: $decision"
-              'recorded_by_role: HERDR_TARGET'
+              'recorded_by_role: HERDR_AUTORETURN_GUARD'
               "control_generation: $($env:BRIDGE_GENERATION)"
               "active_switch_receipt: $($env:BRIDGE_SWITCH_RECEIPT)"
               "source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)"
@@ -422,6 +422,54 @@ jobs:
             $body = [string]$r.body
             if ($body -notmatch '(?m)^CONTROL_DOORBELL_V1\s*$') { throw "Doorbell receipt header read-back mismatch: $receiptId" }
             if (-not $body.Contains("source_return_request_receipt: $returnId")) { throw "Doorbell receipt source read-back mismatch: $receiptId" }
+          }
+
+          function Wait-ExistingInboundDoorbell([string]$returnId, [object]$active, [int]$waitSeconds) {
+            $started = [DateTimeOffset]::UtcNow
+            while (([DateTimeOffset]::UtcNow - $started).TotalSeconds -lt $waitSeconds) {
+              $comments = Get-IssueComments 103
+              $matches = @($comments | Where-Object {
+                $body = [string]$_.body
+                $body -match '(?m)^CONTROL_DOORBELL_V1\s*$' -and
+                $body -match '(?m)^state:\s*DELIVERED\s*$' -and
+                $body -match '(?m)^decision:\s*PASS\s*$' -and
+                $body.Contains("source_return_request_receipt: $returnId")
+              })
+              if ($matches.Count -gt 1) { throw "CONTROL_REQUIRED_CONFLICTING_EXISTING_INBOUND_DOORBELL_RECEIPTS count=$($matches.Count)" }
+              if ($matches.Count -eq 1) {
+                $receipt = $matches[0]
+                $body = [string]$receipt.body
+                $switch = [regex]::Match($body, '(?m)^active_switch_receipt:\s*([0-9]+)\s*$')
+                $gen = [regex]::Match($body, '(?m)^target_control_generation:\s*(\d{3})\s*$')
+                $id = [regex]::Match($body, '(?m)^target_control_conversation_id:\s*([0-9a-f-]+)\s*$')
+                $url = [regex]::Match($body, '(?m)^target_control_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
+                $blob = [regex]::Match($body, '(?m)^sender_module_blob:\s*([0-9a-f]+)\s*$')
+                $sender = [regex]::Match($body, '(?m)^sender_session:\s*(\S+)\s*$')
+                $count = [regex]::Match($body, '(?m)^physical_send_count:\s*(\d+)\s*$')
+                if (-not ($switch.Success -and $gen.Success -and $id.Success -and $url.Success -and $blob.Success -and $sender.Success -and $count.Success)) {
+                  throw 'CONTROL_REQUIRED_EXISTING_INBOUND_DOORBELL_RECEIPT_FIELDS_MISSING'
+                }
+                if ($switch.Groups[1].Value -cne [string]$active.switch_receipt -or
+                    $gen.Groups[1].Value -cne [string]$active.generation -or
+                    $id.Groups[1].Value -cne [string]$active.id -or
+                    $url.Groups[1].Value -cne [string]$active.url -or
+                    $blob.Groups[1].Value -cne '6b7a523f98a9655ba2ca28f42696b80da365c92b' -or
+                    $sender.Groups[1].Value -cne 'HERDR-DOORBELL-DB01-G1-20260816' -or
+                    $count.Groups[1].Value -cne '1') {
+                  throw 'CONTROL_REQUIRED_EXISTING_INBOUND_DOORBELL_ROUTING_OR_SENDER_MISMATCH'
+                }
+                Assert-DoorbellReceiptReadBack ([string]$receipt.id) $returnId
+                $elapsed = [int][Math]::Round(([DateTimeOffset]::UtcNow - $started).TotalSeconds)
+                return [pscustomobject]@{
+                  receipt_id = [string]$receipt.id
+                  state = 'DELIVERED'
+                  physical_send_count = 1
+                  wait_seconds = $elapsed
+                }
+              }
+              Start-Sleep -Seconds $pollSeconds
+            }
+            throw "CONTROL_REQUIRED_EXISTING_INBOUND_DOORBELL_NOT_DELIVERED_WITHIN_BOUNDED_WINDOW wait_seconds=$waitSeconds"
           }
 
           function Invoke-DirectDoorbell([string]$returnId, [object]$active) {
@@ -698,16 +746,30 @@ jobs:
               $returnId = [string]$requests[0].id
               $requestBody = [string]$requests[0].body
               Assert-ReceiptReadBack $returnId 'CONTROL_RETURN_REQUEST_V1'
-              if ($requestBody -notmatch '(?m)^recorded_by_role:\s*HERDR_AUTORETURN_GUARD\s*$') {
+              $isGuardRequest = $requestBody -match '(?m)^recorded_by_role:\s*HERDR_AUTORETURN_GUARD\s*$'
+              $isTargetRequest = $requestBody -match '(?m)^recorded_by_role:\s*HERDR_TARGET\s*$'
+              $isOwnerRequest = [string]$requests[0].user.login -ceq 'D22977'
+              if (-not ($isGuardRequest -or $isTargetRequest -or $isOwnerRequest)) {
                 throw 'CONTROL_REQUIRED_EXISTING_RETURN_REQUEST_IDENTITY_MISMATCH'
               }
+              $requestRole = if ($isGuardRequest) { 'HERDR_AUTORETURN_GUARD' } elseif ($isTargetRequest) { 'HERDR_TARGET' } else { 'OWNER' }
+              $requestControlGen = [regex]::Match($requestBody, '(?m)^control_generation:\s*(\d{3})\s*$')
+              $requestCard = [regex]::Match($requestBody, '(?m)^source_card_id:\s*([A-Za-z0-9_-]+)\s*$')
+              $requestDispatch = [regex]::Match($requestBody, '(?m)^source_dispatch_receipt:\s*([0-9]+)\s*$')
+              $requestAction = [regex]::Match($requestBody, '(?m)^source_action:\s*([A-Z_]+)\s*$')
               $requestGen = [regex]::Match($requestBody, '(?m)^target_control_generation:\s*(\d{3})\s*$')
+              $requestStatus = [regex]::Match($requestBody, '(?m)^target_control_status:\s*(ACTIVE)\s*$')
               $requestId = [regex]::Match($requestBody, '(?m)^target_control_conversation_id:\s*([0-9a-f-]+)\s*$')
               $requestUrl = [regex]::Match($requestBody, '(?m)^target_control_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
-              if (-not ($requestGen.Success -and $requestId.Success -and $requestUrl.Success)) {
+              if (-not ($requestControlGen.Success -and $requestCard.Success -and $requestDispatch.Success -and $requestAction.Success -and $requestGen.Success -and $requestStatus.Success -and $requestId.Success -and $requestUrl.Success)) {
                 throw 'CONTROL_REQUIRED_EXISTING_RETURN_REQUEST_ROUTING_IDENTITY_MISSING'
               }
-              if ($requestGen.Groups[1].Value -cne [string]$active.generation -or
+              if ($requestControlGen.Groups[1].Value -cne [string]$env:BRIDGE_GENERATION -or
+                  $requestCard.Groups[1].Value -cne [string]$env:BRIDGE_CARD_ID -or
+                  $requestDispatch.Groups[1].Value -cne [string]$env:BRIDGE_SOURCE_RECEIPT -or
+                  $requestAction.Groups[1].Value -cne [string]$env:BRIDGE_ACTION -or
+                  $requestGen.Groups[1].Value -cne [string]$active.generation -or
+                  $requestStatus.Groups[1].Value -cne 'ACTIVE' -or
                   $requestId.Groups[1].Value -cne [string]$active.id -or
                   $requestUrl.Groups[1].Value -cne [string]$active.url) {
                 throw 'CONTROL_REQUIRED_EXISTING_RETURN_REQUEST_ACTIVE_CONTROL_MISMATCH'
@@ -743,9 +805,19 @@ jobs:
               $returnId = Publish-Receipt $returnBody
               Assert-ReceiptReadBack $returnId 'CONTROL_RETURN_REQUEST_V1'
               $newReturnCreated = $true
+              $requestRole = 'HERDR_AUTORETURN_GUARD'
             }
 
-            $doorbell = Invoke-DirectDoorbell $returnId $active
+            $existingInboundObserved = $false
+            $doorbell = $null
+            $existingInboundWaitSeconds = 120
+            if ($requests.Count -eq 1 -and $requestRole -ne 'HERDR_AUTORETURN_GUARD') {
+              $doorbell = Wait-ExistingInboundDoorbell $returnId $active $existingInboundWaitSeconds
+              $existingInboundObserved = $true
+            } else {
+              $doorbell = Invoke-DirectDoorbell $returnId $active
+            }
+
             $extraLines = @(
               if ($newReturnCreated) {
                 "generated_return_request_receipt: $returnId"
@@ -754,16 +826,29 @@ jobs:
                 "existing_return_request_receipt: $returnId"
                 'new_return_request_created: false'
               }
-              "direct_doorbell_receipt: $($doorbell.receipt_id)"
-              "direct_doorbell_state: $($doorbell.state)"
-              "physical_send_count: $($doorbell.physical_send_count)"
+              "existing_return_request_author_role: $requestRole"
+              if ($existingInboundObserved) {
+                "existing_inbound_doorbell_receipt: $($doorbell.receipt_id)"
+                'existing_inbound_doorbell_observed: true'
+                'direct_doorbell_sent: false'
+                'direct_doorbell_receipt: NONE'
+                'physical_send_count: 0'
+                'no_double_send: true'
+                "existing_inbound_wait_seconds: $($doorbell.wait_seconds)"
+              } else {
+                "direct_doorbell_receipt: $($doorbell.receipt_id)"
+                "direct_doorbell_state: $($doorbell.state)"
+                'direct_doorbell_sent: true'
+                "physical_send_count: $($doorbell.physical_send_count)"
+                'no_double_send: true'
+              }
               "target_control_generation: $($active.generation)"
               "target_control_conversation_id: $($active.id)"
               "target_control_conversation_url: $($active.url)"
               "watch_elapsed_seconds: $elapsed"
             )
             $extra = $extraLines -join [Environment]::NewLine
-            $resultState = if ($newReturnCreated) { 'RETURN_REQUEST_PUBLISHED' } else { 'NO_OP_ALREADY_RETURNED' }
+            $resultState = if ($existingInboundObserved) { 'EXISTING_INBOUND_DOORBELL_OBSERVED' } elseif ($newReturnCreated) { 'RETURN_REQUEST_PUBLISHED' } else { 'NO_OP_ALREADY_RETURNED' }
             $resultId = Publish-GuardResult $resultState 'PASS' $reason $extra
             Assert-ReceiptReadBack $resultId 'HERDR_G7_AUTORETURN_GUARD_RESULT_V1'
             Write-Output "direct CONTROL_DOORBELL_V1 read-back id=$($doorbell.receipt_id); guard result=$resultId"
