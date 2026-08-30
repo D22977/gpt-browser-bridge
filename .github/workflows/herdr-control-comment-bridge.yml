@@ -315,6 +315,7 @@ jobs:
           $watchSeconds = 900
           $pollSeconds = 5
           $script:guardResultPublished = $false
+          $guardResultIdempotency = "GBB103-G7-AUTORETURN-GUARD-RESULT-$($env:BRIDGE_COMMENT_ID)-20260830"
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-herdr-autoreturn-guard'; Accept = 'application/vnd.github+json' }
           if ([string]::IsNullOrWhiteSpace($pane) -or [string]::IsNullOrWhiteSpace($session)) { throw 'Missing exact delivered target binding' }
           if (-not (Test-Path -LiteralPath $herdr)) { throw "Herdr CLI missing: $herdr" }
@@ -365,7 +366,6 @@ jobs:
               "source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)"
               "source_dispatch_receipt: $($env:BRIDGE_SOURCE_RECEIPT)"
               "source_delivery_receipt: $($env:BRIDGE_DELIVERY_RECEIPT)"
-              "source_authorization_receipt: 5468203790"
               "card_id: $($env:BRIDGE_CARD_ID)"
               "action: $($env:BRIDGE_ACTION)"
               "target_pane: $pane"
@@ -386,7 +386,7 @@ jobs:
               'readback_required: true'
             )
             if (-not [string]::IsNullOrWhiteSpace($extra)) { $lines += $extra }
-            $lines += 'idempotency_key: GBB103-G7-AUTORETURN-GUARD-RESULT-5468211009-20260830'
+            $lines += "idempotency_key: $guardResultIdempotency"
             $id = Publish-Receipt ($lines -join [Environment]::NewLine)
             $script:guardResultPublished = $true
             return [string]$id
