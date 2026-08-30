@@ -1,4 +1,4 @@
-name: GBB G8 Issue102 Local Console Rebind
+name: GBB G8 Issue102 Local Console Observation
 
 on:
   issue_comment:
@@ -9,24 +9,24 @@ permissions:
   issues: write
 
 concurrency:
-  group: gbb-g8-issue102-local-console-${{ github.event.comment.id }}
+  group: gbb-g8-issue102-observe-${{ github.event.comment.id }}
   cancel-in-progress: false
 
 jobs:
-  g8-issue102-local-console-rebind:
-    name: G8 Issue102 Local Console Rebind
+  g8-issue102-observe:
+    name: G8 Issue102 Local Console Observation
     if: >-
       github.event.issue.number == 102 &&
       github.event.comment.user.login == 'D22977' &&
       github.event.comment.author_association == 'OWNER' &&
-      startsWith(github.event.comment.body, 'HERDR_G8_LOCAL_CONSOLE_WAKE_V1')
+      startsWith(github.event.comment.body, 'HERDR_G8_LOCAL_CONSOLE_OBSERVE_V1')
     runs-on: [self-hosted, Windows, GBB-REVIEWER]
-    timeout-minutes: 12
+    timeout-minutes: 5
     defaults:
       run:
         shell: pwsh -NoProfile -File {0}
     steps:
-      - name: Validate exact G8 recovery event
+      - name: Validate exact observation event
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -36,257 +36,82 @@ jobs:
           if ([int]$event.issue.number -ne 102) { throw 'Wrong issue' }
           if ($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong actor' }
           $body = [string]$event.comment.body
-          if ($body -notmatch '(?m)^HERDR_G8_LOCAL_CONSOLE_WAKE_V1\s*$') { throw 'Missing protocol header' }
+          if ($body -notmatch '(?m)^HERDR_G8_LOCAL_CONSOLE_OBSERVE_V1\s*$') { throw 'Missing protocol header' }
           $gen = [regex]::Match($body, '(?m)^control_generation:\s*(008)\s*$')
-          $card = [regex]::Match($body, '(?m)^card_id:\s*(GBB-CONTROL-SKILL-V4_1-HANDOFF-LAW-G6-01)\s*$')
-          $rebind = [regex]::Match($body, '(?m)^source_rebind_receipt:\s*(5468784703)\s*$')
-          $resume = [regex]::Match($body, '(?m)^source_resume_event_receipt:\s*(5469021845)\s*$')
-          $auth = [regex]::Match($body, '(?m)^recovery_authorization_receipt:\s*(5469101629)\s*$')
-          $idem = [regex]::Match($body, '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$')
-          if (-not ($gen.Success -and $card.Success -and $rebind.Success -and $resume.Success -and $auth.Success -and $idem.Success)) { throw 'Malformed or mismatched recovery event' }
+          $wake = [regex]::Match($body, '(?m)^source_wake_comment_id:\s*(5469111223)\s*$')
+          $transport = [regex]::Match($body, '(?m)^source_transport_receipt:\s*(5469112144)\s*$')
+          $guard = [regex]::Match($body, '(?m)^source_guard_receipt:\s*(5469151426)\s*$')
+          $auth = [regex]::Match($body, '(?m)^observation_authorization_receipt:\s*(5469160734)\s*$')
+          $pane = [regex]::Match($body, '(?m)^target_pane:\s*(w2:p1)\s*$')
+          $session = [regex]::Match($body, '(?m)^target_agent_session:\s*(01a0513f-4e68-7573-bf38-72e2120ebe1d)\s*$')
+          if (-not ($gen.Success -and $wake.Success -and $transport.Success -and $guard.Success -and $auth.Success -and $pane.Success -and $session.Success)) { throw 'Malformed or mismatched observation event' }
 
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-g8-local-console'; Accept = 'application/vnd.github+json' }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-g8-local-observe'; Accept = 'application/vnd.github+json' }
           $all = [System.Collections.Generic.List[object]]::new()
           function Add-Flat([object]$value) {
             if ($null -eq $value) { return }
             if ($value -is [System.Array]) { foreach ($nested in $value) { Add-Flat $nested }; return }
             [void]$all.Add($value)
           }
-          for ($page = 1; $page -le 20; $page++) {
-            $before = $all.Count
+          for ($page=1; $page -le 20; $page++) {
+            $before=$all.Count
             Add-Flat (Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
-            if (($all.Count - $before) -lt 100) { break }
+            if (($all.Count-$before) -lt 100) { break }
           }
-          $switches = @($all | Where-Object {
-            $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
-            $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
-            $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
-          } | Sort-Object { [int64]$_.id })
-          if ($switches.Count -eq 0) { throw 'No ACTIVE Control switch' }
-          $latest = $switches[$switches.Count - 1]
-          $active = [regex]::Match([string]$latest.body, '(?m)^new_generation:\s*(\d{3})\s*$')
-          if (-not $active.Success -or $active.Groups[1].Value -cne '008') { throw "G8 is not ACTIVE; latest_switch=$($latest.id)" }
-          if ([string]$latest.id -cne '5468566845') { throw "Unexpected newer ACTIVE switch=$($latest.id); CONTROL_REQUIRED" }
+          $switches=@($all | Where-Object { $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$' } | Sort-Object { [int64]$_.id })
+          if ($switches.Count -eq 0 -or [string]$switches[-1].id -cne '5468566845') { throw 'Current G8 switch mismatch' }
+          $active=[regex]::Match([string]$switches[-1].body,'(?m)^new_generation:\s*(\d{3})\s*$')
+          if (-not $active.Success -or $active.Groups[1].Value -cne '008') { throw 'Generation008 is not ACTIVE' }
 
-          $whoami = (& whoami).Trim()
-          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-          $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-          if ($whoami -notmatch '(?i)^d22977\\lupun$' -or $identity -notmatch '(?i)^d22977\\lupun$') { throw "Unexpected Windows identity whoami=$whoami identity=$identity" }
-          if (-not [Environment]::UserInteractive -or $sessionId -eq 0) { throw 'Runner is not interactive' }
-          if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "Unexpected runner=$env:RUNNER_NAME" }
+          $whoami=(& whoami).Trim(); $identity=[System.Security.Principal.WindowsIdentity]::GetCurrent().Name; $sid=[System.Diagnostics.Process]::GetCurrentProcess().SessionId
+          if ($whoami -notmatch '(?i)^d22977\\lupun$' -or $identity -notmatch '(?i)^d22977\\lupun$' -or -not [Environment]::UserInteractive -or $sid -eq 0 -or $env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw 'Runner identity/interactivity mismatch' }
+          "OBS_COMMENT_ID=$($event.comment.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-          "G8_COMMENT_ID=$($event.comment.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "G8_IDEMPOTENCY=$($idem.Groups[1].Value)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "G8_SWITCH_RECEIPT=$($latest.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Output "validated G8 event comment=$($event.comment.id) switch=$($latest.id)"
-
-      - name: Resolve exact existing local coordinator and deliver once
+      - name: Read exact pane without prompting
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
-          if (-not (Test-Path -LiteralPath $herdr)) { throw "Herdr CLI missing: $herdr" }
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-g8-local-console'; Accept = 'application/vnd.github+json' }
-          function Publish([string]$body) {
-            $payload = @{ body = $body } | ConvertTo-Json -Compress
-            $r = Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/102/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
-            $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30
-            if ([string]$rb.body -cne $body) { throw "Receipt read-back mismatch $($r.id)" }
-            return [string]$r.id
-          }
-
-          $listRaw = & $herdr agent list 2>&1 | Out-String
+          $herdr='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          if (-not (Test-Path -LiteralPath $herdr)) { throw 'Herdr CLI missing' }
+          $listRaw=& $herdr agent list 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) { throw "herdr agent list failed: $listRaw" }
-          $list = $listRaw | ConvertFrom-Json
-          $agents = @($list.result.agents)
-          $eligible = @($agents | Where-Object {
-            $_.agent -eq 'codex' -and
-            ($_.agent_status -eq 'idle' -or $_.agent_status -eq 'done') -and
-            $_.cwd -match '(?i)^C:\\WINDOWS\\system32$' -and
-            ([string]::IsNullOrWhiteSpace([string]$_.name) -or $_.name -notmatch '(?i)(pr98|ai160|mep|review)') -and
-            $_.pane_id -and $_.agent_session.value
-          })
-          if ($eligible.Count -ne 1) {
-            $summary = ($agents | ForEach-Object { "$($_.pane_id):$($_.agent):$($_.agent_status):$($_.cwd):$($_.name)" }) -join '; '
-            if ($summary.Length -gt 3500) { $summary = $summary.Substring(0,3500) }
-            $receipt = @(
-              'HERDR_G8_LOCAL_CONSOLE_REBIND_RESULT_V1'
-              'state: CONTROL_REQUIRED_TARGET_AMBIGUOUS'
-              'decision: CONTROL_REQUIRED'
-              'control_generation: 008'
-              "source_wake_comment_id: $env:G8_COMMENT_ID"
-              "active_switch_receipt: $env:G8_SWITCH_RECEIPT"
-              "eligible_target_count: $($eligible.Count)"
-              "agent_summary: $summary"
-              "runner_name: $env:RUNNER_NAME"
-              "workflow_run_id: $env:GITHUB_RUN_ID"
-              'prompt_sent: false'
-              'user_relay_count: 0'
-              'readback_required: true'
-            ) -join "`n"
-            $id = Publish $receipt
-            throw "Exact safe coordinator not unique; receipt=$id"
-          }
-          $target = $eligible[0]
-          $pane = [string]$target.pane_id
-          $session = [string]$target.agent_session.value
-
-          $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g8-local-console-rebind\state'
-          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
-          $statePath = Join-Path $stateRoot "$env:G8_COMMENT_ID.json"
-          if (Test-Path -LiteralPath $statePath) {
-            $existing = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-            if ($existing.status -eq 'SENT') {
-              $receipt = @(
-                'HERDR_G8_LOCAL_CONSOLE_REBIND_RESULT_V1'
-                'state: NO_OP_DUPLICATE'
-                'decision: NO_OP_DUPLICATE'
-                'control_generation: 008'
-                "source_wake_comment_id: $env:G8_COMMENT_ID"
-                "target_pane: $($existing.pane_id)"
-                "target_agent_session: $($existing.agent_session)"
-                'second_prompt_sent: false'
-                'user_relay_count: 0'
-              ) -join "`n"
-              $id = Publish $receipt
-              Write-Output "duplicate no-op receipt=$id"
-              exit 0
-            }
-            if ($existing.status -eq 'SENDING') { throw 'UNCERTAIN_SEND / NO_BLIND_RETRY' }
-          }
-
-          @{status='SENDING';pane_id=$pane;agent_session=$session;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
-          $prompt = "Read GitHub directly. Rehydrate D22977/gpt-browser-bridge Issue #102 latest authority, current #43/#81/#88, source G8 local-console wake comment $env:G8_COMMENT_ID, recovery authorization 5469101629, rebind 5468784703, resume event 5469021845, and blocker 5469056264. You are the existing local deterministic coordinator/transport, not semantic Control or formal Reviewer. Perform ACCESS_CAPABILITY_CHECK_V1, resolve/rebind only an existing admitted exact Worker/session for Issue #102, and physically hand off the currently authorized bidirectional amendment. Before/at successful handoff publish/read-back CONTROL_SKILL_BIDIRECTIONAL_HANDOFF_AMENDMENT_CONSUMED_STARTED_V1 on Issue #102 including source_local_console_bridge_comment_id: $env:G8_COMMENT_ID, source_control_rebind_receipt: 5468784703, actual coordinator/pane/session/worker identity, candidate branch/head, idempotency, and user_relay_count: 0. Then let the Worker execute only the authorized #102 amendment/BH01-BH10 and terminal protocol. If current liveness/binding cannot be completed without substitution, scope expansion, new infrastructure, or a genuinely human-only action, publish/read-back LOCAL_CONTROL_RETURN_V1 or CONTROL_REQUIRED on Issue #102 including source_local_console_bridge_comment_id: $env:G8_COMMENT_ID and exact first_missing_capability. Do not modify canonical Skill/default branch/MEP/CAD, do not review, merge, release, dispatch workflows, or infer successor. GitHub is authority."
-          $promptRaw = & $herdr agent prompt $pane $prompt 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) { throw "herdr agent prompt failed; state remains SENDING; NO_BLIND_RETRY: $promptRaw" }
-          $promptResult = $promptRaw | ConvertFrom-Json
-          if ($promptResult.result.type -ne 'agent_prompted') { throw "Unexpected Herdr result=$($promptResult.result.type)" }
-          if ([string]$promptResult.result.agent.pane_id -cne $pane -or [string]$promptResult.result.agent.agent_session.value -cne $session) { throw 'Prompt result identity mismatch' }
-          @{status='SENT';pane_id=$pane;agent_session=$session;workflow_run_id=$env:GITHUB_RUN_ID;sent_at=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
-
-          $receipt = @(
-            'HERDR_G8_LOCAL_CONSOLE_REBIND_RESULT_V1'
-            'state: CONSUMED_STARTED'
-            'decision: PASS_TRANSPORT_ONLY'
+          $list=$listRaw | ConvertFrom-Json
+          $target=@($list.result.agents | Where-Object { $_.pane_id -eq 'w2:p1' -and $_.agent_session.value -eq '01a0513f-4e68-7573-bf38-72e2120ebe1d' })
+          if ($target.Count -ne 1) { throw "Exact prior target missing/drifted count=$($target.Count)" }
+          $status=[string]$target[0].agent_status
+          $read=& $herdr agent read 'w2:p1' --source recent-unwrapped --lines 180 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw 'herdr agent read failed' }
+          $bytes=[System.Text.Encoding]::UTF8.GetBytes($read)
+          $hash=[Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+          $tail=if ($read.Length -gt 12000) { $read.Substring($read.Length-12000) } else { $read }
+          $tail=$tail.Replace("`r",'').Replace('```','~~~')
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='gbb-g8-local-observe';Accept='application/vnd.github+json'}
+          $body=@(
+            'HERDR_G8_LOCAL_CONSOLE_OBSERVATION_V1'
+            'state: PASS'
+            'decision: PASS_READ_ONLY'
             'control_generation: 008'
-            "active_switch_receipt: $env:G8_SWITCH_RECEIPT"
-            "source_wake_comment_id: $env:G8_COMMENT_ID"
-            'source_recovery_authorization_receipt: 5469101629'
-            'source_control_rebind_receipt: 5468784703'
-            'source_resume_event_receipt: 5469021845'
-            "target_pane: $pane"
-            "target_agent_session: $session"
-            "runner_name: $env:RUNNER_NAME"
-            "workflow_run_id: $env:GITHUB_RUN_ID"
-            'physical_prompt_count: 1'
-            'user_relay_count: 0'
-            'transport_product_mutation: false'
-            'readback_required: true'
-          ) -join "`n"
-          $id = Publish $receipt
-          "G8_TARGET_PANE=$pane" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "G8_TARGET_SESSION=$session" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "G8_TRANSPORT_RECEIPT=$id" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Output "local coordinator prompted receipt=$id pane=$pane session=$session"
-
-      - name: Bounded guard for coordinator durable handoff or return
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-g8-local-console'; Accept = 'application/vnd.github+json' }
-          function Publish([string]$body) {
-            $payload = @{ body = $body } | ConvertTo-Json -Compress
-            $r = Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/102/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
-            return [string]$r.id
-          }
-          function Get-Comments {
-            $list = [System.Collections.Generic.List[object]]::new()
-            for ($page=1; $page -le 20; $page++) {
-              $batch = @(Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/102/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
-              foreach ($x in $batch) { [void]$list.Add($x) }
-              if ($batch.Count -lt 100) { break }
-            }
-            return @($list)
-          }
-          $started = [DateTimeOffset]::UtcNow
-          $deadlineSeconds = 480
-          while (([DateTimeOffset]::UtcNow - $started).TotalSeconds -lt $deadlineSeconds) {
-            $comments = Get-Comments
-            $bound = @($comments | Where-Object {
-              [int64]$_.id -gt [int64]$env:G8_COMMENT_ID -and
-              ([string]$_.body).Contains("source_local_console_bridge_comment_id: $env:G8_COMMENT_ID")
-            } | Sort-Object { [int64]$_.id })
-            $success = @($bound | Where-Object { $_.body -match '(?m)^CONTROL_SKILL_BIDIRECTIONAL_HANDOFF_AMENDMENT_CONSUMED_STARTED_V1\s*$' })
-            if ($success.Count -eq 1) {
-              $r = @(
-                'HERDR_G8_LOCAL_CONSOLE_GUARD_RESULT_V1'
-                'state: PASS'
-                'decision: PASS'
-                'control_generation: 008'
-                "source_wake_comment_id: $env:G8_COMMENT_ID"
-                "source_transport_receipt: $env:G8_TRANSPORT_RECEIPT"
-                "target_durable_consumed_start_receipt: $($success[0].id)"
-                "target_pane: $env:G8_TARGET_PANE"
-                "target_agent_session: $env:G8_TARGET_SESSION"
-                "workflow_run_id: $env:GITHUB_RUN_ID"
-                'user_relay_count: 0'
-                'readback_required: true'
-              ) -join "`n"
-              $id = Publish $r
-              Write-Output "G8 durable worker handoff observed receipt=$($success[0].id) guard=$id"
-              exit 0
-            }
-            if ($success.Count -gt 1) { throw 'Conflicting duplicate consumed-start receipts' }
-            $returns = @($bound | Where-Object { $_.body -match '(?m)^(LOCAL_CONTROL_RETURN_V1|CONTROL_REQUIRED)\s*$' })
-            if ($returns.Count -gt 0) {
-              $r = @(
-                'HERDR_G8_LOCAL_CONSOLE_GUARD_RESULT_V1'
-                'state: CONTROL_REQUIRED'
-                'decision: CONTROL_REQUIRED'
-                'control_generation: 008'
-                "source_wake_comment_id: $env:G8_COMMENT_ID"
-                "source_transport_receipt: $env:G8_TRANSPORT_RECEIPT"
-                "target_control_return_receipt: $($returns[-1].id)"
-                "workflow_run_id: $env:GITHUB_RUN_ID"
-                'user_relay_count: 0'
-              ) -join "`n"
-              $id = Publish $r
-              throw "Coordinator returned CONTROL_REQUIRED receipt=$($returns[-1].id) guard=$id"
-            }
-            Start-Sleep -Seconds 5
-          }
-
-          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
-          $status = 'UNKNOWN'
-          $hash = 'NONE'
-          if (Test-Path -LiteralPath $herdr) {
-            try {
-              $list = (& $herdr agent list 2>&1 | Out-String) | ConvertFrom-Json
-              $target = @($list.result.agents | Where-Object { $_.pane_id -eq $env:G8_TARGET_PANE -and $_.agent_session.value -eq $env:G8_TARGET_SESSION })
-              if ($target.Count -eq 1) { $status = [string]$target[0].agent_status }
-              $read = (& $herdr agent read $env:G8_TARGET_PANE --source recent-unwrapped --lines 80 2>&1 | Out-String)
-              $bytes = [System.Text.Encoding]::UTF8.GetBytes($read)
-              $hash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
-            } catch { }
-          }
-          $r = @(
-            'HERDR_G8_LOCAL_CONSOLE_GUARD_RESULT_V1'
-            'state: CONTROL_REQUIRED_NO_BOUND_DURABLE_ACK'
-            'decision: CONTROL_REQUIRED'
-            'control_generation: 008'
-            "source_wake_comment_id: $env:G8_COMMENT_ID"
-            "source_transport_receipt: $env:G8_TRANSPORT_RECEIPT"
-            "target_pane: $env:G8_TARGET_PANE"
-            "target_agent_session: $env:G8_TARGET_SESSION"
+            "source_observation_comment_id: $env:OBS_COMMENT_ID"
+            'source_wake_comment_id: 5469111223'
+            'source_transport_receipt: 5469112144'
+            'source_guard_receipt: 5469151426'
+            'target_pane: w2:p1'
+            'target_agent_session: 01a0513f-4e68-7573-bf38-72e2120ebe1d'
             "target_status: $status"
             "recent_output_sha256: $hash"
-            "bounded_wait_seconds: $deadlineSeconds"
+            "runner_name: $env:RUNNER_NAME"
             "workflow_run_id: $env:GITHUB_RUN_ID"
+            'prompt_sent: false'
+            'process_mutation: false'
             'user_relay_count: 0'
-            'first_missing_capability: COORDINATOR_DURABLE_HANDOFF_OR_RETURN_NOT_OBSERVED'
+            'recent_output_tail_begin: true'
+            $tail
+            'recent_output_tail_end: true'
             'readback_required: true'
           ) -join "`n"
-          $id = Publish $r
-          throw "Bounded guard timeout receipt=$id"
+          $payload=@{body=$body}|ConvertTo-Json -Compress
+          $r=Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/102/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+          $rb=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30
+          if ([string]$rb.body -cne $body) { throw "Observation read-back mismatch $($r.id)" }
+          Write-Output "observation receipt=$($r.id) status=$status hash=$hash"
