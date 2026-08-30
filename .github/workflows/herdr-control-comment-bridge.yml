@@ -153,14 +153,14 @@ jobs:
           $agents = @($list.result.agents)
           $eligible = @($agents | Where-Object {
             $_.agent -eq 'codex' -and
-            $_.agent_status -eq 'idle' -and
+            ($_.agent_status -eq 'idle' -or $_.agent_status -eq 'done') -and
             $_.cwd -match '(?i)^C:\\WINDOWS\\system32$' -and
             ([string]::IsNullOrWhiteSpace([string]$_.name) -or $_.name -notmatch '(?i)(pr98|ai160|mep|review)') -and
             $_.pane_id -and $_.agent_session.value
           })
           if ($eligible.Count -ne 1) {
             $summary = ($agents | ForEach-Object { "$($_.pane_id):$($_.agent):$($_.agent_status):$($_.cwd):$($_.name)" }) -join '; '
-            throw "Expected exactly one safe idle generic Codex target; eligible=$($eligible.Count); agents=$summary"
+            throw "Expected exactly one safe settled generic Codex target; eligible=$($eligible.Count); agents=$summary"
           }
           $target = $eligible[0]
           $pane = [string]$target.pane_id
