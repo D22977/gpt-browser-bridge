@@ -234,3 +234,87 @@ Fresh-review `PASS` is still a Control decision point. The Worker publishes the
 ready evidence and stops; ACTIVE Control must bind the exact reviewed head before
 acceptance or integration. A review result, terminal result, or successful canary
 never authorizes the Worker or Herdr to merge, release, rotate, or choose a successor.
+
+## BIDIRECTIONAL_CONTROL_HERDR_HANDOFF_V1
+
+The outbound and inbound edges use this exact state machine:
+
+```text
+ACTIVE_CONTROL -> DURABLE_DECISION_READBACK -> HERDR_CURRENT_ACCESS_CHECK
+-> EXACT_HERDR_WAKE -> PHYSICAL_CONSUMED_STARTED_OR_RESIDENT_FUTURE_CONSUMER_BOUND
+-> CONTROL_IDLE_ALLOWED -> HERDR/WORKER_EXECUTION
+-> DURABLE_READY_TERMINAL_OR_CONTROL_RETURN -> CONTROL_RETURN_REQUEST
+-> CONTROL_DOORBELL_TO_CURRENT_ACTIVE_GENERATION -> CONTROL_REHYDRATION
+-> BOUNDED_CONTROL_DECISION
+```
+
+The edge never collapses these pairs: `DURABLE_DISPATCH !=
+PHYSICAL_HANDOFF_COMPLETE`; `CONSUMED_STARTED != FUTURE_WAKE_BOUND`;
+`TERMINAL_DURABLE != AUTO_REPORT_COMPLETE`; `CAPABILITY_PROVEN !=
+CURRENT_LIVENESS`; and `TRANSPORT != AUTHORITY`.
+
+`CONTROL_IDLE_ALLOWED` requires both exact physical consume and a durably bound
+resident/restartable future consumer with an exact legal successor and
+idempotency key. Dispatch alone yields `CONTROL_IDLE_FORBIDDEN`. After the gate,
+Web Control does no model polling; the existing deterministic local consumer
+waits, rereads GitHub, and performs the next exact edge.
+
+### BH01 — durable dispatch without consume or resident binding
+
+If only a durable dispatch exists and neither physical consume nor an exact
+resident future binding is proven, return `CONTROL_IDLE_FORBIDDEN`. Do not end
+active semantic Control work and do not infer execution from a live process.
+
+### BH02 — exact consume plus current future consumer
+
+If the exact target publishes `CONSUMED_STARTED` and the current resident or
+restartable future consumer, legal successor, and idempotency binding are all
+read back, set `CONTROL_IDLE_ALLOWED`. Web Control performs no model polling.
+
+### BH03 — terminal without return request/doorbell
+
+A durable child terminal without an exact Control-return request and doorbell to
+the current ACTIVE generation is `AUTO_REPORT_INCOMPLETE`. Terminal durability
+does not prove automatic Control reporting.
+
+### BH04 — stale or retired Control target
+
+A stale or retired Control target resolves as `NO_OP_RETIRED`; it must not receive
+another semantic decision. Re-read and resolve the current ACTIVE generation.
+
+### BH05 — duplicate outbound wake
+
+A repeated outbound wake with the same source, target, and idempotency identity is
+`NO_OP_DUPLICATE`; no second prompt is sent and no second consume is created.
+
+### BH06 — duplicate inbound Control doorbell
+
+A repeated inbound Control doorbell with the same return event and idempotency
+identity is `NO_OP_DUPLICATE`; no second semantic decision is made and no second
+mutation is performed.
+
+### BH07 — Herdr runtime failure
+
+`Herdr runtime FAIL` blocks current liveness only. Preserve the separate
+`PROVEN_BOUNDED` capability classification, publish the typed current-liveness
+blocker, and no new infrastructure or silent executor substitution is permitted.
+
+### BH08 — child terminal with no resident successor
+
+When the parent has ended and a child publishes a terminal without an exact
+resident/restartable future consumer and legal successor, return
+`FUTURE_WAKE_BOUND_MISSING` / `BLOCKED_NO_BOUND_SUCCESSOR`. Do not label the
+bounded capability missing and do not wait indefinitely.
+
+### BH09 — exact binding mismatch
+
+A source, card, head, generation, role, target, branch, or idempotency mismatch
+is `FAIL_CLOSED` before mutation, with `mutation_state: NO_MUTATION`. Never fall
+back to an older parseable receipt or repair the mismatch implicitly.
+
+### BH10 — zero courier path
+
+Normal execution and terminal return keep `user_relay_count: 0` and
+`owner_courier_count: 0`. Neither Worker nor Herdr sends task/result text through
+the user or owner as a courier.
+

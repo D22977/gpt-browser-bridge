@@ -46,3 +46,14 @@ Read this index before FAILURE_ARCHIVE. Read the exact source receipt before rel
 An admitted success entry is selected only when its exact executor, surface, task class, repository/card scope, and restrictions match the current claim. Current liveness and target binding are checked at execution time without re-admitting the mechanism.
 
 No other design, READY, FIX_REQUIRED, or nonterminal source is indexed as success. High-value non-PASS constraints belong in INVARIANTS_AND_LESSONS; diagnostics belong in the default-excluded FAILURE_ARCHIVE.
+
+## Candidate amendment exclusion
+
+`BIDIRECTIONAL_CONTROL_HERDR_HANDOFF_V1` is a candidate contract amendment, not
+an admitted success entry. Its `CONTROL_IDLE_ALLOWED`, terminal-return,
+capability/liveness, duplicate, and zero-courier rules must be verified against
+the exact candidate head and current GitHub receipts. A Worker READY, transport
+receipt, or consumed-start receipt does not enter this index as PASS and does not
+authorize canonical Skill integration, review, merge, release, or successor
+activation.
+

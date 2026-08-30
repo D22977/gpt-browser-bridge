@@ -344,6 +344,13 @@ function scenario(bundle, id) {
   return match[0];
 }
 
+function bidirectionalScenario(bundle, id) {
+  const source = Object.values(bundle).join("\n");
+  const match = source.match(new RegExp(`### ${id}\\b[\\s\\S]*?(?=### BH\\d{2}\\b|$)`));
+  assert.ok(match, `missing bidirectional handoff regression ${id}`);
+  return match[0];
+}
+
 test("Control-return contract keeps HANDOFF navigation-only and preserves canonical Skill freeze", async () => {
   const bundle = await readControlBundle();
   assert.match(bundle["HANDOFF.md"], /navigation pointer|navigation only/i);
@@ -454,6 +461,77 @@ test("R12 Reviewer FIX_REQUIRED cannot silently route to an unauthorized Worker"
   assert.match(text, /ACTIVE CONTROL|explicitly authorized deterministic edge/i);
 });
 
+test("BH01 durable dispatch without consume or resident binding forbids Control idle", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH01");
+  assert.match(text, /durable dispatch/i);
+  assert.match(text, /consume|resident.*binding/i);
+  assert.match(text, /CONTROL_IDLE_FORBIDDEN/);
+});
+
+test("BH02 exact consume and future binding allow idle without model polling", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH02");
+  assert.match(text, /exact.*consume|consumed.*started/i);
+  assert.match(text, /current[\s\S]*future.*consumer.*binding|resident[\s\S]*future/i);
+  assert.match(text, /CONTROL_IDLE_ALLOWED/);
+  assert.match(text, /no model polling|model polling.*forbidden/i);
+});
+
+test("BH03 terminal without return request and doorbell is incomplete", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH03");
+  assert.match(text, /terminal/i);
+  assert.match(text, /return request.*doorbell|doorbell.*return request/i);
+  assert.match(text, /AUTO_REPORT_INCOMPLETE/);
+});
+
+test("BH04 stale or retired Control target is a retired no-op", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH04");
+  assert.match(text, /stale|retired/i);
+  assert.match(text, /NO_OP_RETIRED/);
+  assert.match(text, /current ACTIVE generation/i);
+});
+
+test("BH05 duplicate outbound wake does not send a second prompt", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH05");
+  assert.match(text, /duplicate outbound wake/i);
+  assert.match(text, /NO_OP_DUPLICATE/);
+  assert.match(text, /no second prompt|second prompt[\s\S]*forbidden/i);
+});
+
+test("BH06 duplicate inbound doorbell does not create a second decision", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH06");
+  assert.match(text, /duplicate inbound.*doorbell|inbound.*doorbell.*duplicate/i);
+  assert.match(text, /NO_OP_DUPLICATE/);
+  assert.match(text, /no second semantic decision|second semantic decision[\s\S]*forbidden/i);
+});
+
+test("BH07 Herdr runtime failure blocks liveness without erasing bounded capability", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH07");
+  assert.match(text, /Herdr.*runtime.*FAIL|runtime.*FAIL.*Herdr/i);
+  assert.match(text, /PROVEN_BOUNDED/);
+  assert.match(text, /current liveness.*block|blocks.*current liveness/i);
+  assert.match(text, /no new infrastructure|new infrastructure[\s\S]*forbidden/i);
+});
+
+test("BH08 child terminal without a resident successor fails with missing future binding", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH08");
+  assert.match(text, /child terminal[\s\S]*parent|parent[\s\S]*child terminal/i);
+  assert.match(text, /no.*future.*consumer|future.*successor/i);
+  assert.match(text, /FUTURE_WAKE_BOUND_MISSING|BLOCKED_NO_BOUND_SUCCESSOR/);
+});
+
+test("BH09 mismatched source/card/head/generation/target fails closed before mutation", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH09");
+  assert.match(text, /source.*card.*head.*generation.*target|mismatch/i);
+  assert.match(text, /FAIL_CLOSED/);
+  assert.match(text, /no mutation|NO_MUTATION/);
+});
+
+test("BH10 normal handoff keeps user and owner courier counts at zero", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH10");
+  assert.match(text, /user_relay_count[^\\n]*0/);
+  assert.match(text, /owner_courier_count[^\\n]*0/);
+});
+
 test("Reviewer canary workflow is a static, read-only, fail-closed runner contract", async () => {
   const source = await readFile(
     new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
@@ -479,3 +557,4 @@ test("Reviewer canary workflow is a static, read-only, fail-closed runner contra
   assert.doesNotMatch(source, /(?:Start-Process|&\s*)(?:opencode|chrome|msedge|node)\b/i);
   assert.doesNotMatch(source, /secrets\.|GITHUB_TOKEN/);
 });
+

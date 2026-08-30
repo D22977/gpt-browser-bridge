@@ -136,3 +136,20 @@ This file is default-readable because non-PASS lessons and bounded safety invari
   - GitHub is the durable authority; the process may pause/exit while waiting and must not invent work to stay alive.
 - non_authority: the #62 and Gate G evidence does not grant current scheduler liveness, reviewer authority, product mutation, or permission to build a new scheduler/queue.
 - freshness: bind the current card, consumer, target, and runtime at execution time; historical evidence is not current liveness.
+
+## Entry IL-BIDIRECTIONAL-HANDOFF — symmetric outbound and inbound handoff
+
+- type: CANDIDATE_HANDOFF_CONTRACT
+- source: D22977/gpt-browser-bridge#102 receipt `5466682270`, current G8 work package and consumed-start are bound by live Issue #102 authority
+- source_state: EXECUTE_BOUNDED_SKILL_AMENDMENT; candidate only, not PASS
+- authority_effect: preserves exact outbound consume, future-wake, terminal-return, and current-Control doorbell distinctions without granting transport semantic authority.
+- reusable_invariants:
+  - `DURABLE_DISPATCH != PHYSICAL_HANDOFF_COMPLETE` and `CONSUMED_STARTED != FUTURE_WAKE_BOUND`;
+  - `CONTROL_IDLE_ALLOWED` requires exact physical consume plus a current resident/restartable future consumer, legal successor, and idempotency binding;
+  - `TERMINAL_DURABLE != AUTO_REPORT_COMPLETE`; a terminal must return through the current ACTIVE Control doorbell;
+  - `CAPABILITY_PROVEN != CURRENT_LIVENESS`; runtime failure blocks liveness and does not authorize new infrastructure;
+  - stale/retired and duplicate outbound/inbound edges are `NO_OP_RETIRED` / `NO_OP_DUPLICATE`, mismatches are `FAIL_CLOSED` before mutation, and normal courier counts remain zero;
+  - a missing future binding is `FUTURE_WAKE_BOUND_MISSING` / `BLOCKED_NO_BOUND_SUCCESSOR`, never silent indefinite waiting.
+- non_authority: this candidate contract does not authorize canonical Skill mutation, self-review, merge, release, workflow dispatch, executor substitution, or successor inference.
+- freshness: reread the current Issue #102 work package, consumed-start, branch/head, and current #43/#81/#88 authority immediately before mutation and before terminal publication.
+

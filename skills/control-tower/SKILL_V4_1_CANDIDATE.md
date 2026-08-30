@@ -293,3 +293,55 @@ generation 006 by itself. Reviewer `FIX_REQUIRED`, `BLOCKED`, or `CONTROL_REQUIR
 also returns to ACTIVE Control. A deterministic repair edge may run only when the
 current durable card explicitly binds its scope, executor, base, head, and
 idempotency key.
+
+## 17. BIDIRECTIONAL_CONTROL_HERDR_HANDOFF_V1
+
+This amendment makes the outbound handoff and inbound Control-return edge
+explicit without creating a new transport or control plane. The exact state
+machine is:
+
+```text
+ACTIVE_CONTROL -> DURABLE_DECISION_READBACK -> HERDR_CURRENT_ACCESS_CHECK
+-> EXACT_HERDR_WAKE -> PHYSICAL_CONSUMED_STARTED_OR_RESIDENT_FUTURE_CONSUMER_BOUND
+-> CONTROL_IDLE_ALLOWED -> HERDR/WORKER_EXECUTION
+-> DURABLE_READY_TERMINAL_OR_CONTROL_RETURN -> CONTROL_RETURN_REQUEST
+-> CONTROL_DOORBELL_TO_CURRENT_ACTIVE_GENERATION -> CONTROL_REHYDRATION
+-> BOUNDED_CONTROL_DECISION
+```
+
+The following distinctions are invariant and must be preserved in every
+receipt, test, and implementation:
+
+- `DURABLE_DISPATCH != PHYSICAL_HANDOFF_COMPLETE`.
+- `CONSUMED_STARTED != FUTURE_WAKE_BOUND`.
+- `TERMINAL_DURABLE != AUTO_REPORT_COMPLETE`.
+- `CAPABILITY_PROVEN != CURRENT_LIVENESS`.
+- `TRANSPORT != AUTHORITY`.
+
+`CONTROL_IDLE_ALLOWED` is legal only after the exact bound target has physically
+consumed the event and the exact resident/restartable future consumer, legal
+successor, and idempotency binding are durably proven. A dispatch receipt,
+open process, periodic instruction, or model polling cannot satisfy that gate.
+Once idle is allowed, active Web Control performs no semantic polling; the
+existing deterministic local consumer owns the wait and the next exact edge.
+
+On a Worker terminal or local return, the existing consumer must reread the
+current ACTIVE Control generation and publish/read back the exact return or
+READY evidence before any next decision. A terminal without that return/doorbell
+edge is `AUTO_REPORT_INCOMPLETE`. A stale or retired target is
+`NO_OP_RETIRED`, and a duplicate outbound wake or inbound doorbell is
+`NO_OP_DUPLICATE` with no second prompt, mutation, or semantic decision.
+
+Herdr runtime failure blocks only current liveness. It preserves any exact
+`PROVEN_BOUNDED` capability classification and never authorizes a new
+scheduler, watcher, router, queue, infrastructure, or silent substitution.
+If a child terminates after its parent exits without a resident exact successor,
+the result is `FUTURE_WAKE_BOUND_MISSING` / `BLOCKED_NO_BOUND_SUCCESSOR`, not a
+capability failure and not silent indefinite waiting.
+
+Every source, card, head, generation, target, role, and idempotency mismatch
+fails closed as `FAIL_CLOSED` before mutation. Normal execution keeps
+`user_relay_count: 0` and `owner_courier_count: 0`. Worker READY remains a
+candidate terminal for fresh independent review; it never authorizes review,
+merge, release, canonical Skill mutation, or successor inference.
+

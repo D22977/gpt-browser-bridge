@@ -41,3 +41,14 @@ semantic mutation, and wake the latest valid ACTIVE Control with only that minim
 pointer. If delivery fails on every admitted deterministic route, preserve state and
 publish/read back `CONTROL_DELIVERY_BLOCKED_V1`. The normal owner/user courier count
 is zero.
+
+## Bidirectional handoff pointer
+
+For the outbound Worker edge and inbound Control-return edge, read
+`SKILL_V4_1_CANDIDATE.md` section
+`BIDIRECTIONAL_CONTROL_HERDR_HANDOFF_V1`, then
+`CONTROL_HANDOFF_PROTOCOL.md` sections `BIDIRECTIONAL_CONTROL_HERDR_HANDOFF_V1`
+and `BH01`-`BH10`. Those sections are the candidate contract and negative gates;
+this landing file remains navigation only and cannot authorize a wake, repair,
+review, merge, release, or successor.
+
