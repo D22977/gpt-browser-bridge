@@ -392,6 +392,257 @@ jobs:
             return [string]$id
           }
 
+
+          function Resolve-ActiveControl {
+            $issue88 = Get-IssueComments 88
+            $switches = @($issue88 | Where-Object {
+              $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+              $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
+              $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
+            } | Sort-Object { [int64]$_.id })
+            if ($switches.Count -eq 0) { throw 'CONTROL_REQUIRED_NO_ACTIVE_CONTROL_SWITCH' }
+            $latest = $switches[$switches.Count - 1]
+            $switchBody = [string]$latest.body
+            $activeGen = [regex]::Match($switchBody, '(?m)^new_generation:\s*(\d{3})\s*$')
+            $activeId = [regex]::Match($switchBody, '(?m)^new_conversation_id:\s*([0-9a-f-]+)\s*$')
+            $activeUrl = [regex]::Match($switchBody, '(?m)^new_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
+            if (-not ($activeGen.Success -and $activeId.Success -and $activeUrl.Success)) { throw 'CONTROL_REQUIRED_ACTIVE_CONTROL_ROUTING_IDENTITY_MISSING' }
+            if ($activeGen.Groups[1].Value -cne [string]$env:BRIDGE_GENERATION) { throw "CONTROL_REQUIRED_STALE_GENERATION active=$($activeGen.Groups[1].Value)" }
+            return [pscustomobject]@{
+              generation = $activeGen.Groups[1].Value
+              id = $activeId.Groups[1].Value
+              url = $activeUrl.Groups[1].Value
+              switch_receipt = [string]$latest.id
+            }
+          }
+
+          function Assert-DoorbellReceiptReadBack([string]$receiptId, [string]$returnId) {
+            $uri = "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$receiptId"
+            $r = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 30
+            $body = [string]$r.body
+            if ($body -notmatch '(?m)^CONTROL_DOORBELL_V1\s*$') { throw "Doorbell receipt header read-back mismatch: $receiptId" }
+            if (-not $body.Contains("source_return_request_receipt: $returnId")) { throw "Doorbell receipt source read-back mismatch: $receiptId" }
+          }
+
+          function Invoke-DirectDoorbell([string]$returnId, [object]$active) {
+            $repoRoot = 'D:\AIWORK\GPT_BROWSER_BRIDGE'
+            $senderRel = 'src/gpt_send.mjs'
+            $senderPath = Join-Path $repoRoot $senderRel
+            $expectedBlob = '6b7a523f98a9655ba2ca28f42696b80da365c92b'
+            $senderSession = 'HERDR-DOORBELL-DB01-G1-20260816'
+            $runtimeRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\github-event-control-return'
+            $stateRoot = Join-Path $runtimeRoot 'state'
+            New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+            $statePath = Join-Path $stateRoot "$returnId.json"
+            $targetGeneration = [string]$active.generation
+            $targetConversationId = [string]$active.id
+            $targetConversationUrl = [string]$active.url
+            $activeSwitchReceipt = [string]$active.switch_receipt
+
+            if (-not (Test-Path -LiteralPath $senderPath)) {
+              $r = @(
+                'CONTROL_DOORBELL_V1'
+                'state: CONTROL_REQUIRED_RUNTIME_UNAVAILABLE'
+                "source_return_request_receipt: $returnId"
+                "active_switch_receipt: $activeSwitchReceipt"
+                "target_control_generation: $targetGeneration"
+                "target_control_conversation_id: $targetConversationId"
+                'first_missing_capability: LOCAL_GPT_SEND_MODULE_MISSING'
+                "workflow_run_id: $env:GITHUB_RUN_ID"
+                'user_relay_count: 0'
+              ) -join [Environment]::NewLine
+              $id = Publish-Receipt $r
+              throw "local sender missing; receipt=$id"
+            }
+
+            $actualBlob = (& git -C $repoRoot hash-object -- $senderRel).Trim()
+            if ($actualBlob -cne $expectedBlob) {
+              $r = @(
+                'CONTROL_DOORBELL_V1'
+                'state: CONTROL_REQUIRED_RUNTIME_UNAVAILABLE'
+                "source_return_request_receipt: $returnId"
+                "active_switch_receipt: $activeSwitchReceipt"
+                "target_control_generation: $targetGeneration"
+                "target_control_conversation_id: $targetConversationId"
+                "first_missing_capability: LOCAL_GPT_SEND_BLOB_MISMATCH_$actualBlob"
+                "workflow_run_id: $env:GITHUB_RUN_ID"
+                'user_relay_count: 0'
+              ) -join [Environment]::NewLine
+              $id = Publish-Receipt $r
+              throw "local sender blob mismatch actual=$actualBlob receipt=$id"
+            }
+
+            $comments = Get-IssueComments 103
+            $durablePrior = @($comments | Where-Object {
+              $_.body -match '(?m)^CONTROL_DOORBELL_V1\s*$' -and
+              $_.body -match '(?m)^state:\s*DELIVERED\s*$' -and
+              $_.body -match "(?m)^source_return_request_receipt:\s*$([regex]::Escape($returnId))\s*$"
+            })
+            if ($durablePrior.Count -gt 1) { throw 'Conflicting duplicate delivered doorbell receipts' }
+            if ($durablePrior.Count -eq 1) {
+              $noop = @(
+                'CONTROL_DOORBELL_V1'
+                'state: NO_OP_DUPLICATE'
+                "source_return_request_receipt: $returnId"
+                "active_switch_receipt: $activeSwitchReceipt"
+                "target_control_generation: $targetGeneration"
+                "target_control_conversation_id: $targetConversationId"
+                "target_control_conversation_url: $targetConversationUrl"
+                'second_physical_send: false'
+                "workflow_run_id: $env:GITHUB_RUN_ID"
+                'user_relay_count: 0'
+              ) -join [Environment]::NewLine
+              $id = Publish-Receipt $noop
+              Assert-DoorbellReceiptReadBack $id $returnId
+              return [pscustomobject]@{ receipt_id = $id; state = 'NO_OP_DUPLICATE'; physical_send_count = 0 }
+            }
+
+            if (Test-Path -LiteralPath $statePath) {
+              $existing = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+              if ($existing.status -eq 'SENT') {
+                $noop = @(
+                  'CONTROL_DOORBELL_V1'
+                  'state: NO_OP_DUPLICATE'
+                  "source_return_request_receipt: $returnId"
+                  "active_switch_receipt: $activeSwitchReceipt"
+                  "target_control_generation: $targetGeneration"
+                  "target_control_conversation_id: $targetConversationId"
+                  "target_control_conversation_url: $targetConversationUrl"
+                  'second_physical_send: false'
+                  "workflow_run_id: $env:GITHUB_RUN_ID"
+                  'user_relay_count: 0'
+                ) -join [Environment]::NewLine
+                $id = Publish-Receipt $noop
+                Assert-DoorbellReceiptReadBack $id $returnId
+                return [pscustomobject]@{ receipt_id = $id; state = 'NO_OP_DUPLICATE'; physical_send_count = 0 }
+              }
+              if ($existing.status -eq 'SENDING') { throw 'Prior state SENDING; UNCERTAIN_SEND / NO_BLIND_RETRY' }
+            }
+
+            $env:GBB_SENDER_PATH = $senderPath
+            $env:GBB_SENDER_SESSION = $senderSession
+            $env:GBB_RUNTIME_ROOT = $runtimeRoot
+            $env:GBB_TARGET_URL = $targetConversationUrl
+            $env:GBB_RETURN_COMMENT_ID = $returnId
+            $env:GBB_ACTIVE_SWITCH = $activeSwitchReceipt
+            $probeScript = @'
+            import { pathToFileURL } from 'node:url';
+            const mod = await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
+            await mod.readBaseline(process.env.GBB_TARGET_URL, { session: process.env.GBB_SENDER_SESSION, allowBackgroundTab: true });
+            console.log(JSON.stringify({ok:true}));
+            '@
+            $probePath = Join-Path $env:RUNNER_TEMP "gbb-control-return-direct-probe-$env:GITHUB_RUN_ID.mjs"
+            Set-Content -LiteralPath $probePath -Value $probeScript -Encoding utf8
+            try {
+              $probe = & node $probePath 2>&1 | Out-String
+              if ($LASTEXITCODE -ne 0) { throw $probe }
+            } catch {
+              $detail = ($_.Exception.Message -replace '[\r\n]+',' ')
+              if ($detail.Length -gt 500) { $detail = $detail.Substring(0,500) }
+              $r = @(
+                'CONTROL_DOORBELL_V1'
+                'state: CONTROL_REQUIRED_RUNTIME_UNAVAILABLE'
+                "source_return_request_receipt: $returnId"
+                "active_switch_receipt: $activeSwitchReceipt"
+                "target_control_generation: $targetGeneration"
+                "target_control_conversation_id: $targetConversationId"
+                "sender_session: $senderSession"
+                'first_missing_capability: CURRENT_PLAYWRIGHT_CONTROL_SESSION_OR_EXACT_CHATGPT_TAB'
+                "diagnostic: $detail"
+                "workflow_run_id: $env:GITHUB_RUN_ID"
+                'user_relay_count: 0'
+              ) -join [Environment]::NewLine
+              $id = Publish-Receipt $r
+              throw "sender preflight failed; receipt=$id"
+            } finally {
+              Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+            }
+
+            $state = @{
+              status = 'SENDING'
+              source_return_request_receipt = $returnId
+              active_switch_receipt = $activeSwitchReceipt
+              target_generation = $targetGeneration
+              target_conversation_id = $targetConversationId
+              workflow_run_id = $env:GITHUB_RUN_ID
+              started_at = (Get-Date).ToString('o')
+            }
+            $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+            $prompt = "Read GitHub directly. D22977/gpt-browser-bridge Issue #103 CONTROL_RETURN_REQUEST_V1 receipt $returnId. Rehydrate current #88/#43/#81 and execute only the current bounded Control-return action. GitHub is authority."
+            $env:GBB_DOORBELL_PROMPT = $prompt
+            $sendScript = @'
+            import { pathToFileURL } from 'node:url';
+            const mod = await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
+            const result = await mod.sendJob({
+              prompt: process.env.GBB_DOORBELL_PROMPT,
+              attempt: 1,
+              conversationUrl: process.env.GBB_TARGET_URL,
+              runtimeRoot: process.env.GBB_RUNTIME_ROOT,
+              session: process.env.GBB_SENDER_SESSION,
+              allowBackgroundTab: true,
+            });
+            console.log(JSON.stringify({job_id: result.job.job_id, job_path: result.jobPath, conversation_url: result.job.conversation_url, prompt_hash: result.job.prompt_hash}));
+            '@
+            $sendPath = Join-Path $env:RUNNER_TEMP "gbb-control-return-direct-send-$env:GITHUB_RUN_ID.mjs"
+            Set-Content -LiteralPath $sendPath -Value $sendScript -Encoding utf8
+            try {
+              $sendOut = (& node $sendPath 2>&1 | Out-String).Trim()
+              if ($LASTEXITCODE -ne 0) { throw $sendOut }
+              $sendJsonLine = ($sendOut -split [Environment]::NewLine | Where-Object { $_.Trim().StartsWith('{') } | Select-Object -Last 1)
+              if (-not $sendJsonLine) { throw "Sender returned no JSON result: $sendOut" }
+              $sent = $sendJsonLine | ConvertFrom-Json
+            } catch {
+              $detail = ($_.Exception.Message -replace '[\r\n]+',' ')
+              if ($detail.Length -gt 500) { $detail = $detail.Substring(0,500) }
+              $r = @(
+                'CONTROL_DOORBELL_V1'
+                'state: UNCERTAIN_SEND'
+                "source_return_request_receipt: $returnId"
+                "active_switch_receipt: $activeSwitchReceipt"
+                "target_control_generation: $targetGeneration"
+                "target_control_conversation_id: $targetConversationId"
+                "sender_session: $senderSession"
+                'no_blind_retry: true'
+                "diagnostic: $detail"
+                "workflow_run_id: $env:GITHUB_RUN_ID"
+                'user_relay_count: 0'
+              ) -join [Environment]::NewLine
+              $id = Publish-Receipt $r
+              throw "physical send uncertain; receipt=$id"
+            } finally {
+              Remove-Item -LiteralPath $sendPath -Force -ErrorAction SilentlyContinue
+            }
+
+            $state.status = 'SENT'
+            $state.sent_at = (Get-Date).ToString('o')
+            $state.sender_job_id = [string]$sent.job_id
+            $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+            $receipt = @(
+              'CONTROL_DOORBELL_V1'
+              'state: DELIVERED'
+              'decision: PASS'
+              "source_return_request_receipt: $returnId"
+              "active_switch_receipt: $activeSwitchReceipt"
+              "target_control_generation: $targetGeneration"
+              "target_control_conversation_id: $targetConversationId"
+              "target_control_conversation_url: $targetConversationUrl"
+              "sender_module_blob: $expectedBlob"
+              "sender_session: $senderSession"
+              "sender_job_id: $($sent.job_id)"
+              "sender_prompt_hash: $($sent.prompt_hash)"
+              "workflow_run_id: $env:GITHUB_RUN_ID"
+              "runner_name: $env:RUNNER_NAME"
+              'physical_send_count: 1'
+              'user_relay_count: 0'
+              'semantic_control_authority: false'
+              'readback_required: true'
+            ) -join [Environment]::NewLine
+            $id = Publish-Receipt $receipt
+            Assert-DoorbellReceiptReadBack $id $returnId
+            return [pscustomobject]@{ receipt_id = $id; state = 'DELIVERED'; physical_send_count = 1 }
+          }
           try {
             $comments = Get-IssueComments 103
             $priorResults = @($comments | Where-Object {
@@ -439,74 +690,83 @@ jobs:
               $body.Contains("source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)")
             })
             if ($requests.Count -gt 1) { throw "CONTROL_REQUIRED_CONFLICTING_RETURN_REQUESTS count=$($requests.Count)" }
+
+            $active = Resolve-ActiveControl
+            $returnId = $null
+            $newReturnCreated = $false
             if ($requests.Count -eq 1) {
-              $extra = @(
-                "existing_return_request_receipt: $($requests[0].id)"
-                'new_return_request_created: false'
-                "watch_elapsed_seconds: $elapsed"
+              $returnId = [string]$requests[0].id
+              $requestBody = [string]$requests[0].body
+              Assert-ReceiptReadBack $returnId 'CONTROL_RETURN_REQUEST_V1'
+              if ($requestBody -notmatch '(?m)^recorded_by_role:\s*HERDR_AUTORETURN_GUARD\s*$') {
+                throw 'CONTROL_REQUIRED_EXISTING_RETURN_REQUEST_IDENTITY_MISMATCH'
+              }
+              $requestGen = [regex]::Match($requestBody, '(?m)^target_control_generation:\s*(\d{3})\s*$')
+              $requestId = [regex]::Match($requestBody, '(?m)^target_control_conversation_id:\s*([0-9a-f-]+)\s*$')
+              $requestUrl = [regex]::Match($requestBody, '(?m)^target_control_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
+              if (-not ($requestGen.Success -and $requestId.Success -and $requestUrl.Success)) {
+                throw 'CONTROL_REQUIRED_EXISTING_RETURN_REQUEST_ROUTING_IDENTITY_MISSING'
+              }
+              if ($requestGen.Groups[1].Value -cne [string]$active.generation -or
+                  $requestId.Groups[1].Value -cne [string]$active.id -or
+                  $requestUrl.Groups[1].Value -cne [string]$active.url) {
+                throw 'CONTROL_REQUIRED_EXISTING_RETURN_REQUEST_ACTIVE_CONTROL_MISMATCH'
+              }
+            } else {
+              $returnIdempotency = "GBB103-G7-AUTORETURN-GUARD-RETURN-$($env:BRIDGE_COMMENT_ID)-20260830"
+              $returnBody = @(
+                'CONTROL_RETURN_REQUEST_V1'
+                'state: RETURN_TO_ACTIVE_CONTROL'
+                'recorded_by_role: HERDR_AUTORETURN_GUARD'
+                "control_generation: $($env:BRIDGE_GENERATION)"
+                "source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)"
+                "source_dispatch_receipt: $($env:BRIDGE_SOURCE_RECEIPT)"
+                "source_delivery_receipt: $($env:BRIDGE_DELIVERY_RECEIPT)"
+                "source_card_id: $($env:BRIDGE_CARD_ID)"
+                "source_action: $($env:BRIDGE_ACTION)"
+                "target_pane: $pane"
+                "target_agent_session: $session"
+                "target_control_generation: $($active.generation)"
+                'target_control_status: ACTIVE'
+                "target_control_conversation_id: $($active.id)"
+                "target_control_conversation_url: $($active.url)"
+                'requested_control_action: Rehydrate the source wake/task terminal and continue the exact current Control action only.'
+                'semantic_control_authority: false'
+                "transport_return_reason: $reason"
+                "target_settle_status: $lastStatus"
+                "target_settle_watch_seconds: $watchSeconds"
+                "target_settle_elapsed_seconds: $elapsed"
+                'user_relay_count: 0'
+                'readback_required: true'
+                "idempotency_key: $returnIdempotency"
               ) -join [Environment]::NewLine
-              $resultId = Publish-GuardResult 'NO_OP_ALREADY_RETURNED' 'PASS' $reason $extra
-              Assert-ReceiptReadBack $resultId 'HERDR_G7_AUTORETURN_GUARD_RESULT_V1'
-              Write-Output "existing CONTROL_RETURN_REQUEST_V1 reused id=$($requests[0].id); guard result=$resultId"
-              exit 0
+              $returnId = Publish-Receipt $returnBody
+              Assert-ReceiptReadBack $returnId 'CONTROL_RETURN_REQUEST_V1'
+              $newReturnCreated = $true
             }
 
-            $issue88 = Get-IssueComments 88
-            $switches = @($issue88 | Where-Object {
-              $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
-              $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
-              $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
-            } | Sort-Object { [int64]$_.id })
-            if ($switches.Count -eq 0) { throw 'CONTROL_REQUIRED_NO_ACTIVE_CONTROL_SWITCH' }
-            $latest = $switches[$switches.Count - 1]
-            $switchBody = [string]$latest.body
-            $activeGen = [regex]::Match($switchBody, '(?m)^new_generation:\s*(\d{3})\s*$')
-            $activeId = [regex]::Match($switchBody, '(?m)^new_conversation_id:\s*([0-9a-f-]+)\s*$')
-            $activeUrl = [regex]::Match($switchBody, '(?m)^new_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
-            if (-not ($activeGen.Success -and $activeId.Success -and $activeUrl.Success)) { throw 'CONTROL_REQUIRED_ACTIVE_CONTROL_ROUTING_IDENTITY_MISSING' }
-            if ($activeGen.Groups[1].Value -cne [string]$env:BRIDGE_GENERATION) { throw "CONTROL_REQUIRED_STALE_GENERATION active=$($activeGen.Groups[1].Value)" }
-
-            $returnIdempotency = "GBB103-G7-AUTORETURN-GUARD-RETURN-$($env:BRIDGE_COMMENT_ID)-20260830"
-            $returnBody = @(
-              'CONTROL_RETURN_REQUEST_V1'
-              'state: RETURN_TO_ACTIVE_CONTROL'
-              'recorded_by_role: HERDR_AUTORETURN_GUARD'
-              "control_generation: $($env:BRIDGE_GENERATION)"
-              "source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)"
-              "source_dispatch_receipt: $($env:BRIDGE_SOURCE_RECEIPT)"
-              "source_delivery_receipt: $($env:BRIDGE_DELIVERY_RECEIPT)"
-              "source_card_id: $($env:BRIDGE_CARD_ID)"
-              "source_action: $($env:BRIDGE_ACTION)"
-              "target_pane: $pane"
-              "target_agent_session: $session"
-              "target_control_generation: $($activeGen.Groups[1].Value)"
-              'target_control_status: ACTIVE'
-              "target_control_conversation_id: $($activeId.Groups[1].Value)"
-              "target_control_conversation_url: $($activeUrl.Groups[1].Value)"
-              'requested_control_action: Rehydrate the source wake/task terminal and continue the exact current Control action only.'
-              'semantic_control_authority: false'
-              "transport_return_reason: $reason"
-              "target_settle_status: $lastStatus"
-              "target_settle_watch_seconds: $watchSeconds"
-              "target_settle_elapsed_seconds: $elapsed"
-              'user_relay_count: 0'
-              'readback_required: true'
-              "idempotency_key: $returnIdempotency"
-            ) -join [Environment]::NewLine
-            $returnId = Publish-Receipt $returnBody
-            Assert-ReceiptReadBack $returnId 'CONTROL_RETURN_REQUEST_V1'
-
-            $extra = @(
-              "generated_return_request_receipt: $returnId"
-              'new_return_request_created: true'
-              "target_control_generation: $($activeGen.Groups[1].Value)"
-              "target_control_conversation_id: $($activeId.Groups[1].Value)"
-              "target_control_conversation_url: $($activeUrl.Groups[1].Value)"
+            $doorbell = Invoke-DirectDoorbell $returnId $active
+            $extraLines = @(
+              if ($newReturnCreated) {
+                "generated_return_request_receipt: $returnId"
+                'new_return_request_created: true'
+              } else {
+                "existing_return_request_receipt: $returnId"
+                'new_return_request_created: false'
+              }
+              "direct_doorbell_receipt: $($doorbell.receipt_id)"
+              "direct_doorbell_state: $($doorbell.state)"
+              "physical_send_count: $($doorbell.physical_send_count)"
+              "target_control_generation: $($active.generation)"
+              "target_control_conversation_id: $($active.id)"
+              "target_control_conversation_url: $($active.url)"
               "watch_elapsed_seconds: $elapsed"
-            ) -join [Environment]::NewLine
-            $resultId = Publish-GuardResult 'RETURN_REQUEST_PUBLISHED' 'PASS' $reason $extra
+            )
+            $extra = $extraLines -join [Environment]::NewLine
+            $resultState = if ($newReturnCreated) { 'RETURN_REQUEST_PUBLISHED' } else { 'NO_OP_ALREADY_RETURNED' }
+            $resultId = Publish-GuardResult $resultState 'PASS' $reason $extra
             Assert-ReceiptReadBack $resultId 'HERDR_G7_AUTORETURN_GUARD_RESULT_V1'
-            Write-Output "generated CONTROL_RETURN_REQUEST_V1 read-back id=$returnId; guard result=$resultId"
+            Write-Output "direct CONTROL_DOORBELL_V1 read-back id=$($doorbell.receipt_id); guard result=$resultId"
           } catch {
             if (-not $script:guardResultPublished) {
               $detail = ($_.Exception.Message -replace '[\r\n]+',' ')
