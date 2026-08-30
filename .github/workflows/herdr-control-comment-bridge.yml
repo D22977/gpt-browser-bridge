@@ -756,18 +756,16 @@ jobs:
               $requestControlGen = [regex]::Match($requestBody, '(?m)^control_generation:\s*(\d{3})\s*$')
               $requestCard = [regex]::Match($requestBody, '(?m)^source_card_id:\s*([A-Za-z0-9_-]+)\s*$')
               $requestDispatch = [regex]::Match($requestBody, '(?m)^source_dispatch_receipt:\s*([0-9]+)\s*$')
-              $requestAction = [regex]::Match($requestBody, '(?m)^source_action:\s*([A-Z_]+)\s*$')
               $requestGen = [regex]::Match($requestBody, '(?m)^target_control_generation:\s*(\d{3})\s*$')
               $requestStatus = [regex]::Match($requestBody, '(?m)^target_control_status:\s*(ACTIVE)\s*$')
               $requestId = [regex]::Match($requestBody, '(?m)^target_control_conversation_id:\s*([0-9a-f-]+)\s*$')
               $requestUrl = [regex]::Match($requestBody, '(?m)^target_control_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
-              if (-not ($requestControlGen.Success -and $requestCard.Success -and $requestDispatch.Success -and $requestAction.Success -and $requestGen.Success -and $requestStatus.Success -and $requestId.Success -and $requestUrl.Success)) {
+              if (-not ($requestControlGen.Success -and $requestCard.Success -and $requestDispatch.Success -and $requestGen.Success -and $requestStatus.Success -and $requestId.Success -and $requestUrl.Success)) {
                 throw 'CONTROL_REQUIRED_EXISTING_RETURN_REQUEST_ROUTING_IDENTITY_MISSING'
               }
               if ($requestControlGen.Groups[1].Value -cne [string]$env:BRIDGE_GENERATION -or
                   $requestCard.Groups[1].Value -cne [string]$env:BRIDGE_CARD_ID -or
                   $requestDispatch.Groups[1].Value -cne [string]$env:BRIDGE_SOURCE_RECEIPT -or
-                  $requestAction.Groups[1].Value -cne [string]$env:BRIDGE_ACTION -or
                   $requestGen.Groups[1].Value -cne [string]$active.generation -or
                   $requestStatus.Groups[1].Value -cne 'ACTIVE' -or
                   $requestId.Groups[1].Value -cne [string]$active.id -or
