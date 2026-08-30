@@ -21,7 +21,7 @@ jobs:
       github.event.comment.author_association == 'OWNER' &&
       startsWith(github.event.comment.body, 'HERDR_CONTROL_WAKE_V1')
     runs-on: [self-hosted, Windows, GBB-REVIEWER]
-    timeout-minutes: 8
+    timeout-minutes: 18
     defaults:
       run:
         shell: pwsh -NoProfile -File {0}
@@ -239,6 +239,9 @@ jobs:
           if ([string]$promptResult.result.agent.pane_id -cne $pane) { throw 'Herdr prompt result pane mismatch' }
           if ([string]$promptResult.result.agent.agent_session.value -cne $session) { throw 'Herdr prompt result session mismatch' }
 
+          "BRIDGE_TARGET_PANE=$pane" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "BRIDGE_TARGET_SESSION=$session" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
           $state.status = 'SENT'
           $state.sent_at = (Get-Date).ToString('o')
           $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
@@ -262,6 +265,7 @@ jobs:
             'readback_required: true'
           ) -join "`n"
           $receiptId = Publish-Receipt $receipt
+          "BRIDGE_DELIVERY_RECEIPT=$receiptId" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           Write-Output "Herdr prompt delivered; receipt=$receiptId pane=$pane session=$session"
 
       - name: Verify durable result read-back
@@ -298,6 +302,225 @@ jobs:
             if ($matches.Count -lt 1) { throw 'Durable bridge delivery receipt missing on read-back' }
             Write-Output "delivery receipt read-back ok count=$($matches.Count) latest=$($matches[-1].id)"
           }
+
+      - name: Auto-return terminal to ACTIVE Control deterministically
+        if: env.BRIDGE_ACTION != 'OBSERVE_INBOUND'
+        env:
+          GH_TOKEN: \${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $pane = [string]$env:BRIDGE_TARGET_PANE
+          $session = [string]$env:BRIDGE_TARGET_SESSION
+          $watchSeconds = 900
+          $pollSeconds = 5
+          $script:guardResultPublished = $false
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-herdr-autoreturn-guard'; Accept = 'application/vnd.github+json' }
+          if ([string]::IsNullOrWhiteSpace($pane) -or [string]::IsNullOrWhiteSpace($session)) { throw 'Missing exact delivered target binding' }
+          if (-not (Test-Path -LiteralPath $herdr)) { throw "Herdr CLI missing: $herdr" }
+
+          function Publish-Receipt([string]$body) {
+            $payload = @{ body = $body } | ConvertTo-Json -Compress
+            $uri = 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/103/comments'
+            $r = Invoke-RestMethod -Uri $uri -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            return [string]$r.id
+          }
+
+          function Add-Flat([object]$value) {
+            if ($null -eq $value) { return }
+            if ($value -is [System.Array]) {
+              foreach ($nested in $value) { Add-Flat $nested }
+              return
+            }
+            [void]$script:commentList.Add($value)
+          }
+
+          function Get-IssueComments([int]$issueNumber) {
+            $script:commentList = [System.Collections.Generic.List[object]]::new()
+            for ($page = 1; $page -le 20; $page++) {
+              $before = $script:commentList.Count
+              $uri = "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/$issueNumber/comments?per_page=100&page=$page"
+              Add-Flat (Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 30)
+              if (($script:commentList.Count - $before) -lt 100) { break }
+            }
+            return @($script:commentList)
+          }
+
+          function Assert-ReceiptReadBack([string]$receiptId, [string]$protocolHeader) {
+            $uri = "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$receiptId"
+            $r = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 30
+            $body = [string]$r.body
+            if ($body -notmatch "(?m)^$([regex]::Escape($protocolHeader))\s*$") { throw "Receipt header read-back mismatch: $receiptId" }
+            if (-not $body.Contains("source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)")) { throw "Receipt source read-back mismatch: $receiptId" }
+          }
+
+          function Publish-GuardResult([string]$state, [string]$decision, [string]$reason, [string]$extra) {
+            $lines = @(
+              'HERDR_G7_AUTORETURN_GUARD_RESULT_V1'
+              "state: $state"
+              "decision: $decision"
+              'recorded_by_role: HERDR_TARGET'
+              "control_generation: $($env:BRIDGE_GENERATION)"
+              "active_switch_receipt: $($env:BRIDGE_SWITCH_RECEIPT)"
+              "source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)"
+              "source_dispatch_receipt: $($env:BRIDGE_SOURCE_RECEIPT)"
+              "source_delivery_receipt: $($env:BRIDGE_DELIVERY_RECEIPT)"
+              "source_authorization_receipt: 5468203790"
+              "card_id: $($env:BRIDGE_CARD_ID)"
+              "action: $($env:BRIDGE_ACTION)"
+              "target_pane: $pane"
+              "target_agent_session: $session"
+              "target_status: $lastStatus"
+              "target_settled: $settled"
+              "watch_seconds: $watchSeconds"
+              "return_reason: $reason"
+              "semantic_control_authority: false"
+              "user_relay_count: 0"
+              "product_mutation: false"
+              "canonical_skill_mutation: false"
+              "review: false"
+              "merge: false"
+              "release: false"
+              "workflow_dispatch: false"
+              "successor_inference: false"
+              'readback_required: true'
+            )
+            if (-not [string]::IsNullOrWhiteSpace($extra)) { $lines += $extra }
+            $lines += 'idempotency_key: GBB103-G7-AUTORETURN-GUARD-RESULT-5468211009-20260830'
+            $id = Publish-Receipt ($lines -join [Environment]::NewLine)
+            $script:guardResultPublished = $true
+            return [string]$id
+          }
+
+          try {
+            $comments = Get-IssueComments 103
+            $priorResults = @($comments | Where-Object {
+              $body = [string]$_.body
+              $body -match '(?m)^HERDR_G7_AUTORETURN_GUARD_RESULT_V1\s*$' -and
+              $body.Contains("source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)")
+            })
+            if ($priorResults.Count -gt 1) { throw "Conflicting duplicate guard results count=$($priorResults.Count)" }
+            if ($priorResults.Count -eq 1) {
+              Assert-ReceiptReadBack ([string]$priorResults[0].id) 'HERDR_G7_AUTORETURN_GUARD_RESULT_V1'
+              Write-Output "existing guard result read-back id=$($priorResults[0].id); no duplicate action"
+              exit 0
+            }
+
+            $started = [DateTimeOffset]::UtcNow
+            $settled = $false
+            $lastStatus = 'UNKNOWN'
+            while (([DateTimeOffset]::UtcNow - $started).TotalSeconds -lt $watchSeconds) {
+              $listRaw = & $herdr agent list
+              if ($LASTEXITCODE -ne 0) { throw "herdr agent list failed exit=$LASTEXITCODE" }
+              $list = $listRaw | ConvertFrom-Json
+              $agents = @($list.result.agents)
+              $matches = @($agents | Where-Object {
+                [string]$_.pane_id -ceq $pane -and
+                [string]$_.agent_session.value -ceq $session
+              })
+              if ($matches.Count -ne 1) { throw "CONTROL_REQUIRED_TARGET_BINDING_MISMATCH matches=$($matches.Count)" }
+              $lastStatus = [string]$matches[0].agent_status
+              if ($lastStatus -match '^(?i:idle|done|blocked)$') {
+                $settled = $true
+                break
+              }
+              if ($lastStatus -notmatch '^(?i:working|running|busy|starting|waiting)$') {
+                throw "CONTROL_REQUIRED_UNEXPECTED_TARGET_STATUS status=$lastStatus"
+              }
+              Start-Sleep -Seconds $pollSeconds
+            }
+            $elapsed = [int][Math]::Round(([DateTimeOffset]::UtcNow - $started).TotalSeconds)
+            $reason = if ($settled) { 'TARGET_SETTLED_WITHOUT_CONTROL_RETURN_REQUEST' } else { 'TARGET_NOT_SETTLED_WITHIN_WATCH_WINDOW' }
+
+            $comments = Get-IssueComments 103
+            $requests = @($comments | Where-Object {
+              $body = [string]$_.body
+              $body -match '(?m)^CONTROL_RETURN_REQUEST_V1\s*$' -and
+              $body.Contains("source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)")
+            })
+            if ($requests.Count -gt 1) { throw "CONTROL_REQUIRED_CONFLICTING_RETURN_REQUESTS count=$($requests.Count)" }
+            if ($requests.Count -eq 1) {
+              $extra = @(
+                "existing_return_request_receipt: $($requests[0].id)"
+                'new_return_request_created: false'
+                "watch_elapsed_seconds: $elapsed"
+              ) -join [Environment]::NewLine
+              $resultId = Publish-GuardResult 'NO_OP_ALREADY_RETURNED' 'PASS' $reason $extra
+              Assert-ReceiptReadBack $resultId 'HERDR_G7_AUTORETURN_GUARD_RESULT_V1'
+              Write-Output "existing CONTROL_RETURN_REQUEST_V1 reused id=$($requests[0].id); guard result=$resultId"
+              exit 0
+            }
+
+            $issue88 = Get-IssueComments 88
+            $switches = @($issue88 | Where-Object {
+              $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+              $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
+              $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
+            } | Sort-Object { [int64]$_.id })
+            if ($switches.Count -eq 0) { throw 'CONTROL_REQUIRED_NO_ACTIVE_CONTROL_SWITCH' }
+            $latest = $switches[$switches.Count - 1]
+            $switchBody = [string]$latest.body
+            $activeGen = [regex]::Match($switchBody, '(?m)^new_generation:\s*(\d{3})\s*$')
+            $activeId = [regex]::Match($switchBody, '(?m)^new_conversation_id:\s*([0-9a-f-]+)\s*$')
+            $activeUrl = [regex]::Match($switchBody, '(?m)^new_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
+            if (-not ($activeGen.Success -and $activeId.Success -and $activeUrl.Success)) { throw 'CONTROL_REQUIRED_ACTIVE_CONTROL_ROUTING_IDENTITY_MISSING' }
+            if ($activeGen.Groups[1].Value -cne [string]$env:BRIDGE_GENERATION) { throw "CONTROL_REQUIRED_STALE_GENERATION active=$($activeGen.Groups[1].Value)" }
+
+            $returnIdempotency = "GBB103-G7-AUTORETURN-GUARD-RETURN-$($env:BRIDGE_COMMENT_ID)-20260830"
+            $returnBody = @(
+              'CONTROL_RETURN_REQUEST_V1'
+              'state: RETURN_TO_ACTIVE_CONTROL'
+              'recorded_by_role: HERDR_AUTORETURN_GUARD'
+              "control_generation: $($env:BRIDGE_GENERATION)"
+              "source_wake_comment_id: $($env:BRIDGE_COMMENT_ID)"
+              "source_dispatch_receipt: $($env:BRIDGE_SOURCE_RECEIPT)"
+              "source_delivery_receipt: $($env:BRIDGE_DELIVERY_RECEIPT)"
+              "source_card_id: $($env:BRIDGE_CARD_ID)"
+              "source_action: $($env:BRIDGE_ACTION)"
+              "target_pane: $pane"
+              "target_agent_session: $session"
+              "target_control_generation: $($activeGen.Groups[1].Value)"
+              'target_control_status: ACTIVE'
+              "target_control_conversation_id: $($activeId.Groups[1].Value)"
+              "target_control_conversation_url: $($activeUrl.Groups[1].Value)"
+              'requested_control_action: Rehydrate the source wake/task terminal and continue the exact current Control action only.'
+              'semantic_control_authority: false'
+              "transport_return_reason: $reason"
+              "target_settle_status: $lastStatus"
+              "target_settle_watch_seconds: $watchSeconds"
+              "target_settle_elapsed_seconds: $elapsed"
+              'user_relay_count: 0'
+              'readback_required: true'
+              "idempotency_key: $returnIdempotency"
+            ) -join [Environment]::NewLine
+            $returnId = Publish-Receipt $returnBody
+            Assert-ReceiptReadBack $returnId 'CONTROL_RETURN_REQUEST_V1'
+
+            $extra = @(
+              "generated_return_request_receipt: $returnId"
+              'new_return_request_created: true'
+              "target_control_generation: $($activeGen.Groups[1].Value)"
+              "target_control_conversation_id: $($activeId.Groups[1].Value)"
+              "target_control_conversation_url: $($activeUrl.Groups[1].Value)"
+              "watch_elapsed_seconds: $elapsed"
+            ) -join [Environment]::NewLine
+            $resultId = Publish-GuardResult 'RETURN_REQUEST_PUBLISHED' 'PASS' $reason $extra
+            Assert-ReceiptReadBack $resultId 'HERDR_G7_AUTORETURN_GUARD_RESULT_V1'
+            Write-Output "generated CONTROL_RETURN_REQUEST_V1 read-back id=$returnId; guard result=$resultId"
+          } catch {
+            if (-not $script:guardResultPublished) {
+              $detail = ($_.Exception.Message -replace '[\r\n]+',' ')
+              if ($detail.Length -gt 500) { $detail = $detail.Substring(0,500) }
+              try {
+                $resultId = Publish-GuardResult 'CONTROL_REQUIRED' 'BLOCKED' 'CONTROL_REQUIRED' "first_missing_capability: $detail"
+                Write-Output "typed CONTROL_REQUIRED guard result=$resultId"
+              } catch {
+                Write-Output "unable to publish typed guard result: $($_.Exception.Message)"
+              }
+            }
+            throw
+          }
+
 
   control-return-doorbell:
     name: GBB Control Return Doorbell Transport
