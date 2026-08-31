@@ -1,0 +1,248 @@
+name: GBB G8 Issue114 One-Shot Herdr Transport
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: gbb-g8-issue114-transport-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  issue114-transport:
+    name: G8 Issue114 Herdr Transport
+    if: >-
+      github.event.issue.number == 114 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'HERDR_G8_ISSUE114_TRANSPORT_RESTORE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+
+    steps:
+      - name: Validate exact current authority and pending Worker state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          if ($event.repository.full_name -cne 'D22977/gpt-browser-bridge') { throw 'Wrong repository' }
+          if ([int]$event.issue.number -ne 114) { throw 'Wrong issue' }
+          if ($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong actor' }
+
+          $body = [string]$event.comment.body
+          $required = @(
+            '(?m)^HERDR_G8_ISSUE114_TRANSPORT_RESTORE_V1\s*$',
+            '(?m)^control_generation:\s*008\s*$',
+            '(?m)^source_transport_repair_authority:\s*5474684815\s*$',
+            '(?m)^source_worker_dispatch:\s*5472681523\s*$',
+            '(?m)^exact_base_H:\s*4d913a46daf0ab375c49d0f04de7a991110ce630\s*$',
+            '(?m)^target_issue:\s*114\s*$',
+            '(?m)^idempotency_key:\s*GBB114-G8-HERDR-TRANSPORT-RESTORE-20260831-01\s*$'
+          )
+          foreach ($r in $required) { if ($body -notmatch $r) { throw "Malformed restore event: $r" } }
+
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-g8-issue114-transport'; Accept = 'application/vnd.github+json' }
+          function Get-AllComments([int]$issue) {
+            $all = [System.Collections.Generic.List[object]]::new()
+            for ($p = 1; $p -le 30; $p++) {
+              $batch = @(Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/$issue/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30)
+              foreach ($x in $batch) { [void]$all.Add($x) }
+              if ($batch.Count -lt 100) { break }
+            }
+            return $all.ToArray()
+          }
+
+          $switches = @(Get-AllComments 88 | Where-Object {
+            $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+            $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
+            $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
+          } | Sort-Object { [int64]$_.id })
+          if ($switches.Count -eq 0) { throw 'No ACTIVE Control switch' }
+          $latestSwitch = $switches[-1]
+          if ([string]$latestSwitch.id -cne '5468566845') { throw "Current switch drifted to $($latestSwitch.id)" }
+          $gm = [regex]::Match([string]$latestSwitch.body, '(?m)^new_generation:\s*(\d{3})\s*$')
+          if (-not $gm.Success -or $gm.Groups[1].Value -cne '008') { throw 'Generation008 not ACTIVE' }
+
+          $c114 = @(Get-AllComments 114)
+          if (-not ($c114 | Where-Object { [string]$_.id -eq '5474684815' })) { throw 'Transport repair authority missing' }
+          if (-not ($c114 | Where-Object { [string]$_.id -eq '5472681523' })) { throw 'Worker dispatch missing' }
+          $terminal = @($c114 | Where-Object {
+            [int64]$_.id -gt 5472681523 -and (
+              $_.body -match '(?m)^CONTROL_TOWER_A0_REPAIR_CONSUMED_STARTED_V1\s*$' -or
+              $_.body -match '(?m)^CONTROL_TOWER_A0_REPAIR_READY_FOR_FRESH_REVIEW_V1\s*$' -or
+              $_.body -match '(?m)^(LOCAL_CONTROL_RETURN_V1|CONTROL_REQUIRED)\s*$'
+            )
+          })
+          if ($terminal.Count -gt 0) { throw "Issue114 already advanced via receipt $($terminal[-1].id)" }
+
+          try {
+            $null = Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/branches/control-tower%2Fv4.1-a0-premerge-cleanup-r1' -Headers $headers -Method Get -TimeoutSec 30
+            throw 'Repair branch already exists; do not transport old pending wake'
+          } catch {
+            $status = $_.Exception.Response.StatusCode.value__
+            if ($status -ne 404) {
+              if ($_.Exception.Message -eq 'Repair branch already exists; do not transport old pending wake') { throw }
+              throw "Branch preflight failed: $($_.Exception.Message)"
+            }
+          }
+
+          $whoami = (& whoami).Trim()
+          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+          $sid = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+          if ($whoami -notmatch '(?i)^d22977\\lupun$') { throw "Unexpected Windows user: $whoami" }
+          if ($identity -notmatch '(?i)^d22977\\lupun$') { throw "Unexpected Windows identity: $identity" }
+          if (-not [Environment]::UserInteractive -or $sid -eq 0) { throw 'Runner is not interactive' }
+          if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "Unexpected runner $env:RUNNER_NAME" }
+
+          "TRANSPORT_COMMENT_ID=$($event.comment.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "authority validated generation=008 switch=$($latestSwitch.id) issue=114"
+
+      - name: Resolve current Herdr target and send exactly once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          if (-not (Test-Path -LiteralPath $herdr)) { throw 'Herdr CLI missing' }
+
+          $version = (& $herdr --version 2>&1 | Out-String).Trim()
+          $raw = (& $herdr agent list 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw 'herdr agent list failed' }
+          $list = $raw | ConvertFrom-Json
+          $targets = @($list.result.agents | Where-Object {
+            [string]$_.pane_id -eq 'w2:p1' -and [string]$_.agent_status -eq 'idle'
+          })
+          if ($targets.Count -ne 1) { throw "Exact current idle Herdr target w2:p1 missing/ambiguous count=$($targets.Count)" }
+          $target = $targets[0]
+          $session = [string]$target.agent_session.value
+          if ([string]::IsNullOrWhiteSpace($session)) { throw 'Current Herdr target session missing' }
+
+          $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g8-issue114-transport\state'
+          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+          $statePath = Join-Path $stateRoot "$env:TRANSPORT_COMMENT_ID.json"
+          if (Test-Path -LiteralPath $statePath) {
+            $s = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            if ($s.status -eq 'SENT') { Write-Output 'NO_OP_DUPLICATE'; exit 0 }
+            if ($s.status -eq 'SENDING') { throw 'UNCERTAIN_SEND / NO_BLIND_RETRY' }
+          }
+          @{status='SENDING';pane_id='w2:p1';agent_session=$session;workflow_run_id=$env:GITHUB_RUN_ID} | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+          $prompt = "Read GitHub directly. Rehydrate D22977/gpt-browser-bridge Issue #114 current authority, especially transport-repair authority 5474684815 and Worker dispatch 5472681523. This message is transport only, not authority. Perform ACCESS_CAPABILITY_CHECK_V1. Before any tracked mutation, self-publish/read-back CONTROL_TOWER_A0_REPAIR_CONSUMED_STARTED_V1 on Issue #114 binding source_transport_comment_id: $env:TRANSPORT_COMMENT_ID, control_generation: 008, exact_base_H: 4d913a46daf0ab375c49d0f04de7a991110ce630, branch: control-tower/v4.1-a0-premerge-cleanup-r1, herdr_pane: w2:p1, herdr_agent_session: $session, user_relay_count: 0. Then execute only Issue #114 exact Worker scope and terminal contract, or publish LOCAL_CONTROL_RETURN_V1 / CONTROL_REQUIRED with source_transport_comment_id: $env:TRANSPORT_COMMENT_ID and the exact blocker. Do not review, merge, release, canonicalize, rotate, or mutate default. GitHub is authority."
+          $sent = (& $herdr agent prompt 'w2:p1' $prompt 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "herdr agent prompt failed; state remains SENDING; NO_BLIND_RETRY: $sent" }
+          $r = $sent | ConvertFrom-Json
+          if ($r.result.type -ne 'agent_prompted' -or [string]$r.result.agent.pane_id -cne 'w2:p1' -or [string]$r.result.agent.agent_session.value -cne $session) { throw 'Prompt identity/result mismatch' }
+          @{status='SENT';pane_id='w2:p1';agent_session=$session;workflow_run_id=$env:GITHUB_RUN_ID;sent_at=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-g8-issue114-transport'; Accept = 'application/vnd.github+json' }
+          $receipt = @(
+            'HERDR_G8_ISSUE114_TRANSPORT_DELIVERY_V1',
+            'state: SENT_WAIT_WORKER_CONSUMED_START',
+            'control_generation: 008',
+            'source_transport_repair_authority: 5474684815',
+            "source_transport_comment_id: $env:TRANSPORT_COMMENT_ID",
+            'source_worker_dispatch: 5472681523',
+            'target_pane: w2:p1',
+            "target_agent_session: $session",
+            "herdr_version: $version",
+            "workflow_run_id: $env:GITHUB_RUN_ID",
+            'physical_prompt_count_this_event: 1',
+            'blind_retry: false',
+            'user_relay_count: 0',
+            'readback_required: true'
+          ) -join "`n"
+          $payload = @{ body = $receipt } | ConvertTo-Json -Compress
+          $pub = Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/114/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+          $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($pub.id)" -Headers $headers -Method Get -TimeoutSec 30
+          if ([string]$rb.body -cne $receipt) { throw 'Transport receipt readback mismatch' }
+          "TRANSPORT_RECEIPT_ID=$($pub.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TARGET_SESSION=$session" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "Herdr prompt sent exactly once; receipt=$($pub.id)"
+
+      - name: Require Worker-owned durable start or typed return
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-g8-issue114-transport'; Accept = 'application/vnd.github+json' }
+          function Get-AllComments {
+            $all = [System.Collections.Generic.List[object]]::new()
+            for ($p=1; $p -le 30; $p++) {
+              $batch = @(Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/114/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30)
+              foreach ($x in $batch) { [void]$all.Add($x) }
+              if ($batch.Count -lt 100) { break }
+            }
+            return $all.ToArray()
+          }
+          function Publish([string]$text) {
+            $payload = @{ body = $text } | ConvertTo-Json -Compress
+            $r = Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/114/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            return [string]$r.id
+          }
+
+          $start = [DateTimeOffset]::UtcNow
+          while (([DateTimeOffset]::UtcNow - $start).TotalSeconds -lt 480) {
+            $comments = @(Get-AllComments)
+            $bound = @($comments | Where-Object {
+              [int64]$_.id -gt [int64]$env:TRANSPORT_COMMENT_ID -and ([string]$_.body).Contains("source_transport_comment_id: $env:TRANSPORT_COMMENT_ID")
+            } | Sort-Object { [int64]$_.id })
+            $ok = @($bound | Where-Object { $_.body -match '(?m)^CONTROL_TOWER_A0_REPAIR_CONSUMED_STARTED_V1\s*$' })
+            if ($ok.Count -eq 1) {
+              $body = @(
+                'CONTROL_G8_ISSUE114_TRANSPORT_GUARD_RESULT_V1',
+                'state: PASS_PHYSICAL_CONSUME',
+                'decision: PASS',
+                'control_generation: 008',
+                "source_transport_comment_id: $env:TRANSPORT_COMMENT_ID",
+                "source_transport_receipt: $env:TRANSPORT_RECEIPT_ID",
+                "target_consumed_start_receipt: $($ok[0].id)",
+                "target_agent_session: $env:TARGET_SESSION",
+                'user_relay_count: 0',
+                'readback_required: true'
+              ) -join "`n"
+              $id = Publish $body
+              Write-Output "Worker consumed-start observed receipt=$($ok[0].id) guard=$id"
+              exit 0
+            }
+            if ($ok.Count -gt 1) { throw 'Conflicting duplicate consumed-start receipts' }
+            $ret = @($bound | Where-Object { $_.body -match '(?m)^(LOCAL_CONTROL_RETURN_V1|CONTROL_REQUIRED)\s*$' })
+            if ($ret.Count -gt 0) {
+              $body = @(
+                'CONTROL_G8_ISSUE114_TRANSPORT_GUARD_RESULT_V1',
+                'state: CONTROL_REQUIRED',
+                'decision: CONTROL_REQUIRED',
+                'control_generation: 008',
+                "source_transport_comment_id: $env:TRANSPORT_COMMENT_ID",
+                "source_transport_receipt: $env:TRANSPORT_RECEIPT_ID",
+                "target_return_receipt: $($ret[-1].id)",
+                'user_relay_count: 0'
+              ) -join "`n"
+              $id = Publish $body
+              throw "Worker typed return observed receipt=$($ret[-1].id) guard=$id"
+            }
+            Start-Sleep -Seconds 5
+          }
+
+          $body = @(
+            'CONTROL_G8_ISSUE114_TRANSPORT_GUARD_RESULT_V1',
+            'state: CONTROL_REQUIRED_NO_BOUND_WORKER_START',
+            'decision: CONTROL_REQUIRED',
+            'control_generation: 008',
+            "source_transport_comment_id: $env:TRANSPORT_COMMENT_ID",
+            "source_transport_receipt: $env:TRANSPORT_RECEIPT_ID",
+            "target_pane: w2:p1",
+            "target_agent_session: $env:TARGET_SESSION",
+            'first_missing_capability: WORKER_DURABLE_CONSUMED_START_AFTER_PHYSICAL_PROMPT',
+            'blind_retry: false',
+            'user_relay_count: 0'
+          ) -join "`n"
+          $id = Publish $body
+          throw "No bound Worker start observed; guard=$id"
