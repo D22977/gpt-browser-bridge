@@ -18,7 +18,7 @@ during normal cold start unless the matching lineage is required.
 | PR98 Control acceptance | Issue #101 receipt `5463565634` | accepted predecessor | does not integrate v4.1 or authorize merge |
 | v4.1 owner requirements | Issue #43 receipts `5465071194` and `5465120337` | durable owner/control requirements | live reread required before use |
 | current Control-return amendment | Issue #43 receipt `5466283422` | current architecture correction | local problem returns to ACTIVE Control first |
-| current implementation dispatch | Issue #102 receipt `5466285546` | `DISPATCH_REQUEST_WRITTEN_NOT_CONSUMED` | consume only this V2 after current access and freshness gates |
+| historical G6/G7 implementation dispatch | Issue #102 receipt `5466285546` and older G6/G7 dispatch lineage | HISTORICAL/SUPERSEDED | never select as a current executable command; resolve execution only from the newest live GitHub Control/current-task authority |
 | v4.1 Worker terminal shape | `CONTROL_SKILL_V4_1_READY_FOR_FRESH_REVIEW_V1` | exact single terminal required by Issue #102 | publish once after fresh verification; stop at fresh independent review |
 
 Every mutable item above remains subject to a fresh GitHub reread. An archive pointer

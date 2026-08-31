@@ -83,3 +83,30 @@ The terminal #97 record replaces any earlier lifecycle wording. Do not treat #97
 ## Archive handling contract
 
 Every future record must include an archive ID, exact repo-qualified receipt or file identity, executor/surface, exact error or stale claim, classification, superseded_by receipts when applicable, current selection rule, and the observed identity/time or live_reread_required rule. The archive remains default-excluded.
+
+### FA-006 — stale G6/G7 Issue #102 implementation dispatch
+
+- historical_source: D22977/gpt-browser-bridge#102 receipt `5465137878`
+- historical_state: stale/superseded implementation dispatch
+- classification: HISTORICAL_SUPERSEDED_DISPATCH
+- superseded_by: D22977/gpt-browser-bridge#102 receipt `5465743605`
+- current_rule: this G6 dispatch and its command text are diagnostic lineage only; current executable authority must be selected from the newest live GitHub Control/current-task receipt after exact access and freshness checks.
+- live_reread_required: true
+
+### FA-007 — old Grok blocking/hold behavior
+
+- historical_source: D22977/gpt-browser-bridge#54 receipt `5231593051` and related historical Grok hold lineage
+- historical_state: blocking/hold behavior for an optional external lane
+- classification: HISTORICAL_OPTIONAL_ADVISORY_BLOCK
+- superseded_by: D22977/gpt-browser-bridge#43 receipt `5466226768` / nonblocking-advisory policy
+- current_rule: a historical Grok outage, quota, or hold cannot block an otherwise valid PRIMARY path; check current liveness at actual use and keep optional advisory failure separate from a project blocker.
+- live_reread_required: true
+
+### FA-008 — superseded #108 transport blocker
+
+- historical_source: D22977/gpt-browser-bridge#108 receipt `5471735198`
+- historical_state: transport blocker for an earlier physical direction
+- classification: HISTORICAL_SUPERSEDED_TRANSPORT_BLOCKER
+- superseded_by: D22977/gpt-browser-bridge#108 receipt `5471942408` / owner clarification for the current physical direction
+- current_rule: the older blocker cannot override the newer transport authority; reread the current #108 direction and exact target before any transport action.
+- live_reread_required: true

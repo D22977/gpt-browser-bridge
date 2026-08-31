@@ -532,6 +532,65 @@ test("BH10 normal handoff keeps user and owner courier counts at zero", async ()
   assert.match(text, /owner_courier_count[^\\n]*0/);
 });
 
+async function readA0RepairFiles() {
+  const root = new URL("../skills/control-tower/", import.meta.url);
+  const names = [
+    "HANDOFF.md",
+    "FAILURE_ARCHIVE.md",
+    "archive/CONTROL_SKILL_LINEAGE.md",
+  ];
+  const entries = await Promise.all(
+    names.map(async (name) => [name, await readFile(new URL(name, root), "utf8")])
+  );
+  return Object.fromEntries(entries);
+}
+
+
+test("A0 R01 historical implementation base is not a permanent current-head gate", async () => {
+  const files = await readA0RepairFiles();
+  assert.match(files["HANDOFF.md"], /bind its current ref, commit head, and Git blob SHA|current canonical Skill/i);
+  assert.match(files["HANDOFF.md"], /aa785ff[\s\S]*historical|historical[\s\S]*aa785ff/i);
+  assert.doesNotMatch(
+    files["HANDOFF.md"],
+    /observed implementation base[\s\S]*aa785ff[\s\S]*fail closed if a live reread differs/i
+  );
+  assert.match(files["HANDOFF.md"], /fail closed only on[\s\S]*canonical.*mismatch/i);
+});
+
+test("A0 R02 obsolete G6/G7 dispatch wording is historical and not executable authority", async () => {
+  const lineage = (await readA0RepairFiles())["archive/CONTROL_SKILL_LINEAGE.md"];
+  assert.match(lineage, /5466285546/);
+  assert.match(lineage, /HISTORICAL|SUPERSEDED/);
+  assert.doesNotMatch(lineage, /^\| current implementation dispatch \|/im);
+  assert.doesNotMatch(lineage, /consume only this V2/);
+  assert.match(lineage, /newest live GitHub Control|current.*GitHub.*authority/i);
+});
+
+test("A0 R03 archived recurrence records remain diagnostic and point to newer rules", async () => {
+  const archive = (await readA0RepairFiles())["FAILURE_ARCHIVE.md"];
+  for (const [source, superseded] of [
+    ["5465137878", "5465743605"],
+    ["5466226768", "nonblocking"],
+    ["5471735198", "5471942408"],
+  ]) {
+    assert.match(archive, new RegExp(source));
+    assert.match(archive, new RegExp(superseded, "i"));
+  }
+  assert.match(archive, /Default exclusion rule/i);
+  assert.match(archive, /diagnostic.*only|historical.*diagnostic/i);
+  assert.match(archive, /live GitHub reread|live_reread_required/i);
+  assert.match(archive, /historical Grok|Grok.*outage[\s\S]*not.*block|nonblocking.*primary/i);
+});
+
+test("A0 R04 repair coverage is limited to the four authorized tracked paths", async () => {
+  const files = await readA0RepairFiles();
+  const source = Object.values(files).join("\\n");
+  assert.match(source, /default-excluded/i);
+  assert.match(source, /current-use rule/i);
+  assert.match(source, /No other tracked path may change|four allowed tracked paths|allowed.*tracked.*paths/i);
+});
+
+
 test("Reviewer canary workflow is a static, read-only, fail-closed runner contract", async () => {
   const source = await readFile(
     new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),

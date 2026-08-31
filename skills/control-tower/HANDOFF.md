@@ -7,10 +7,10 @@ Status: CANDIDATE only. This document is a navigation pointer, not a replacement
 Read these items in this order after a new Control conversation, generation handoff, process restart, recovered session, or local-adapter transition:
 
 1. HANDOFF navigation only: use this file to locate the authoritative material; do not use its phase, gate, or next-action wording as authority.
-2. Admitted canonical Skill identity: read the live D22977/gpt-browser-bridge skills/control-tower/SKILL.md and bind its current ref, commit head, and Git blob SHA. The observed implementation base for this candidate is review-base/gbb-gh-01, head aa785ffae9122bf824bdbd9a57ac85a7f88f132e, blob babbb3f704b852f499d96d2cb1ac7493e71cc851; fail closed if a live reread differs.
+2. Admitted canonical Skill identity: read the live D22977/gpt-browser-bridge skills/control-tower/SKILL.md and bind its current ref, commit head, and Git blob SHA. The aa785ffae9122bf824bdbd9a57ac85a7f88f132e implementation-base reference is historical lineage/evidence only; a reviewed default-head advance does not by itself make the current identity stale. Fail closed only on an actual live canonical Skill identity/blob mismatch or a current-authority mismatch.
 3. SUCCESS_EVIDENCE_INDEX: admit only exact PASS or PROVEN_BOUNDED evidence and read the exact receipt needed for the current task.
 4. INVARIANTS_AND_LESSONS: read the typed source-state lessons after SUCCESS; they preserve constraints but grant no capability authority.
-5. Current project durable Control/current-start-here + product/card identity: read the newest non-superseded GitHub Control/current-start-here pointer, then bind the current candidate, Issue #102 card, PR #98 predecessor, implementation branch, exact base, and head.
+5. Current project durable Control/current-start-here + product/card identity: read the newest non-superseded GitHub Control/current-start-here pointer, then bind the current task/card, PR or predecessor lineage, implementation branch, exact base, and head from that live authority.
 6. Exact task evidence/liveness: read only the receipts and current liveness needed by this task; classify capability, binding/liveness, transport, and reviewer orchestration separately.
 7. FAILURE_ARCHIVE only for matching diagnostic/reviewer lineage/owner request: open only the exact matching entry when a current error, independent reviewer, or explicit owner request requires it.
 
@@ -20,7 +20,7 @@ The seventh item is conditional. Do not replay the archive during normal rehydra
 
 Reading order does not change authority precedence. Current owner instruction for the live interaction and current durable GitHub authority outrank this pointer. A stale pointer must be ignored and reported as stale rather than used to choose work.
 
-This candidate carries forward the reviewed PR #98 semantics from head 015a8ad4e7877eca98669b0099184c0885b2b538 onto the Issue #102 implementation branch. The current card and branch/head are live inputs; a fresh Control must reread them before use. Mutable branch, card, review, and lifecycle claims require an observed identity and time or an explicit live_reread_required rule.
+This candidate carries forward the reviewed PR #98 semantics from head 015a8ad4e7877eca98669b0099184c0885b2b538 as historical predecessor lineage. The current card and branch/head are live inputs; a fresh Control must reread them before use. Mutable branch, card, review, and lifecycle claims require an observed identity and time or an explicit live_reread_required rule.
 
 ## Direct canonical use and exit facts
 
@@ -52,3 +52,16 @@ and `BH01`-`BH10`. Those sections are the candidate contract and negative gates;
 this landing file remains navigation only and cannot authorize a wake, repair,
 review, merge, release, or successor.
 
+
+## A0 bounded repair scope
+
+The Issue #114 live card is the sole authority for this pre-merge repair. Its
+R01-R04 Worker mutation is limited to these four tracked paths:
+
+- `skills/control-tower/HANDOFF.md`
+- `skills/control-tower/FAILURE_ARCHIVE.md`
+- `skills/control-tower/archive/CONTROL_SKILL_LINEAGE.md`
+- `tests/contracts.test.mjs`
+
+No other tracked path may change. The canonical `skills/control-tower/SKILL.md`
+and the default branch remain outside this Worker scope.
