@@ -172,11 +172,11 @@ jobs:
           $env:GBB_RUNTIME_ROOT = $runtimeRoot
           $env:GBB_TARGET_URL = $env:TARGET_CONVERSATION_URL
           $probeScript = @'
-import { pathToFileURL } from 'node:url';
-const mod = await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
-await mod.readBaseline(process.env.GBB_TARGET_URL, { session: process.env.GBB_SENDER_SESSION, allowBackgroundTab: true });
-console.log(JSON.stringify({ok:true}));
-'@
+          import { pathToFileURL } from 'node:url';
+          const mod = await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
+          await mod.readBaseline(process.env.GBB_TARGET_URL, { session: process.env.GBB_SENDER_SESSION, allowBackgroundTab: true });
+          console.log(JSON.stringify({ok:true}));
+          '@
           $probePath = Join-Path $env:RUNNER_TEMP "gbb-control-return-probe-$env:GITHUB_RUN_ID.mjs"
           Set-Content -LiteralPath $probePath -Value $probeScript -Encoding utf8
           try {
@@ -194,11 +194,11 @@ console.log(JSON.stringify({ok:true}));
           @{ status='SENDING'; source_return_request_receipt=$env:RETURN_COMMENT_ID; source_issue=$env:RETURN_ISSUE; source_head=$env:RETURN_HEAD; workflow_run_id=$env:GITHUB_RUN_ID; started_at=(Get-Date).ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
           $env:GBB_DOORBELL_PROMPT = "Read GitHub directly. D22977/gpt-browser-bridge Issue #$($env:RETURN_ISSUE) CONTROL_RETURN_REQUEST_V1 receipt $($env:RETURN_COMMENT_ID). Rehydrate current #88/#43/#81, bind source head $($env:RETURN_HEAD), and publish/read-back CONTROL_RETURN_ACK_V1 on the same issue bound to this return receipt and current ACTIVE generation. GitHub is authority."
           $sendScript = @'
-import { pathToFileURL } from 'node:url';
-const mod = await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
-const result = await mod.sendJob({ prompt: process.env.GBB_DOORBELL_PROMPT, attempt: 1, conversationUrl: process.env.GBB_TARGET_URL, runtimeRoot: process.env.GBB_RUNTIME_ROOT, session: process.env.GBB_SENDER_SESSION, allowBackgroundTab: true });
-console.log(JSON.stringify({job_id: result.job.job_id, prompt_hash: result.job.prompt_hash}));
-'@
+          import { pathToFileURL } from 'node:url';
+          const mod = await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
+          const result = await mod.sendJob({ prompt: process.env.GBB_DOORBELL_PROMPT, attempt: 1, conversationUrl: process.env.GBB_TARGET_URL, runtimeRoot: process.env.GBB_RUNTIME_ROOT, session: process.env.GBB_SENDER_SESSION, allowBackgroundTab: true });
+          console.log(JSON.stringify({job_id: result.job.job_id, prompt_hash: result.job.prompt_hash}));
+          '@
           $sendPath = Join-Path $env:RUNNER_TEMP "gbb-control-return-send-$env:GITHUB_RUN_ID.mjs"
           Set-Content -LiteralPath $sendPath -Value $sendScript -Encoding utf8
           try {
