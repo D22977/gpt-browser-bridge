@@ -112,7 +112,7 @@ jobs:
           $senderRel = 'src/gpt_send.mjs'
           $senderPath = Join-Path $repoRoot $senderRel
           $expectedBlob = '6b7a523f98a9655ba2ca28f42696b80da365c92b'
-          $senderSession = 'gbb-temp-control-doorbell-00'
+          $senderSession = 'HERDR-DOORBELL-DB01-G1-20260816'
           $runtimeRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\github-event-control-return'
           $stateRoot = Join-Path $runtimeRoot 'state'
           New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
