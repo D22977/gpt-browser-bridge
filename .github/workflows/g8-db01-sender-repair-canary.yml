@@ -1,320 +1,114 @@
-name: G8 DB01 Sender Composer Repair
+name: G8 DB01 Local Dirty Readonly Diagnostic
 
 on:
   issue_comment:
     types: [created]
 
 permissions:
-  contents: write
+  contents: read
   issues: write
 
 concurrency:
-  group: g8-db01-sender-repair-${{ github.event.comment.id }}
+  group: g8-db01-local-dirty-readonly-${{ github.event.comment.id }}
   cancel-in-progress: false
 
 jobs:
-  repair:
-    name: G8 DB01 Sender Composer Repair
+  diagnose:
+    name: G8 DB01 Local Dirty Readonly Diagnostic
     if: >-
       github.event.issue.number == 114 &&
       github.event.comment.user.login == 'D22977' &&
       github.event.comment.author_association == 'OWNER' &&
-      startsWith(github.event.comment.body, 'CONTROL_G8_DB01_SENDER_COMPOSER_REPAIR_EXECUTE_V1')
+      startsWith(github.event.comment.body, 'CONTROL_G8_DB01_LOCAL_DIRTY_READONLY_DIAGNOSTIC_EXECUTE_V1')
     runs-on: [self-hosted, Windows, GBB-REVIEWER]
-    timeout-minutes: 20
+    timeout-minutes: 10
     defaults:
       run:
         shell: pwsh -NoProfile -File {0}
     steps:
-      - name: Patch, test, deploy exact local runtime, push, and self-clean
+      - name: Read local git identity, dirtiness, and target blobs only
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $ErrorActionPreference='Stop'
-          $event=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json
-          if($event.repository.full_name -cne 'D22977/gpt-browser-bridge' -or [int]$event.issue.number -ne 114){throw 'Wrong repository/issue'}
-          if($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER'){throw 'Wrong actor'}
-          $body=[string]$event.comment.body
-          function Need([string]$p,[string]$n){$m=[regex]::Match($body,$p);if(-not $m.Success){throw "Malformed field: $n"};$m.Groups[1].Value}
-          $null=Need '(?m)^CONTROL_G8_DB01_SENDER_COMPOSER_REPAIR_EXECUTE_V1\s*$' 'header'
-          $null=Need '(?m)^control_generation:\s*(008)\s*$' 'generation'
-          $null=Need '(?m)^source_authority:\s*(5495688949)\s*$' 'authority'
-          $expectedWorkflowHead=Need '(?m)^expected_workflow_head:\s*([0-9a-f]{40})\s*$' 'workflow_head'
-          if($expectedWorkflowHead -cne $env:GITHUB_SHA){throw "Workflow head mismatch expected=$expectedWorkflowHead actual=$env:GITHUB_SHA"}
-
-          $repo='D:\AIWORK\GPT_BROWSER_BRIDGE'
-          $branch='review-base/gbb-gh-01'
-          $oldSender='6b7a523f98a9655ba2ca28f42696b80da365c92b'
-          $oldBridge='ed9c32672df8df9db2ac0b5ff91fb3cb5201f315'
-          $workflowRel='.github/workflows/g8-db01-sender-repair-canary.yml'
-          if(-not(Test-Path -LiteralPath $repo -PathType Container)){throw 'Local repo missing'}
-          if((git -C $repo status --porcelain | Out-String).Trim()){throw 'Local repo dirty; fail closed'}
-          git -C $repo fetch origin $branch
-          if($LASTEXITCODE -ne 0){throw 'git fetch failed'}
-          git -C $repo checkout $branch
-          if($LASTEXITCODE -ne 0){throw 'git checkout failed'}
-          git -C $repo merge --ff-only "origin/$branch"
-          if($LASTEXITCODE -ne 0){throw 'fast-forward failed'}
-          $localHead=(git -C $repo rev-parse HEAD).Trim()
-          if($localHead -cne $env:GITHUB_SHA){throw "Local head mismatch after ff expected=$env:GITHUB_SHA actual=$localHead"}
-          $senderBlob=(git -C $repo hash-object -- src/gpt_send.mjs).Trim();if($senderBlob -cne $oldSender){throw "Sender blob drift $senderBlob"}
-          $bridgeBlob=(git -C $repo hash-object -- .github/workflows/herdr-control-comment-bridge.yml).Trim();if($bridgeBlob -cne $oldBridge){throw "Bridge blob drift $bridgeBlob"}
-
-          $patchPath=Join-Path $env:RUNNER_TEMP "gbb-sender-repair-$env:GITHUB_RUN_ID.py"
-          $patch=@'
-          from pathlib import Path
-          repo=Path(r'D:\AIWORK\GPT_BROWSER_BRIDGE')
-          srcp=repo/'src/gpt_send.mjs'
-          testp=repo/'tests/baseline.test.mjs'
-          src=srcp.read_text(encoding='utf-8')
-          old="export const PROMPT_TEXTAREA_SELECTOR = '#prompt-textarea';\nexport const SEND_BUTTON_SELECTOR = '[data-testid=\"send-button\"]';"
-          new="""export const PROMPT_TEXTAREA_SELECTOR = 'textarea:not([disabled]):not([readonly])';
-          export const SEND_BUTTON_SELECTOR = '[data-testid=\"send-button\"]';
-          export const COMPOSER_READY_SNAPSHOT_SCRIPT = `() => {
-            const all = Array.from(document.querySelectorAll('textarea'));
-            const ready = all.filter((el) => {
-              const r = el.getBoundingClientRect();
-              const s = getComputedStyle(el);
-              return !el.hidden && !el.disabled && !el.readOnly && s.display !== 'none' && s.visibility !== 'hidden' && s.pointerEvents !== 'none' && r.width > 0 && r.height > 0;
-            });
-            return { total_count: all.length, ready_count: ready.length };
-          }`;
-          export const DEFAULT_COMPOSER_READY_TIMEOUT_MS = 120_000;
-          export const DEFAULT_COMPOSER_READY_POLL_MS = 500;"""
-          if src.count(old)!=1: raise SystemExit(f'constant marker count={src.count(old)}')
-          src=src.replace(old,new)
-          marker="""// Sends the prompt: upload any attachments (approved web-chat file-upload
-          // review, per-call opt-in via sendJob's `attachments`), fill the editor,"""
-          waitfn="""export async function waitComposerReady(opts = {}) {
-            const {
-              composerReadyTimeoutMs = DEFAULT_COMPOSER_READY_TIMEOUT_MS,
-              composerReadyPollIntervalMs = DEFAULT_COMPOSER_READY_POLL_MS,
-              sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-              now = () => Date.now(),
-            } = opts;
-            const deadline = now() + composerReadyTimeoutMs;
-            for (;;) {
-              const state = await runCliCommand('eval', [COMPOSER_READY_SNAPSHOT_SCRIPT], opts);
-              const totalCount = Number(state?.total_count);
-              const readyCount = Number(state?.ready_count);
-              if (!Number.isInteger(totalCount) || !Number.isInteger(readyCount) || totalCount < 0 || readyCount < 0 || readyCount > totalCount) {
-                throw new SendInvalidationError('COMPOSER_STATE_INVALID');
-              }
-              if (totalCount > 1 || readyCount > 1) {
-                throw new SendInvalidationError('COMPOSER_AMBIGUOUS');
-              }
-              if (totalCount === 1 && readyCount === 1) return state;
-              if (now() >= deadline) {
-                throw new SendInvalidationError('COMPOSER_READY_TIMEOUT');
-              }
-              await sleep(composerReadyPollIntervalMs);
-            }
+          $ErrorActionPreference = 'Stop'
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          if ($event.repository.full_name -cne 'D22977/gpt-browser-bridge' -or [int]$event.issue.number -ne 114) { throw 'Wrong repository/issue' }
+          if ($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong actor' }
+          $body = [string]$event.comment.body
+          function Need([string]$pattern,[string]$name) {
+            $m = [regex]::Match($body,$pattern)
+            if (-not $m.Success) { throw "Malformed field: $name" }
+            return $m.Groups[1].Value
           }
+          $null = Need '(?m)^CONTROL_G8_DB01_LOCAL_DIRTY_READONLY_DIAGNOSTIC_EXECUTE_V1\s*$' 'header'
+          $null = Need '(?m)^control_generation:\s*(008)\s*$' 'generation'
+          $null = Need '(?m)^source_authority:\s*(5495817942)\s*$' 'authority'
+          $expectedWorkflowHead = Need '(?m)^expected_workflow_head:\s*([0-9a-f]{40})\s*$' 'workflow_head'
+          if ($expectedWorkflowHead -cne $env:GITHUB_SHA) { throw "Workflow head mismatch expected=$expectedWorkflowHead actual=$env:GITHUB_SHA" }
 
-          """+marker
-          if src.count(marker)!=1: raise SystemExit(f'send marker count={src.count(marker)}')
-          src=src.replace(marker,waitfn)
-          old_send="""export async function sendPrompt(prompt, opts) {
-            const { attachments, ...cliOpts } = opts || {};
-            if (Array.isArray(attachments) && attachments.length > 0) {"""
-          new_send="""export async function sendPrompt(prompt, opts) {
-            const { attachments, ...cliOpts } = opts || {};
-            await waitComposerReady(cliOpts);
-            if (Array.isArray(attachments) && attachments.length > 0) {"""
-          if src.count(old_send)!=1: raise SystemExit(f'sendPrompt marker count={src.count(old_send)}')
-          src=src.replace(old_send,new_send)
-          srcp.write_text(src,encoding='utf-8')
+          $repo = 'D:\AIWORK\GPT_BROWSER_BRIDGE'
+          if (-not (Test-Path -LiteralPath $repo -PathType Container)) { throw 'Local repo missing' }
 
-          t=testp.read_text(encoding='utf-8')
-          old_import="""  waitConversationUrl,
-            locateChatgptTab,"""
-          new_import="""  waitConversationUrl,
-            waitComposerReady,
-            locateChatgptTab,"""
-          if t.count(old_import)!=1: raise SystemExit(f'import wait marker count={t.count(old_import)}')
-          t=t.replace(old_import,new_import)
-          old_import2="""  SEND_BUTTON_SELECTOR,
-            resolveSpawnTarget,"""
-          new_import2="""  SEND_BUTTON_SELECTOR,
-            PROMPT_TEXTAREA_SELECTOR,
-            resolveSpawnTarget,"""
-          if t.count(old_import2)!=1: raise SystemExit(f'import selector marker count={t.count(old_import2)}')
-          t=t.replace(old_import2,new_import2)
+          $branch = (git -C $repo branch --show-current | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'git branch read failed' }
+          $head = (git -C $repo rev-parse HEAD | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'git rev-parse failed' }
+          $status = @(git -C $repo status --porcelain=v1)
+          if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
+          $diff = @(git -C $repo diff --name-only)
+          if ($LASTEXITCODE -ne 0) { throw 'git diff failed' }
+          $cached = @(git -C $repo diff --cached --name-only)
+          if ($LASTEXITCODE -ne 0) { throw 'git diff --cached failed' }
 
-          old_fake="""    const handler = handlers[subcommand];
-              if (!handler) throw new Error(`fakeExec: no handler registered for subcommand \"${subcommand}\"`);
-              return handler(args, counts[subcommand]);"""
-          new_fake="""    const handler = handlers[subcommand];
-              if (!handler && subcommand === 'eval') return jsonStdout({ total_count: 1, ready_count: 1 });
-              if (!handler) throw new Error(`fakeExec: no handler registered for subcommand \"${subcommand}\"`);
-              return handler(args, counts[subcommand]);"""
-          if t.count(old_fake)!=1: raise SystemExit(f'fake exec marker count={t.count(old_fake)}')
-          t=t.replace(old_fake,new_fake)
+          $expectedSender = '6b7a523f98a9655ba2ca28f42696b80da365c92b'
+          $expectedBaseline = 'b363a3922640909a60184e1b27801ef74cd2855f'
+          $expectedBridge = 'ed9c32672df8df9db2ac0b5ff91fb3cb5201f315'
+          $senderBlob = (git -C $repo hash-object -- src/gpt_send.mjs | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'sender hash failed' }
+          $baselineBlob = (git -C $repo hash-object -- tests/baseline.test.mjs | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'baseline hash failed' }
+          $bridgeBlob = (git -C $repo hash-object -- .github/workflows/herdr-control-comment-bridge.yml | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'bridge hash failed' }
 
-          old_eval="eval: (args, callIndex) => (callIndex === 1 ? jsonStdout(preSend) : jsonStdout({ url: conversationUrl })),"
-          new_eval="""eval: (args, callIndex) =>
-                callIndex === 1
-                  ? jsonStdout(preSend)
-                  : callIndex === 2
-                    ? jsonStdout({ total_count: 1, ready_count: 1 })
-                    : jsonStdout({ url: conversationUrl }),"""
-          if t.count(old_eval)!=2: raise SystemExit(f'normal/background eval marker count={t.count(old_eval)}')
-          t=t.replace(old_eval,new_eval)
+          function LinesOrNone([object[]]$items) {
+            if ($null -eq $items -or $items.Count -eq 0) { return @('NONE') }
+            return @($items | ForEach-Object { [string]$_ })
+          }
+          $statusLines = LinesOrNone $status
+          $diffLines = LinesOrNone $diff
+          $cachedLines = LinesOrNone $cached
 
-          old_upload_eval="""    eval: (args, callIndex) =>
-                callIndex === 1
-                  ? jsonStdout({ url: conversationUrl, assistantMessages: [], visibilityState: \"visible\" })
-                  : jsonStdout({ url: conversationUrl }),"""
-          new_upload_eval="""    eval: (args, callIndex) =>
-                callIndex === 1
-                  ? jsonStdout({ url: conversationUrl, assistantMessages: [], visibilityState: \"visible\" })
-                  : callIndex === 2
-                    ? jsonStdout({ total_count: 1, ready_count: 1 })
-                    : jsonStdout({ url: conversationUrl }),"""
-          if t.count(old_upload_eval)!=1: raise SystemExit(f'upload eval marker count={t.count(old_upload_eval)}')
-          t=t.replace(old_upload_eval,new_upload_eval)
+          $result = @()
+          $result += 'CONTROL_G8_DB01_LOCAL_DIRTY_READONLY_DIAGNOSTIC_RESULT_V1'
+          $result += ''
+          $result += 'state: PASS_READONLY_LOCAL_GIT_DIAGNOSTIC'
+          $result += 'control_generation: 008'
+          $result += 'source_authority: 5495817942'
+          $result += "workflow_head: $env:GITHUB_SHA"
+          $result += "runner_name: $env:RUNNER_NAME"
+          $result += "local_branch: $branch"
+          $result += "local_head: $head"
+          $result += ''
+          $result += 'git_status_porcelain_v1:'
+          $result += @($statusLines | ForEach-Object { "- $_" })
+          $result += 'git_diff_name_only:'
+          $result += @($diffLines | ForEach-Object { "- $_" })
+          $result += 'git_diff_cached_name_only:'
+          $result += @($cachedLines | ForEach-Object { "- $_" })
+          $result += ''
+          $result += "src/gpt_send.mjs_blob: $senderBlob"
+          $result += "src/gpt_send.mjs_matches_expected: $($senderBlob -ceq $expectedSender)"
+          $result += "tests/baseline.test.mjs_blob: $baselineBlob"
+          $result += "tests/baseline.test.mjs_matches_expected: $($baselineBlob -ceq $expectedBaseline)"
+          $result += ".github/workflows/herdr-control-comment-bridge.yml_blob: $bridgeBlob"
+          $result += ".github/workflows/herdr-control-comment-bridge.yml_matches_expected: $($bridgeBlob -ceq $expectedBridge)"
+          $result += ''
+          $result += 'mutation_performed: false'
+          $result += 'browser_send_performed: false'
+          $result += '009_wake_performed: false'
+          $result += 'user_relay_target: 0'
+          $result += "idempotency_key: GBB114-G8-LOCAL-DIRTY-READONLY-RESULT-$env:GITHUB_RUN_ID"
 
-          t=t.replace('assert.deepEqual(exec.calls.map((c) => c.args[2]), [\"fill\", \"click\"]);\n  assert.ok(exec.calls[1].args.includes(SEND_BUTTON_SELECTOR), \"click must target the send button selector\");',
-                      'assert.deepEqual(exec.calls.map((c) => c.args[2]), [\"eval\", \"fill\", \"click\"]);\n  assert.ok(exec.calls[1].args.includes(PROMPT_TEXTAREA_SELECTOR), \"fill must target the unique enabled textarea selector\");\n  assert.ok(exec.calls[2].args.includes(SEND_BUTTON_SELECTOR), \"click must target the send button selector\");')
-          t=t.replace('assert.deepEqual(exec.calls.map((c) => c.args[2]), [\"upload\", \"fill\", \"click\"]);\n  assert.deepEqual(exec.calls[0].args.slice(3, 5), [\"C:\\\\pack\\\\review.pdf\", \"C:\\\\pack\\\\\\n          otes.txt\"]);',
-                      'assert.deepEqual(exec.calls.map((c) => c.args[2]), [\"eval\", \"upload\", \"fill\", \"click\"]);\n  assert.deepEqual(exec.calls[1].args.slice(3, 5), [\"C:\\\\pack\\\\review.pdf\", \"C:\\\\pack\\\\\\n          otes.txt\"]);')
-          t=t.replace('assert.deepEqual(exec.calls.map((c) => c.args[2]), [\"fill\", \"click\", \"fill\", \"click\"]);',
-                      'assert.deepEqual(exec.calls.map((c) => c.args[2]), [\"eval\", \"fill\", \"click\", \"eval\", \"fill\", \"click\"]);')
-
-          insert_after="""test(\"waitConversationUrl times out rather than waiting forever\", async () => {
-            const exec = fakeExecFactory({ eval: () => jsonStdout({ url: \"https://chatgpt.com/\" }) });
-            let t = 0;
-            await assert.rejects(
-              () =>
-                waitConversationUrl({
-                  session: \"s\",
-                  exec,
-                  timeoutMs: 5_000,
-                  pollIntervalMs: 1_000,
-                  sleep: async () => {
-                    t += 1_000;
-                  },
-                  now: () => t,
-                }),
-              (err) => err instanceof SendInvalidationError && err.code === \"WAIT_CONVERSATION_URL_TIMEOUT\"
-            );
-          });"""
-          extra="""
-
-          test(\"waitComposerReady waits through disabled composer without browser mutation, then permits send\", async () => {
-            let t = 0;
-            const exec = fakeExecFactory({
-              eval: (args, callIndex) => jsonStdout(callIndex === 1 ? { total_count: 1, ready_count: 0 } : { total_count: 1, ready_count: 1 }),
-              fill: () => jsonStdout(null),
-              click: () => jsonStdout(null),
-            });
-            await sendPrompt(\"hello\", {
-              session: \"s\",
-              exec,
-              composerReadyTimeoutMs: 5_000,
-              composerReadyPollIntervalMs: 1_000,
-              sleep: async () => { t += 1_000; },
-              now: () => t,
-            });
-            assert.deepEqual(exec.calls.map((c) => c.args[2]), [\"eval\", \"eval\", \"fill\", \"click\"]);
-          });
-
-          test(\"waitComposerReady fails closed on ambiguous textarea state before fill/click\", async () => {
-            const exec = fakeExecFactory({ eval: () => jsonStdout({ total_count: 2, ready_count: 1 }) });
-            await assert.rejects(
-              () => sendPrompt(\"hello\", { session: \"s\", exec }),
-              (err) => err instanceof SendInvalidationError && err.code === \"COMPOSER_AMBIGUOUS\"
-            );
-            assert.equal(exec.counts.fill, undefined);
-            assert.equal(exec.counts.click, undefined);
-          });
-
-          test(\"waitComposerReady times out fail-closed while the unique textarea remains disabled\", async () => {
-            let t = 0;
-            const exec = fakeExecFactory({ eval: () => jsonStdout({ total_count: 1, ready_count: 0 }) });
-            await assert.rejects(
-              () => waitComposerReady({
-                session: \"s\",
-                exec,
-                composerReadyTimeoutMs: 2_000,
-                composerReadyPollIntervalMs: 1_000,
-                sleep: async () => { t += 1_000; },
-                now: () => t,
-              }),
-              (err) => err instanceof SendInvalidationError && err.code === \"COMPOSER_READY_TIMEOUT\"
-            );
-            assert.equal(exec.counts.fill, undefined);
-            assert.equal(exec.counts.click, undefined);
-          });"""
-          if t.count(insert_after)!=1: raise SystemExit(f'wait url insertion marker count={t.count(insert_after)}')
-          t=t.replace(insert_after,insert_after+extra)
-          testp.write_text(t,encoding='utf-8')
-          '@
-          Set-Content -LiteralPath $patchPath -Value $patch -Encoding utf8
-          try{& python $patchPath;if($LASTEXITCODE -ne 0){throw "deterministic patch failed exit=$LASTEXITCODE"}}finally{Remove-Item -LiteralPath $patchPath -Force -ErrorAction SilentlyContinue}
-
-          $newSenderBlob=(git -C $repo hash-object -- src/gpt_send.mjs).Trim()
-          if($newSenderBlob -eq $oldSender){throw 'Sender blob did not change'}
-          $bridgePath=Join-Path $repo '.github\workflows\herdr-control-comment-bridge.yml'
-          $bridge=Get-Content -LiteralPath $bridgePath -Raw
-          if(([regex]::Matches($bridge,[regex]::Escape($oldSender))).Count -ne 1){throw 'Bridge old sender binding count not 1'}
-          $bridge=$bridge.Replace($oldSender,$newSenderBlob)
-          Set-Content -LiteralPath $bridgePath -Value $bridge -Encoding utf8 -NoNewline
-
-          $changed=@(git -C $repo diff --name-only)
-          $expected=@('.github/workflows/herdr-control-comment-bridge.yml','src/gpt_send.mjs','tests/baseline.test.mjs')|Sort-Object
-          if((Compare-Object ($changed|Sort-Object) $expected)){throw "Unexpected repair paths: $($changed -join ',')"}
-
-          Push-Location $repo
-          try{
-            & node --test tests/baseline.test.mjs
-            if($LASTEXITCODE -ne 0){throw 'targeted baseline sender tests failed'}
-            & npm test
-            if($LASTEXITCODE -ne 0){throw 'full npm test failed'}
-          }finally{Pop-Location}
-
-          git -C $repo add -- src/gpt_send.mjs tests/baseline.test.mjs .github/workflows/herdr-control-comment-bridge.yml
-          git -C $repo commit -m 'Repair ChatGPT composer readiness in control sender'
-          if($LASTEXITCODE -ne 0){throw 'repair commit failed'}
-          $repairCommit=(git -C $repo rev-parse HEAD).Trim()
-          $repairBridgeBlob=(git -C $repo hash-object -- .github/workflows/herdr-control-comment-bridge.yml).Trim()
-          git -C $repo -c "http.extraheader=AUTHORIZATION: bearer $env:GH_TOKEN" push origin "HEAD:$branch"
-          if($LASTEXITCODE -ne 0){throw 'repair push failed'}
-
-          git -C $repo rm -- $workflowRel
-          if($LASTEXITCODE -ne 0){throw 'temporary workflow self-delete staging failed'}
-          git -C $repo commit -m 'Remove completed DB01 sender repair runner'
-          if($LASTEXITCODE -ne 0){throw 'cleanup commit failed'}
-          $cleanupCommit=(git -C $repo rev-parse HEAD).Trim()
-          git -C $repo -c "http.extraheader=AUTHORIZATION: bearer $env:GH_TOKEN" push origin "HEAD:$branch"
-          if($LASTEXITCODE -ne 0){throw 'cleanup push failed'}
-          if((git -C $repo status --porcelain | Out-String).Trim()){throw 'Local repo dirty after cleanup'}
-
-          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='gbb-sender-repair';Accept='application/vnd.github+json'}
-          $receipt=@(
-            'CONTROL_G8_DB01_SENDER_COMPOSER_REPAIR_RESULT_V1',
-            'state: PASS_READY_FOR_LIVE_TRANSPORT_PROOF',
-            'decision: PASS',
-            'control_generation: 008',
-            'source_authority: 5495688949',
-            "source_execute_event: $($event.comment.id)",
-            "workflow_run_id: $env:GITHUB_RUN_ID",
-            "workflow_head: $env:GITHUB_SHA",
-            "repair_commit: $repairCommit",
-            "cleanup_commit: $cleanupCommit",
-            "sender_blob: $newSenderBlob",
-            "production_bridge_blob: $repairBridgeBlob",
-            'changed_production_paths: src/gpt_send.mjs; tests/baseline.test.mjs; .github/workflows/herdr-control-comment-bridge.yml',
-            'temporary_workflow_removed: true',
-            'targeted_test: PASS node --test tests/baseline.test.mjs',
-            'full_test: PASS npm test',
-            'local_runtime_repo_exactly_synced_to_cleanup_commit: true',
-            'browser_send_performed: false',
-            'user_relay_count: 0',
-            'readback_required: true'
-          ) -join "`n"
-          $payload=@{body=$receipt}|ConvertTo-Json -Compress
-          $pub=Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/114/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
-          $rb=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($pub.id)" -Headers $headers -Method Get -TimeoutSec 30
-          if([string]$rb.body -cne $receipt){throw 'Repair receipt readback mismatch'}
-          Write-Output "repair PASS receipt=$($pub.id) repair=$repairCommit cleanup=$cleanupCommit sender=$newSenderBlob"
+          $payload = @{ body = ($result -join "`n") } | ConvertTo-Json -Compress
+          $payload | gh api repos/D22977/gpt-browser-bridge/issues/114/comments --method POST --input - | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'result publication failed' }
