@@ -132,15 +132,18 @@ jobs:
               return {tag:(el.tagName||'').toLowerCase(),id:el.id||'',role:el.getAttribute('role')||'',contenteditable:el.getAttribute('contenteditable')||'',ariaLabel:el.getAttribute('aria-label')||'',placeholder:el.getAttribute('placeholder')||'',ariaDisabled:el.getAttribute('aria-disabled')||'',disabled:('disabled' in el)?Boolean(el.disabled):null,readOnly:('readOnly' in el)?Boolean(el.readOnly):null,hidden:Boolean(el.hidden),display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,width:Math.round(r.width),height:Math.round(r.height)};
             };
             const m=location.pathname.match(/\/c\/([0-9a-f-]+)/i);
-            return {conversationId:m?m[1]:'',promptTextareaCount:document.querySelectorAll('#prompt-textarea').length,candidateCount:nodes.length,candidates:nodes.map(meta),activeElement:meta(document.activeElement)};
+            const out={conversationId:m?m[1]:'',promptTextareaCount:document.querySelectorAll('#prompt-textarea').length,candidateCount:nodes.length,candidates:nodes.map(meta),activeElement:meta(document.activeElement)};
+            const bytes=new TextEncoder().encode(JSON.stringify(out));
+            let binary='';
+            for(const b of bytes)binary+=String.fromCharCode(b);
+            return 'GBB_META_B64:'+btoa(binary);
           }
           '@
-            $raw=(& $playwright cli "-s=$session" eval $script --json 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'Editor metadata eval failed'}
-            $jsonLines=@($raw -split "`r?`n" | Where-Object { $_ -match '^\s*\{.*\}\s*$' })
-            if($jsonLines.Count -ne 1){throw "Editor metadata eval JSON line count=$($jsonLines.Count)"}
-            $envl=$jsonLines[0]|ConvertFrom-Json;if($envl.isError -eq $true){throw 'Editor metadata eval returned isError'}
-            $mv=$envl.result
-            if($mv -is [string]){$meta=$mv|ConvertFrom-Json}else{$meta=$mv}
+            $raw=(& $playwright cli "-s=$session" eval $script 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'Editor metadata eval failed'}
+            $sentinels=[regex]::Matches($raw,'GBB_META_B64:([A-Za-z0-9+/=]+)')
+            if($sentinels.Count -ne 1){throw "Editor metadata sentinel count=$($sentinels.Count)"}
+            $json=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($sentinels[0].Groups[1].Value))
+            $meta=$json|ConvertFrom-Json
             if([string]$meta.conversationId -cne $im.Groups[1].Value){throw 'Editor metadata conversation mismatch'}
 
             $snapStatus='SKIPPED_NOT_UNIQUE';$refs=@()
