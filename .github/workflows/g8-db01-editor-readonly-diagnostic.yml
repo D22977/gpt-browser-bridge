@@ -1,0 +1,93 @@
+name: G8 DB01 Node-Surface Final Metadata Diagnostic
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g8-node-final-meta-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    name: G8 DB01 Node-Surface Final Metadata Diagnostic
+    if: >-
+      github.event.issue.number == 114 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'CONTROL_G8_DB01_NODE_SURFACE_FINAL_METADATA_DIAGNOSTIC_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Inspect text-free metadata through production Node subprocess surface
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $event=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json
+          if($event.repository.full_name -cne 'D22977/gpt-browser-bridge' -or [int]$event.issue.number -ne 114){throw 'Wrong repository/issue'}
+          if($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER'){throw 'Wrong actor'}
+          $body=[string]$event.comment.body
+          function Need([string]$p,[string]$n){$m=[regex]::Match($body,$p);if(-not $m.Success){throw "Malformed field: $n"};$m.Groups[1].Value}
+          $null=Need '(?m)^CONTROL_G8_DB01_NODE_SURFACE_FINAL_METADATA_DIAGNOSTIC_V1\s*$' 'header'
+          $null=Need '(?m)^control_generation:\s*(008)\s*$' 'generation'
+          $null=Need '(?m)^source_authority:\s*(5495207968)\s*$' 'authority'
+          $expectedHead=Need '(?m)^expected_diagnostic_head:\s*([0-9a-f]{40})\s*$' 'head'
+          if($expectedHead -cne $env:GITHUB_SHA){throw "Head mismatch expected=$expectedHead actual=$env:GITHUB_SHA"}
+
+          $whoami=(& whoami).Trim();$identity=[System.Security.Principal.WindowsIdentity]::GetCurrent().Name;$sid=[System.Diagnostics.Process]::GetCurrentProcess().SessionId
+          if($whoami -notmatch '(?i)^d22977\\lupun$' -or $identity -notmatch '(?i)^d22977\\lupun$' -or -not [Environment]::UserInteractive -or $sid -eq 0 -or $env:RUNNER_NAME -cne 'gbb-reviewer-win-01'){throw 'Runner identity/interactivity mismatch'}
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='gbb-node-final-meta';Accept='application/vnd.github+json'}
+
+          $all=[System.Collections.Generic.List[object]]::new();function AddF([object]$v){if($null -eq $v){return};if($v -is [System.Array]){foreach($n in $v){AddF $n};return};[void]$all.Add($v)}
+          for($p=1;$p -le 30;$p++){$before=$all.Count;AddF (Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30);if(($all.Count-$before)-lt 100){break}}
+          $switches=@($all|Where-Object{$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'}|Sort-Object{[int64]$_.id});if($switches.Count -eq 0){throw 'No ACTIVE switch'}
+          $latest=$switches[-1];$sb=[string]$latest.body;$gm=[regex]::Match($sb,'(?m)^new_generation:\s*(\d{3})\s*$');$im=[regex]::Match($sb,'(?m)^new_conversation_id:\s*([0-9a-f-]+)\s*$');$um=[regex]::Match($sb,'(?m)^new_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
+          if(-not($gm.Success -and $im.Success -and $um.Success) -or $gm.Groups[1].Value -cne '008'){throw 'Generation008 not exact ACTIVE target'}
+
+          $pw='C:\Users\Lupun\AppData\Roaming\npm\node_modules\@playwright\cli\node_modules\.bin\playwright.cmd';$session='HERDR-DOORBELL-DB01-G1-20260816';$root='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell';$profile='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell\db01-profile'
+          if(-not(Test-Path -LiteralPath $pw) -or -not(Test-Path -LiteralPath $root -PathType Container) -or -not(Test-Path -LiteralPath $profile -PathType Container)){throw 'DB01 runtime path missing'}
+          Push-Location $root
+          try{
+            $sessions=(& $pw cli list 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'Session list failed'};$tabs=(& $pw cli "-s=$session" tab-list 2>&1|Out-String);$te=$LASTEXITCODE;$restart=$false;$navigation=$false
+            if($te -eq 1 -and $sessions -notmatch [regex]::Escape($session)){$null=(& $pw cli "-s=$session" open --persistent "--profile=$profile" --headed 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'Same-profile restart failed'};$restart=$true}elseif($te -ne 0){throw 'Session ambiguous'}
+            $tabs=(& $pw cli "-s=$session" tab-list 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'Tab list failed'};$lines=@($tabs -split "`r?`n"|Where-Object{$_ -match [regex]::Escape($im.Groups[1].Value)})
+            if($lines.Count -eq 0){$null=(& $pw cli "-s=$session" goto $um.Groups[1].Value 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'Exact navigation failed'};$navigation=$true;$tabs=(& $pw cli "-s=$session" tab-list 2>&1|Out-String);$lines=@($tabs -split "`r?`n"|Where-Object{$_ -match [regex]::Escape($im.Groups[1].Value)})}
+            if($lines.Count -ne 1){throw "Exact tab count=$($lines.Count)"};$ix=[regex]::Match($lines[0],'^\s*-\s*(\d+):');if(-not $ix.Success){throw 'Tab index parse failed'};$null=(& $pw cli "-s=$session" tab-select $ix.Groups[1].Value 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'Tab select failed'}
+
+            $env:GBB_PW=$pw;$env:GBB_SESSION=$session;$env:GBB_EXPECTED_CONVERSATION=$im.Groups[1].Value
+            $nodePath=Join-Path $env:RUNNER_TEMP "gbb-node-meta-$env:GITHUB_RUN_ID.mjs";$outPath=Join-Path $env:RUNNER_TEMP "gbb-node-meta-$env:GITHUB_RUN_ID.json";$env:GBB_META_OUT=$outPath
+            $nodeScript=@'
+          import { spawnSync } from 'node:child_process';
+          import fs from 'node:fs';
+          const script = `() => {
+            const nodes=Array.from(document.querySelectorAll('#prompt-textarea,[contenteditable="true"],textarea,[role="textbox"]')).slice(0,20);
+            const meta=el=>{if(!el)return null;const r=el.getBoundingClientRect(),s=getComputedStyle(el);return {tag:(el.tagName||'').toLowerCase(),id:el.id||'',role:el.getAttribute('role')||'',contenteditable:el.getAttribute('contenteditable')||'',ariaLabel:el.getAttribute('aria-label')||'',placeholder:el.getAttribute('placeholder')||'',ariaDisabled:el.getAttribute('aria-disabled')||'',disabled:('disabled' in el)?Boolean(el.disabled):null,readOnly:('readOnly' in el)?Boolean(el.readOnly):null,hidden:Boolean(el.hidden),display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,width:Math.round(r.width),height:Math.round(r.height)}};
+            const m=location.pathname.match(/\\/c\\/([0-9a-f-]+)/i);
+            return {conversationId:m?m[1]:'',promptTextareaCount:document.querySelectorAll('#prompt-textarea').length,candidateCount:nodes.length,candidates:nodes.map(meta),activeElement:meta(document.activeElement)};
+          }`;
+          const args=['cli',`-s=${process.env.GBB_SESSION}`,'eval',script,'--json'];
+          const r=spawnSync(process.env.GBB_PW,args,{encoding:'utf8',shell:true,maxBuffer:32*1024*1024});
+          if(r.error) throw r.error;
+          if(r.status!==0) throw new Error(`CLI_EXIT_${r.status}`);
+          const env=JSON.parse(String(r.stdout||'').trim());
+          if(env?.isError===true) throw new Error('CLI_ERROR_RESPONSE:eval');
+          let meta=env?.result;
+          if(typeof meta==='string'){ try{ meta=JSON.parse(meta); }catch{} }
+          if(!meta || typeof meta!=='object') throw new Error('META_NOT_OBJECT');
+          if(String(meta.conversationId)!==String(process.env.GBB_EXPECTED_CONVERSATION)) throw new Error('CONVERSATION_MISMATCH');
+          fs.writeFileSync(process.env.GBB_META_OUT,JSON.stringify(meta),'utf8');
+          '@
+            Set-Content -LiteralPath $nodePath -Value $nodeScript -Encoding utf8
+            try{& node $nodePath;if($LASTEXITCODE -ne 0){throw "Node metadata probe exit=$LASTEXITCODE"};$meta=Get-Content -LiteralPath $outPath -Raw|ConvertFrom-Json}finally{Remove-Item -LiteralPath $nodePath,$outPath -Force -ErrorAction SilentlyContinue}
+            $metaJson=$meta|ConvertTo-Json -Compress -Depth 6
+            $text=@('CONTROL_G8_DB01_NODE_SURFACE_FINAL_METADATA_DIAGNOSTIC_RESULT_V1','state: PASS','decision: PASS_TEXT_FREE_EDITOR_METADATA',"source_authority: 5495207968","source_diagnostic_event: $($event.comment.id)","diagnostic_head: $env:GITHUB_SHA","active_switch_receipt: $($latest.id)",'target_control_generation: 008',"target_control_conversation_id: $($im.Groups[1].Value)","db01_restart_performed: $($restart.ToString().ToLowerInvariant())","exact_target_navigation_performed: $($navigation.ToString().ToLowerInvariant())","editor_metadata_json: $metaJson",'conversation_text_captured: false','browser_content_write_performed: false','user_relay_count: 0','readback_required: true') -join "`n"
+            $payload=@{body=$text}|ConvertTo-Json -Compress;$r=Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/114/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30;$rb=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30;if([string]$rb.body -cne $text){throw 'Result readback mismatch'};Write-Output "node metadata PASS receipt=$($r.id)";$global:LASTEXITCODE=0
+          }finally{Pop-Location}
