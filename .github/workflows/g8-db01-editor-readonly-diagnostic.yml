@@ -136,7 +136,9 @@ jobs:
           }
           '@
             $raw=(& $playwright cli "-s=$session" eval $script --json 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'Editor metadata eval failed'}
-            $envl=$raw|ConvertFrom-Json;if($envl.isError -eq $true){throw 'Editor metadata eval returned isError'}
+            $jsonLines=@($raw -split "`r?`n" | Where-Object { $_ -match '^\s*\{.*\}\s*$' })
+            if($jsonLines.Count -ne 1){throw "Editor metadata eval JSON line count=$($jsonLines.Count)"}
+            $envl=$jsonLines[0]|ConvertFrom-Json;if($envl.isError -eq $true){throw 'Editor metadata eval returned isError'}
             $mv=$envl.result
             if($mv -is [string]){$meta=$mv|ConvertFrom-Json}else{$meta=$mv}
             if([string]$meta.conversationId -cne $im.Groups[1].Value){throw 'Editor metadata conversation mismatch'}
