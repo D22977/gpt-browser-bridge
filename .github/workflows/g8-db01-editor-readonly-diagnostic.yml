@@ -139,7 +139,7 @@ jobs:
             return 'GBB_META_B64:'+btoa(binary);
           }
           '@
-            $raw=(& $playwright cli "-s=$session" eval $script 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'Editor metadata eval failed'}
+            $raw=(& $playwright cli "--raw" "-s=$session" eval $script 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'Editor metadata eval failed'}
             $sentinels=[regex]::Matches($raw,'GBB_META_B64:([A-Za-z0-9+/=]+)')
             if($sentinels.Count -ne 1){throw "Editor metadata sentinel count=$($sentinels.Count)"}
             $json=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($sentinels[0].Groups[1].Value))
