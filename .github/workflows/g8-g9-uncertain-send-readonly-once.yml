@@ -18,14 +18,14 @@ jobs:
       github.event.issue.number == 88 &&
       github.event.comment.user.login == 'D22977' &&
       github.event.comment.author_association == 'OWNER' &&
-      startsWith(github.event.comment.body, 'CONTROL_G8_G9_UNCERTAIN_SEND_SAME_PROFILE_READ_EVENT_V1')
+      startsWith(github.event.comment.body, 'CONTROL_G8_G9_UNCERTAIN_SEND_EXACT_TURN_PROBE_EVENT_V1')
     runs-on: [self-hosted, Windows, GBB-REVIEWER]
     timeout-minutes: 8
     defaults:
       run:
         shell: pwsh -NoProfile -File {0}
     steps:
-      - name: Restore proven DB01 read surface and observe exact 009
+      - name: Restore proven DB01 read surface and inspect persisted exact 009 turns
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -34,9 +34,12 @@ jobs:
           $body=[string]$event.comment.body
           if($event.repository.full_name -cne 'D22977/gpt-browser-bridge' -or [int]$event.issue.number -ne 88){throw 'Wrong repo/issue'}
           if($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER'){throw 'Wrong actor'}
-          if($body -notmatch '(?m)^source_same_profile_recovery:\s*5509932217\s*$'){throw 'Wrong same-profile recovery'}
+          if($body -notmatch '(?m)^source_probe_authority:\s*5517490896\s*$'){throw 'Wrong probe authority'}
           if($body -notmatch '(?m)^source_uncertain_send_receipt:\s*5509819987\s*$'){throw 'Wrong uncertain receipt'}
+          if($body -notmatch '(?m)^source_prior_indeterminate:\s*5509959707\s*$'){throw 'Wrong prior indeterminate receipt'}
           if($body -notmatch '(?m)^source_candidate_binding:\s*5495537900\s*$'){throw 'Wrong candidate binding'}
+          if($body -notmatch '(?m)^target_conversation_id:\s*6a957d5b-19e8-83e8-9925-3343facccaf3\s*$'){throw 'Wrong target conversation'}
+
           $targetId='6a957d5b-19e8-83e8-9925-3343facccaf3'
           $targetUrl='https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhuan-an/c/6a957d5b-19e8-83e8-9925-3343facccaf3'
           $repoRoot='D:\AIWORK\GPT_BROWSER_BRIDGE'
@@ -46,26 +49,39 @@ jobs:
           $pw='C:\Users\Lupun\AppData\Roaming\npm\node_modules\@playwright\cli\node_modules\.bin\playwright.cmd'
           $db01Root='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell'
           $db01Profile='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell\db01-profile'
+
           if($env:RUNNER_NAME -cne 'gbb-reviewer-win-01' -or -not [Environment]::UserInteractive){throw 'Runner identity/interactivity mismatch'}
           if(-not(Test-Path -LiteralPath $watcher)){throw 'Watcher missing'}
-          $actual=(& git -C $repoRoot hash-object -- 'src/gpt_watch.mjs').Trim();if($actual -cne $expectedWatcherBlob){throw "Watcher blob mismatch $actual"}
+          $actual=(& git -C $repoRoot hash-object -- 'src/gpt_watch.mjs').Trim()
+          if($actual -cne $expectedWatcherBlob){throw "Watcher blob mismatch $actual"}
           if(-not(Test-Path -LiteralPath $pw) -or -not(Test-Path -LiteralPath $db01Root -PathType Container) -or -not(Test-Path -LiteralPath $db01Profile -PathType Container)){throw 'DB01 recovery substrate missing'}
+
           Push-Location $db01Root
           try{
-            $sessions=(& $pw cli list 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'session-list failed'}
-            $tabs=(& $pw cli "-s=$session" tab-list 2>&1|Out-String);$tabExit=$LASTEXITCODE
+            $sessions=(& $pw cli list 2>&1|Out-String)
+            if($LASTEXITCODE -ne 0){throw 'session-list failed'}
+            $tabs=(& $pw cli "-s=$session" tab-list 2>&1|Out-String)
+            $tabExit=$LASTEXITCODE
             if($tabExit -eq 1 -and $sessions -notmatch [regex]::Escape($session)){
-              $open=(& $pw cli "-s=$session" open --persistent "--profile=$db01Profile" --headed 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw "same-profile restart failed $open"}
+              $open=(& $pw cli "-s=$session" open --persistent "--profile=$db01Profile" --headed 2>&1|Out-String)
+              if($LASTEXITCODE -ne 0){throw "same-profile restart failed $open"}
             }elseif($tabExit -ne 0){throw 'DB01 session ambiguous'}
-            $tabs=(& $pw cli "-s=$session" tab-list 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'post-restart tab-list failed'}
+            $tabs=(& $pw cli "-s=$session" tab-list 2>&1|Out-String)
+            if($LASTEXITCODE -ne 0){throw 'post-restart tab-list failed'}
             if($tabs -notmatch [regex]::Escape($targetId)){
-              $go=(& $pw cli "-s=$session" goto $targetUrl 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw "exact 009 navigation failed $go"}
+              $go=(& $pw cli "-s=$session" goto $targetUrl 2>&1|Out-String)
+              if($LASTEXITCODE -ne 0){throw "exact 009 navigation failed $go"}
             }
-            $tabs=(& $pw cli "-s=$session" tab-list 2>&1|Out-String);if($LASTEXITCODE -ne 0 -or $tabs -notmatch [regex]::Escape($targetId)){throw 'exact 009 tab not restored'}
+            $tabs=(& $pw cli "-s=$session" tab-list 2>&1|Out-String)
+            if($LASTEXITCODE -ne 0 -or $tabs -notmatch [regex]::Escape($targetId)){throw 'exact 009 tab not restored'}
           }finally{Pop-Location}
-          $env:GBB_WATCHER=$watcher;$env:GBB_SESSION=$session;$env:GBB_TARGET_ID=$targetId
-          $outPath=Join-Path $env:RUNNER_TEMP "g8-g9-uncertain-readonly-$env:GITHUB_RUN_ID.json";$env:GBB_OUT=$outPath
-          $nodePath=Join-Path $env:RUNNER_TEMP "g8-g9-uncertain-readonly-$env:GITHUB_RUN_ID.mjs"
+
+          $env:GBB_WATCHER=$watcher
+          $env:GBB_SESSION=$session
+          $env:GBB_TARGET_ID=$targetId
+          $outPath=Join-Path $env:RUNNER_TEMP "g8-g9-exact-turn-probe-$env:GITHUB_RUN_ID.json"
+          $env:GBB_OUT=$outPath
+          $nodePath=Join-Path $env:RUNNER_TEMP "g8-g9-exact-turn-probe-$env:GITHUB_RUN_ID.mjs"
           $node=@'
           import {pathToFileURL} from 'node:url';
           import {createHash} from 'node:crypto';
@@ -77,33 +93,117 @@ jobs:
           const matches=tabs.filter(t=>String(t?.url||'').toLowerCase().includes(`/c/${target.toLowerCase()}`));
           if(matches.length!==1) throw new Error(`EXACT_009_TAB_COUNT_${matches.length}`);
           await w.runCliCommand('tab-select',[String(matches[0].index)],{session});
-          const data=await w.runCliCommand('eval',[w.READONLY_SNAPSHOT_SCRIPT],{session});
-          if(!String(data?.url||'').toLowerCase().includes(`/c/${target.toLowerCase()}`)) throw new Error('VERIFY_URL_MISMATCH');
-          const ax=await w.runCliCommand('snapshot',[],{session});
-          const axText=typeof ax==='string'?ax:JSON.stringify(ax);
+          const script=`() => {
+            const users=Array.from(document.querySelectorAll('[data-message-author-role="user"]')).map(e=>e.innerText||'');
+            const assistants=Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')).map(e=>e.innerText||'');
+            const composer=document.querySelector('#prompt-textarea') || document.querySelector('textarea[placeholder]') || document.querySelector('[contenteditable="true"][role="textbox"]');
+            const cs=composer?getComputedStyle(composer):null;
+            const r=composer?composer.getBoundingClientRect():null;
+            const body=(document.body?.innerText||'').toLowerCase();
+            return {
+              url:location.href,
+              readyState:document.readyState,
+              users,
+              assistants,
+              composer:{
+                exists:Boolean(composer),
+                disabled:composer&&'disabled' in composer?Boolean(composer.disabled):false,
+                readOnly:composer&&'readOnly' in composer?Boolean(composer.readOnly):false,
+                display:cs?.display||'',
+                visibility:cs?.visibility||'',
+                pointerEvents:cs?.pointerEvents||'',
+                width:r?Math.round(r.width):0,
+                height:r?Math.round(r.height):0
+              },
+              loginWall:/log in|sign in|登入|登錄/.test(body),
+              networkError:/network error|something went wrong|網路錯誤|發生錯誤/.test(body)
+            };
+          }`;
+          const data=await w.runCliCommand('eval',[script],{session});
+          const url=String(data?.url||'');
+          if(!url.toLowerCase().includes(`/c/${target.toLowerCase()}`)) throw new Error('VERIFY_URL_MISMATCH');
+          const users=Array.isArray(data?.users)?data.users:[];
+          const assistants=Array.isArray(data?.assistants)?data.assistants:[];
           const markers=['5509780443','5501107432','5495537900'];
-          const assistants=Array.isArray(data?.assistantMessages)?data.assistantMessages:[];
-          const assistantText=assistants.join('\n');
-          const assistantMarker=markers.some(m=>assistantText.includes(m));
-          const markerContexts=[];
-          const lines=axText.split(/\r?\n/);
-          for(let i=0;i<lines.length;i++) if(markers.some(m=>lines[i].includes(m))){markerContexts.push(lines.slice(Math.max(0,i-4),Math.min(lines.length,i+5)).join('\n'));}
-          const ctx=markerContexts.join('\n---\n');
-          const editorMarker=markers.some(m=>ctx.includes(m)) && /textbox|multiline|prompt-textarea|message chatgpt/i.test(ctx);
-          const submittedMarker=markers.some(m=>ctx.includes(m)) && /you said|user|article|message/i.test(ctx) && !editorMarker;
-          const last=assistants.length?assistants[assistants.length-1]:'';
-          const lastHash=createHash('sha256').update(last,'utf8').digest('hex');
+          const userHashes=users.map(t=>createHash('sha256').update(String(t),'utf8').digest('hex'));
+          const persistedMarkerTurnIndexes=[];
+          users.forEach((t,i)=>{if(markers.every(m=>String(t).includes(m))) persistedMarkerTurnIndexes.push(i);});
+          const assistantMarker=assistants.some(t=>markers.every(m=>String(t).includes(m)));
+          const ready=['interactive','complete'].includes(String(data?.readyState||''));
+          const composer=typeof data?.composer==='object'&&data.composer?data.composer:{};
+          const stableSurface=Boolean(composer.exists)||url.toLowerCase().includes(`/c/${target.toLowerCase()}`);
+          const loginWall=Boolean(data?.loginWall),networkError=Boolean(data?.networkError);
           let decision='INDETERMINATE';
-          if(assistantMarker||submittedMarker) decision='DELIVERY_OBSERVED';
-          else if(editorMarker&&!assistantMarker) decision='UNSENT_EDITOR_ONLY';
-          fs.writeFileSync(process.env.GBB_OUT,JSON.stringify({decision,assistant_count:assistants.length,last_assistant_hash:lastHash,stopVisible:Boolean(data?.stopVisible),continueVisible:Boolean(data?.continueVisible),loginWall:Boolean(data?.loginWall),networkError:Boolean(data?.networkError),assistant_marker:assistantMarker,editor_marker:editorMarker,submitted_marker:submittedMarker,marker_occurrence_count:markerContexts.length,url:String(data?.url||'')}),'utf8');
+          if(persistedMarkerTurnIndexes.length>0||assistantMarker) decision='DELIVERY_OBSERVED';
+          else if(ready&&users.length===0&&assistants.length===0&&!loginWall&&!networkError&&stableSurface) decision='UNSENT_CONFIRMED_EMPTY_CONVERSATION';
+          fs.writeFileSync(process.env.GBB_OUT,JSON.stringify({
+            decision,
+            ready_state:String(data?.readyState||''),
+            user_turn_count:users.length,
+            assistant_count:assistants.length,
+            user_turn_hashes:userHashes,
+            persisted_marker_turn_count:persistedMarkerTurnIndexes.length,
+            assistant_attributable_marker:Boolean(assistantMarker),
+            login_wall:loginWall,
+            network_error:networkError,
+            composer_exists:Boolean(composer.exists),
+            composer_disabled:Boolean(composer.disabled),
+            composer_readonly:Boolean(composer.readOnly),
+            composer_display:String(composer.display||''),
+            composer_visibility:String(composer.visibility||''),
+            composer_pointer_events:String(composer.pointerEvents||''),
+            composer_width:Number(composer.width||0),
+            composer_height:Number(composer.height||0),
+            exact_identity_loaded:true
+          }),'utf8');
           '@
           Set-Content -LiteralPath $nodePath -Value $node -Encoding utf8
-          try{& node $nodePath;if($LASTEXITCODE -ne 0){throw "Readonly watcher exit=$LASTEXITCODE"};$r=Get-Content -LiteralPath $outPath -Raw|ConvertFrom-Json}finally{Remove-Item $nodePath,$outPath -Force -ErrorAction SilentlyContinue}
-          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g8-g9-uncertain-readonly';Accept='application/vnd.github+json'}
-          $text=@('CONTROL_G8_G9_UNCERTAIN_SEND_READONLY_RESULT_V1','state: PASS_READONLY_OBSERVATION',"decision: $($r.decision)",'source_same_profile_recovery: 5509932217','source_uncertain_send_receipt: 5509819987','source_candidate_binding: 5495537900',"source_event_comment_id: $($event.comment.id)","target_conversation_id: $targetId","assistant_count: $($r.assistant_count)","last_assistant_hash: $($r.last_assistant_hash)","stop_visible: $([string]$r.stopVisible).ToLower()","continue_visible: $([string]$r.continueVisible).ToLower()","login_wall: $([string]$r.loginWall).ToLower()","network_error: $([string]$r.networkError).ToLower()","assistant_marker: $([string]$r.assistant_marker).ToLower()","editor_marker: $([string]$r.editor_marker).ToLower()","submitted_marker: $([string]$r.submitted_marker).ToLower()","marker_occurrence_count: $($r.marker_occurrence_count)",'same_profile_restart_or_navigation_only: true','browser_conversation_write_performed: false','second_send_performed: false','raw_conversation_text_published: false','user_relay_count: 0','readback_required: true') -join "`n"
+          try{
+            & node $nodePath
+            if($LASTEXITCODE -ne 0){throw "Exact turn probe exit=$LASTEXITCODE"}
+            $r=Get-Content -LiteralPath $outPath -Raw|ConvertFrom-Json
+          }finally{
+            Remove-Item $nodePath,$outPath -Force -ErrorAction SilentlyContinue
+          }
+
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g8-g9-exact-turn-probe';Accept='application/vnd.github+json'}
+          $hashes=if($r.user_turn_hashes.Count -gt 0){($r.user_turn_hashes -join ',')}else{'NONE'}
+          $text=@(
+            'CONTROL_G8_G9_UNCERTAIN_SEND_EXACT_TURN_PROBE_RESULT_V1',
+            'state: PASS_READONLY_PERSISTED_TURN_PROBE',
+            "decision: $($r.decision)",
+            'source_probe_authority: 5517490896',
+            'source_uncertain_send_receipt: 5509819987',
+            'source_prior_indeterminate: 5509959707',
+            'source_candidate_binding: 5495537900',
+            "source_event_comment_id: $($event.comment.id)",
+            "target_conversation_id: $targetId",
+            "exact_identity_loaded: $(([string]$r.exact_identity_loaded).ToLower())",
+            "ready_state: $($r.ready_state)",
+            "user_turn_count: $($r.user_turn_count)",
+            "assistant_count: $($r.assistant_count)",
+            "user_turn_sha256: $hashes",
+            "persisted_marker_turn_count: $($r.persisted_marker_turn_count)",
+            "assistant_attributable_marker: $(([string]$r.assistant_attributable_marker).ToLower())",
+            "login_wall: $(([string]$r.login_wall).ToLower())",
+            "network_error: $(([string]$r.network_error).ToLower())",
+            "composer_exists: $(([string]$r.composer_exists).ToLower())",
+            "composer_disabled: $(([string]$r.composer_disabled).ToLower())",
+            "composer_readonly: $(([string]$r.composer_readonly).ToLower())",
+            "composer_display: $($r.composer_display)",
+            "composer_visibility: $($r.composer_visibility)",
+            "composer_pointer_events: $($r.composer_pointer_events)",
+            "composer_width: $($r.composer_width)",
+            "composer_height: $($r.composer_height)",
+            'raw_conversation_text_published: false',
+            'browser_conversation_write_performed: false',
+            'second_send_performed: false',
+            'resend_authorized_by_result: false',
+            'user_relay_count: 0',
+            'readback_required: true'
+          ) -join "`n"
           $payload=@{body=$text}|ConvertTo-Json -Compress
           $pub=Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
           $rb=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($pub.id)" -Headers $headers -Method Get -TimeoutSec 30
-          if([string]$rb.body -cne $text){throw 'Result readback mismatch'}
-          Write-Output "readonly resolution PASS receipt=$($pub.id) decision=$($r.decision)"
+          if([string]$rb.body -cne $text){throw 'Probe result readback mismatch'}
+          Write-Output "exact persisted turn probe PASS receipt=$($pub.id) decision=$($r.decision)"
