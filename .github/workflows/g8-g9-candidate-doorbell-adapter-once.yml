@@ -1,0 +1,128 @@
+name: G8 to G9 Admitted Candidate Doorbell Adapter
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g8-g9-candidate-doorbell-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  candidate-doorbell:
+    if: >-
+      github.event.issue.number == 88 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'CONTROL_G8_G9_CANDIDATE_DOORBELL_EVENT_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Validate exact recovery authority and target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $event=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json
+          if($event.repository.full_name -cne 'D22977/gpt-browser-bridge'){throw 'Wrong repository'}
+          if([int]$event.issue.number -ne 88){throw 'Wrong issue'}
+          if($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER'){throw 'Wrong actor'}
+          $body=[string]$event.comment.body
+          if($body -notmatch '(?m)^CONTROL_G8_G9_CANDIDATE_DOORBELL_EVENT_V1\s*$'){throw 'Missing protocol header'}
+          function Need([string]$pattern,[string]$name){$m=[regex]::Match($body,$pattern);if(-not $m.Success){throw "Malformed field $name"};return $m.Groups[1].Value}
+          $recovery=Need '(?m)^source_recovery_authority:\s*(5509780443)\s*$' 'source_recovery_authority'
+          $handoff=Need '(?m)^source_handoff_authority:\s*(5501107432)\s*$' 'source_handoff_authority'
+          $binding=Need '(?m)^source_candidate_binding:\s*(5495537900)\s*$' 'source_candidate_binding'
+          $targetId=Need '(?m)^target_conversation_id:\s*([0-9a-f-]+)\s*$' 'target_conversation_id'
+          $targetUrl=Need '(?m)^target_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$' 'target_conversation_url'
+          $idem=Need '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
+          if($targetId -cne '6a957d5b-19e8-83e8-9925-3343facccaf3'){throw 'Wrong 009 id'}
+          if($targetUrl -cne 'https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhuan-an/c/6a957d5b-19e8-83e8-9925-3343facccaf3'){throw 'Wrong 009 URL'}
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g8-g9-candidate-doorbell';Accept='application/vnd.github+json'}
+          foreach($cid in @('5509780443','5501107432','5495537900')){$c=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$cid" -Headers $headers -Method Get -TimeoutSec 30;if([string]$c.issue_url -notmatch '/issues/88$'){throw "Authority $cid wrong issue"}}
+          $all=[System.Collections.Generic.List[object]]::new()
+          function AddFlat([object]$v){if($null -eq $v){return};if($v -is [System.Array]){foreach($n in $v){AddFlat $n};return};[void]$all.Add($v)}
+          for($p=1;$p -le 30;$p++){$before=$all.Count;AddFlat(Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30);if(($all.Count-$before)-lt 100){break}}
+          $switches=@($all|Where-Object{$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'}|Sort-Object{[int64]$_.id})
+          if($switches.Count -eq 0){throw 'No active switch'}
+          $latest=$switches[-1]
+          $gm=[regex]::Match([string]$latest.body,'(?m)^new_generation:\s*(\d{3})\s*$')
+          if(-not $gm.Success -or $gm.Groups[1].Value -cne '008'){throw "008 no longer ACTIVE latest=$($latest.id)"}
+          $whoami=(& whoami).Trim();$identity=[System.Security.Principal.WindowsIdentity]::GetCurrent().Name;$sid=[System.Diagnostics.Process]::GetCurrentProcess().SessionId
+          if($whoami -notmatch '(?i)^d22977\\lupun$' -or $identity -notmatch '(?i)^d22977\\lupun$'){throw 'Unexpected Windows identity'}
+          if(-not [Environment]::UserInteractive -or $sid -eq 0){throw 'Runner not interactive'}
+          if($env:RUNNER_NAME -cne 'gbb-reviewer-win-01'){throw 'Unexpected runner'}
+          "SOURCE_EVENT_COMMENT_ID=$($event.comment.id)"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TARGET_CONVERSATION_ID=$targetId"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TARGET_CONVERSATION_URL=$targetUrl"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "SOURCE_IDEMPOTENCY=$idem"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "ACTIVE_SWITCH_RECEIPT=$($latest.id)"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Current admitted sender access check and exactly one delivery
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $repoRoot='D:\AIWORK\GPT_BROWSER_BRIDGE'
+          $senderRel='src/gpt_send.mjs'
+          $senderPath=Join-Path $repoRoot $senderRel
+          $expectedBlob='6b7a523f98a9655ba2ca28f42696b80da365c92b'
+          $session='HERDR-DOORBELL-DB01-G1-20260816'
+          $db01Root='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell'
+          $db01Profile='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell\db01-profile'
+          $runtimeRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g8-g9-candidate-doorbell'
+          $stateRoot=Join-Path $runtimeRoot 'state';New-Item -ItemType Directory -Force -Path $stateRoot|Out-Null
+          $statePath=Join-Path $stateRoot "$($env:SOURCE_EVENT_COMMENT_ID).json"
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g8-g9-candidate-doorbell';Accept='application/vnd.github+json'}
+          function Publish([string]$body){$payload=@{body=$body}|ConvertTo-Json -Compress;$r=Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30;return [string]$r.id}
+          if(Test-Path -LiteralPath $statePath){$s=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json;if($s.status -eq 'SENT'){Write-Output 'NO_OP_DUPLICATE';exit 0};if($s.status -eq 'SENDING'){throw 'UNCERTAIN_SEND / NO_BLIND_RETRY'}}
+          if(-not(Test-Path -LiteralPath $senderPath)){throw 'PRESEND_ABORT_NO_SEND: local sender missing'}
+          $blob=(& git -C $repoRoot hash-object -- $senderRel).Trim();if($blob -cne $expectedBlob){throw "PRESEND_ABORT_NO_SEND: sender blob mismatch $blob"}
+          $herdr='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe';if(-not(Test-Path -LiteralPath $herdr)){throw 'PRESEND_ABORT_NO_SEND: Herdr missing'}
+          $hv=(& $herdr --version 2>&1|Out-String).Trim();if($LASTEXITCODE -ne 0){throw 'PRESEND_ABORT_NO_SEND: Herdr version failed'}
+          $agents=(& $herdr agent list 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'PRESEND_ABORT_NO_SEND: Herdr agent list failed'};try{$null=$agents|ConvertFrom-Json}catch{throw 'PRESEND_ABORT_NO_SEND: Herdr agent JSON invalid'}
+          $pw='C:\Users\Lupun\AppData\Roaming\npm\node_modules\@playwright\cli\node_modules\.bin\playwright.cmd';if(-not(Test-Path -LiteralPath $pw)){throw 'PRESEND_ABORT_NO_SEND: Playwright CLI missing'}
+          if(-not(Test-Path -LiteralPath $db01Root -PathType Container) -or -not(Test-Path -LiteralPath $db01Profile -PathType Container)){throw 'PRESEND_ABORT_NO_SEND: DB01 runtime/profile missing'}
+          Push-Location $db01Root
+          try{
+            $sessions=(& $pw cli list 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'PRESEND_ABORT_NO_SEND: session list failed'}
+            $tabs=(& $pw cli "-s=$session" tab-list 2>&1|Out-String);$tx=$LASTEXITCODE
+            if($tx -eq 1 -and $sessions -notmatch [regex]::Escape($session)){$open=(& $pw cli "-s=$session" open --persistent "--profile=$db01Profile" --headed 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw "PRESEND_ABORT_NO_SEND: DB01 restart failed $open"}}
+            elseif($tx -ne 0){throw 'PRESEND_ABORT_NO_SEND: DB01 ambiguous'}
+            $tabs=(& $pw cli "-s=$session" tab-list 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw 'PRESEND_ABORT_NO_SEND: final tab list failed'}
+            if($tabs -notmatch [regex]::Escape($env:TARGET_CONVERSATION_ID)){$go=(& $pw cli "-s=$session" goto $env:TARGET_CONVERSATION_URL 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw "PRESEND_ABORT_NO_SEND: exact navigation failed $go"}}
+          }finally{Pop-Location}
+          $env:GBB_SENDER_PATH=$senderPath;$env:GBB_SESSION=$session;$env:GBB_TARGET_URL=$env:TARGET_CONVERSATION_URL;$env:GBB_RUNTIME_ROOT=$runtimeRoot
+          $probe=@'
+          import { pathToFileURL } from 'node:url';
+          const mod=await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
+          await mod.readBaseline(process.env.GBB_TARGET_URL,{session:process.env.GBB_SESSION,allowBackgroundTab:true});
+          console.log(JSON.stringify({ok:true}));
+          '@
+          $probePath=Join-Path $env:RUNNER_TEMP "g8-g9-candidate-probe-$env:GITHUB_RUN_ID.mjs";Set-Content -LiteralPath $probePath -Value $probe -Encoding utf8
+          try{$po=(& node $probePath 2>&1|Out-String);if($LASTEXITCODE -ne 0){throw "PRESEND_ABORT_NO_SEND: readBaseline failed $po"}}finally{Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue}
+          @{status='SENDING';conversation_id=$env:TARGET_CONVERSATION_ID;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+          $env:GBB_PROMPT='Read GitHub directly. Rehydrate D22977/gpt-browser-bridge from Issue #43 latest CURRENT_START_HERE and Issue #88 owner handoff authority 5501107432, candidate binding 5495537900, and admitted candidate-doorbell recovery authority 5509780443. You are the exact generation009 Control candidate conversation 6a957d5b-19e8-83e8-9925-3343facccaf3. Publish and read back your own NEW CONTROL_GENERATION_ACK_V1 and CONTROL_HANDOFF_CONTINUITY_ACK_V1 on Issue #88, bound to handoff authority 5501107432, candidate binding 5495537900, exact conversation id/url, and this physical delivery event. Preserve the complete ACTIVE_WORK_SET from latest #43. Then wait for routing exam. Do not ask the owner to relay anything. GitHub is authority; Herdr/Web is transport only.'
+          $send=@'
+          import { pathToFileURL } from 'node:url';
+          const mod=await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
+          const r=await mod.sendJob({prompt:process.env.GBB_PROMPT,attempt:1,conversationUrl:process.env.GBB_TARGET_URL,runtimeRoot:process.env.GBB_RUNTIME_ROOT,session:process.env.GBB_SESSION,allowBackgroundTab:true});
+          console.log(JSON.stringify({job_id:r.job.job_id,prompt_hash:r.job.prompt_hash}));
+          '@
+          $sendPath=Join-Path $env:RUNNER_TEMP "g8-g9-candidate-send-$env:GITHUB_RUN_ID.mjs";Set-Content -LiteralPath $sendPath -Value $send -Encoding utf8
+          try{$out=(& node $sendPath 2>&1|Out-String).Trim();if($LASTEXITCODE -ne 0){throw $out};$line=($out -split "`n"|Where-Object{$_.Trim().StartsWith('{')}|Select-Object -Last 1);if(-not $line){throw 'Sender returned no JSON'};$sent=$line|ConvertFrom-Json}
+          catch{$detail=($_.Exception.Message -replace '[\r\n]+',' ');if($detail.Length -gt 500){$detail=$detail.Substring(0,500)};$rid=Publish((@('HERDR_G8_G9_CANDIDATE_DOORBELL_DELIVERY_V1','state: UNCERTAIN_SEND','no_blind_retry: true',"source_event_comment_id: $($env:SOURCE_EVENT_COMMENT_ID)","workflow_run_id: $env:GITHUB_RUN_ID","diagnostic: $detail",'user_relay_count: 0') -join "`n"));throw "UNCERTAIN_SEND receipt=$rid"}
+          finally{Remove-Item -LiteralPath $sendPath -Force -ErrorAction SilentlyContinue}
+          $s=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json;$s.status='SENT';$s.sent_at=(Get-Date).ToString('o');$s.sender_job_id=[string]$sent.job_id;$s|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+          $receipt=(@('HERDR_G8_G9_CANDIDATE_DOORBELL_DELIVERY_V1','state: DELIVERED','decision: PASS',"source_event_comment_id: $($env:SOURCE_EVENT_COMMENT_ID)",'source_recovery_authority: 5509780443','source_handoff_authority: 5501107432','source_candidate_binding: 5495537900',"active_switch_receipt: $($env:ACTIVE_SWITCH_RECEIPT)","target_conversation_id: $($env:TARGET_CONVERSATION_ID)","target_conversation_url: $($env:TARGET_CONVERSATION_URL)","sender_module_blob: $expectedBlob","sender_session: $session","sender_job_id: $($sent.job_id)","sender_prompt_hash: $($sent.prompt_hash)","workflow_run_id: $env:GITHUB_RUN_ID","runner_name: $env:RUNNER_NAME","herdr_version: $hv",'physical_send_count: 1','user_relay_count: 0','readback_required: true') -join "`n")
+          $rid=Publish $receipt
+          $rb=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$rid" -Headers $headers -Method Get -TimeoutSec 30
+          if([string]$rb.body -cne $receipt){throw 'Delivery receipt readback mismatch'}
+          Write-Output "candidate doorbell delivered receipt=$rid"
