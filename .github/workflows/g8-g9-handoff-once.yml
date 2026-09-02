@@ -53,6 +53,7 @@ jobs:
 
           $authority = Need '(?m)^source_handoff_authority:\s*(5501107432)\s*$' 'source_handoff_authority'
           $runnerAuthority = Need '(?m)^source_runner_authority:\s*(5501127513)\s*$' 'source_runner_authority'
+          $repairAuthority = Need '(?m)^source_recovery_authority:\s*(5508580684)\s*$' 'source_recovery_authority'
           $binding = Need '(?m)^source_candidate_binding:\s*(5495537900)\s*$' 'source_candidate_binding'
           $targetId = Need '(?m)^target_conversation_id:\s*([0-9a-f-]+)\s*$' 'target_conversation_id'
           $targetUrl = Need '(?m)^target_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$' 'target_conversation_url'
@@ -62,8 +63,7 @@ jobs:
           if ($targetUrl -cne 'https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhuan-an/c/6a957d5b-19e8-83e8-9925-3343facccaf3') { throw 'Wrong generation009 conversation URL' }
 
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent'='g8-g9-handoff-once'; Accept='application/vnd.github+json' }
-
-          foreach($commentId in @('5501107432','5501127513','5495537900')) {
+          foreach($commentId in @('5501107432','5501127513','5508580684','5495537900')) {
             $c = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$commentId" -Headers $headers -Method Get -TimeoutSec 30
             if ([string]$c.issue_url -notmatch '/issues/88$') { throw "Authority $commentId not on Issue88" }
           }
@@ -103,12 +103,11 @@ jobs:
           "TARGET_CONVERSATION_URL=$targetUrl" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "SOURCE_HANDFOFF_AUTHORITY=$authority" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "SOURCE_RUNNER_AUTHORITY=$runnerAuthority" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "SOURCE_RECOVERY_AUTHORITY=$repairAuthority" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "SOURCE_CANDIDATE_BINDING=$binding" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "SOURCE_IDEMPOTENCY=$idem" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Current Herdr and DB01 access capability check
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference='Stop'
           $herdr='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
@@ -175,84 +174,38 @@ jobs:
             if($s.status -eq 'SENDING'){throw 'UNCERTAIN_SEND / NO_BLIND_RETRY'}
           }
 
-          $wake = 'Read GitHub directly. Rehydrate D22977/gpt-browser-bridge from Issue #43 latest CURRENT_START_HERE and Issue #88 exact generation009 binding/owner handoff authority 5501107432. You are the generation009 Control candidate at exact conversation 6a957d5b-19e8-83e8-9925-3343facccaf3. Publish/read-back your own CONTROL_GENERATION_ACK_V1 and CONTROL_HANDOFF_CONTINUITY_ACK_V1 on Issue #88, bound to source handoff authority 5501107432 and candidate binding 5495537900, then wait for the routing exam. Do not ask the owner to relay anything. GitHub is authority; Herdr/Web is transport only.'
+          $wake = 'Read GitHub directly. Rehydrate D22977/gpt-browser-bridge from Issue #43 latest CURRENT_START_HERE and Issue #88 exact generation009 binding/owner handoff authority 5501107432 and recovery authority 5508580684. You are the generation009 Control candidate at exact conversation 6a957d5b-19e8-83e8-9925-3343facccaf3. Publish/read-back your own CONTROL_GENERATION_ACK_V1 and CONTROL_HANDOFF_CONTINUITY_ACK_V1 on Issue #88, bound to source handoff authority 5501107432 and candidate binding 5495537900, then wait for the routing exam. Do not ask the owner to relay anything. GitHub is authority; Herdr/Web is transport only.'
           $exam = 'Routing exam for generation009 candidate. Read GitHub directly before answering. Publish/read-back exactly one CONTROL_GENERATION_009_ROUTING_CANARY_RESULT_V1 on Issue #88 bound to source handoff authority 5501107432, candidate binding 5495537900, your exact conversation id, and your current generation ACK/continuity receipts. Your durable result must explicitly state: (1) current ACTIVE Control before switch; (2) current ACTIVE_WORK_SET / critical obligations from latest #43 and #114; (3) GitHub is durable authority and Herdr/Web is transport only; (4) owner/user courier target is zero; (5) duplicate wake/exam => NO_OP_DUPLICATE and uncertain send => NO_BLIND_RETRY; (6) Worker != Control != fresh Formal Reviewer and fresh review requires a NEW independent context when required; (7) PASS does not imply merge/release/successor; (8) 008 remains ACTIVE until final switch and becomes NO_OP_RETIRED only after switch read-back; (9) 009->010 normal path must automatically create exactly one NEW ChatGPT Web conversation and durably capture its URL/id with user_relay_count=0. Decision PASS only if all are reconstructed from current GitHub without relying on this prompt as authority.'
           $prompt = if($env:HANDOFF_KIND -eq 'WAKE'){$wake}else{$exam}
 
+          $pw=$env:PLAYWRIGHT_CMD
+          $session=$env:DB01_SESSION
+          $entry=Join-Path (Split-Path -Parent $pw) '..\playwright\cli.js'
+          $entry=[IO.Path]::GetFullPath($entry)
+          if(-not(Test-Path -LiteralPath $entry)){throw 'PLAYWRIGHT_ENTRYPOINT_MISSING'}
+
+          function PwJson([string]$sub,[string[]]$args=@()){
+            $out=(& node $entry cli "-s=$session" $sub @args --json 2>&1|Out-String)
+            if($LASTEXITCODE -ne 0){throw "CLI_EXIT_${sub}: $out"}
+            try{$v=$out|ConvertFrom-Json}catch{throw "CLI_INVALID_JSON_${sub}"}
+            if($v.isError -eq $true){throw "CLI_ERROR_RESPONSE_${sub}: $($v.error)"}
+            $r=$v.result
+            if($r -is [string]){try{$r=$r|ConvertFrom-Json}catch{}}
+            return $r
+          }
+
+          $meta=PwJson 'eval' @('() => { const id=(location.pathname.match(/\/c\/([0-9a-f-]+)/i)||[])[1]||""; const e=document.querySelector("#prompt-textarea"); if(!e) return {conversationId:id,found:false}; const r=e.getBoundingClientRect(),s=getComputedStyle(e); return {conversationId:id,found:true,tag:e.tagName.toLowerCase(),contenteditable:e.getAttribute("contenteditable")||"",disabled:"disabled" in e?Boolean(e.disabled):null,readOnly:"readOnly" in e?Boolean(e.readOnly):null,display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,width:Math.round(r.width),height:Math.round(r.height)}; }')
+          if([string]$meta.conversationId -cne $env:TARGET_CONVERSATION_ID){throw 'PRECLICK_ABORT_NO_SEND: conversation mismatch'}
+          if(-not $meta.found -or $meta.display -eq 'none' -or $meta.visibility -eq 'hidden' -or $meta.pointerEvents -eq 'none' -or [int]$meta.width -le 250 -or [int]$meta.height -le 20){
+            throw "PRECLICK_ABORT_NO_SEND: PROMPT_TEXTAREA_NOT_ACTIONABLE $($meta|ConvertTo-Json -Compress)"
+          }
+
           @{status='SENDING';kind=$env:HANDOFF_KIND;conversation_id=$env:TARGET_CONVERSATION_ID;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
-
-          $nodePath=Join-Path $env:RUNNER_TEMP "g8-g9-send-$env:GITHUB_RUN_ID.mjs"
-          $env:GBB_PROMPT=$prompt
-          $env:GBB_TARGET_URL=$env:TARGET_CONVERSATION_URL
-          $env:GBB_SESSION=$env:DB01_SESSION
-          $env:GBB_PW=$env:PLAYWRIGHT_CMD
-          $node=@'
-          import {spawnSync} from 'node:child_process';
-          import fs from 'node:fs';
-          import path from 'node:path';
-
-          const cliPath=process.env.GBB_PW;
-          const entry=path.join(path.dirname(cliPath),'..','playwright','cli.js');
-          if(!fs.existsSync(entry)) throw new Error('PLAYWRIGHT_ENTRYPOINT_MISSING');
-          const session=process.env.GBB_SESSION;
-          const targetId='6a957d5b-19e8-83e8-9925-3343facccaf3';
-
-          function cli(sub,args=[]){
-            const r=spawnSync(process.execPath,[entry,'cli',`-s=${session}`,sub,...args,'--json'],{encoding:'utf8',windowsHide:true,maxBuffer:32*1024*1024});
-            if(r.error) throw r.error;
-            if(r.status!==0) throw new Error(`CLI_EXIT_${sub}_${r.status}:${String(r.stderr||'').slice(0,500)}`);
-            let v; try{v=JSON.parse(String(r.stdout||''));}catch{throw new Error(`CLI_INVALID_JSON:${sub}`)}
-            if(v?.isError===true) throw new Error(`CLI_ERROR_RESPONSE:${sub}:${String(v.error||'').slice(0,500)}`);
-            let out=v?.result;
-            if(typeof out==='string'){try{out=JSON.parse(out)}catch{}}
-            return out;
-          }
-
-          const tabsRaw=cli('tab-list');
-          const lines=String(tabsRaw||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
-          const matches=lines.filter(s=>s.includes(targetId));
-          if(matches.length!==1) throw new Error(`TARGET_TAB_COUNT_${matches.length}`);
-          const m=/^-\s*(\d+):/.exec(matches[0]);
-          if(!m) throw new Error('TARGET_TAB_INDEX_MISSING');
-          cli('tab-select',[m[1]]);
-
-          let selector=null;
-          let lastMeta=null;
-          const deadline=Date.now()+60000;
-          while(Date.now()<deadline){
-            lastMeta=cli('eval',[`() => {
-              const id=(location.pathname.match(/\\/c\\/([0-9a-f-]+)/i)||[])[1]||'';
-              const texts=Array.from(document.querySelectorAll('textarea')).map((e,i)=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return {i,disabled:Boolean(e.disabled),readOnly:Boolean(e.readOnly),display:s.display,visibility:s.visibility,pointerEvents:s.pointerEvents,width:Math.round(r.width),height:Math.round(r.height),aria:e.getAttribute('aria-label')||'',placeholder:e.getAttribute('placeholder')||'',id:e.id||''}});
-              return {conversationId:id,texts};
-            }`]);
-            if(String(lastMeta?.conversationId)!==targetId) throw new Error('CONVERSATION_MISMATCH');
-            const enabled=(lastMeta?.texts||[]).filter(x=>!x.disabled&&!x.readOnly&&x.display!=='none'&&x.visibility!=='hidden'&&x.pointerEvents!=='none'&&x.width>250&&x.height>20);
-            if(enabled.length===1){
-              const e=enabled[0];
-              if(e.id==='prompt-textarea') selector='#prompt-textarea';
-              else if(e.aria) selector=`textarea[aria-label=${JSON.stringify(e.aria)}]`;
-              else if(e.placeholder) selector=`textarea[placeholder=${JSON.stringify(e.placeholder)}]`;
-              else selector='textarea:not([disabled])';
-              break;
-            }
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1000);
-          }
-          if(!selector) throw new Error(`EDITOR_NOT_READY:${JSON.stringify(lastMeta).slice(0,800)}`);
-
-          cli('fill',[selector,process.env.GBB_PROMPT]);
-          cli('click',['[data-testid="send-button"]']);
-          console.log(JSON.stringify({ok:true,selector}));
-          '@
-          Set-Content -LiteralPath $nodePath -Value $node -Encoding utf8
           try {
-            $result=& node $nodePath 2>&1|Out-String
-            if($LASTEXITCODE -ne 0){throw $result}
+            $null=PwJson 'fill' @('#prompt-textarea',$prompt)
+            $null=PwJson 'click' @('[data-testid="send-button"]')
           } catch {
-            $detail=($_.Exception.Message -replace '[\r\n]+',' ')
-            if($detail.Length -gt 800){$detail=$detail.Substring(0,800)}
-            throw "UNCERTAIN_SEND_OR_PRECLICK_FAILURE / NO_BLIND_RETRY: $detail"
-          } finally {
-            Remove-Item -LiteralPath $nodePath -Force -ErrorAction SilentlyContinue
+            throw "UNCERTAIN_SEND / NO_BLIND_RETRY: $($_.Exception.Message)"
           }
 
           @{status='SENT';kind=$env:HANDOFF_KIND;conversation_id=$env:TARGET_CONVERSATION_ID;workflow_run_id=$env:GITHUB_RUN_ID;sent_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
@@ -265,6 +218,7 @@ jobs:
             "source_event_comment_id: $env:SOURCE_EVENT_COMMENT_ID",
             "source_handoff_authority: $env:SOURCE_HANDFOFF_AUTHORITY",
             "source_runner_authority: $env:SOURCE_RUNNER_AUTHORITY",
+            "source_recovery_authority: $env:SOURCE_RECOVERY_AUTHORITY",
             "source_candidate_binding: $env:SOURCE_CANDIDATE_BINDING",
             "target_conversation_id: $env:TARGET_CONVERSATION_ID",
             "target_conversation_url: $env:TARGET_CONVERSATION_URL",
@@ -287,15 +241,15 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g8-g9-handoff-once';Accept='application/vnd.github+json'}
+
           function GetAll {
             $all=[System.Collections.Generic.List[object]]::new()
-            function AF([object]$v){if($null -eq $v){return};if($v -is [System.Array]){foreach($n in $v){AF $n};return};[void]$all.Add($v)}
             for($p=1;$p -le 30;$p++){
-              $before=$all.Count
-              AF (Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30)
-              if(($all.Count-$before)-lt 100){break}
+              $page=@(Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30)
+              foreach($x in $page){[void]$all.Add($x)}
+              if($page.Count -lt 100){break}
             }
-            return $all.ToArray()
+            return $all
           }
           function Publish([string]$text){
             $payload=@{body=$text}|ConvertTo-Json -Compress
@@ -321,8 +275,8 @@ jobs:
               })
               if($ack.Count -eq 1 -and $cont.Count -eq 1){
                 $text=@(
-                  'HERDR_G8_G9_HANDOFF_GUARD_RESULT_V1',
-                  'state: PASS_WAKE_ACK_CONTINUITY_OBSERVED',
+                  'CONTROL_G8_G9_HANDOFF_GUARD_RESULT_V1',
+                  'state: PASS',
                   'decision: PASS',
                   'handoff_kind: WAKE',
                   "source_event_comment_id: $env:SOURCE_EVENT_COMMENT_ID",
@@ -345,13 +299,13 @@ jobs:
               })
               if($canary.Count -eq 1){
                 $text=@(
-                  'HERDR_G8_G9_HANDOFF_GUARD_RESULT_V1',
-                  'state: PASS_ROUTING_CANARY_OBSERVED',
+                  'CONTROL_G8_G9_HANDOFF_GUARD_RESULT_V1',
+                  'state: PASS',
                   'decision: PASS',
                   'handoff_kind: EXAM',
                   "source_event_comment_id: $env:SOURCE_EVENT_COMMENT_ID",
                   "source_delivery_receipt: $env:DELIVERY_RECEIPT_ID",
-                  "generation009_routing_canary_receipt: $($canary[0].id)",
+                  "generation009_canary_receipt: $($canary[0].id)",
                   "target_conversation_id: $env:TARGET_CONVERSATION_ID",
                   'user_relay_count: 0',
                   'readback_required: true'
@@ -360,22 +314,21 @@ jobs:
                 Write-Output "PASS guard=$id"
                 exit 0
               }
-              if($canary.Count -gt 1){throw 'Duplicate/ambiguous 009 routing canary receipts'}
+              if($canary.Count -gt 1){throw 'Duplicate/ambiguous 009 canary receipts'}
             }
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds 10
           }
 
           $text=@(
-            'HERDR_G8_G9_HANDOFF_GUARD_RESULT_V1',
-            'state: BLOCKED_TIMEOUT_WAITING_CANDIDATE_DURABLE_RESULT',
-            'decision: BLOCKED',
+            'CONTROL_G8_G9_HANDOFF_GUARD_RESULT_V1',
+            'state: BLOCKED',
+            'decision: BLOCKED_TIMEOUT_WAITING_EXACT_009_DURABLE_RESULT',
             "handoff_kind: $env:HANDOFF_KIND",
             "source_event_comment_id: $env:SOURCE_EVENT_COMMENT_ID",
             "source_delivery_receipt: $env:DELIVERY_RECEIPT_ID",
             "target_conversation_id: $env:TARGET_CONVERSATION_ID",
-            'physical_resend_authorized: false',
             'user_relay_count: 0',
             'readback_required: true'
           ) -join "`n"
           $id=Publish $text
-          throw "Timed out waiting for generation009 durable result; receipt=$id; NO_BLIND_RETRY"
+          throw "BLOCKED guard=$id"
