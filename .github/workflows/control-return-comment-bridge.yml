@@ -40,12 +40,23 @@ jobs:
           $gen = [regex]::Match($body, '(?m)^control_generation:\s*(\d{3})\s*$')
           $card = [regex]::Match($body, '(?m)^card_id:\s*([A-Za-z0-9_-]+)\s*$')
           $source = [regex]::Match($body, '(?m)^source_dispatch_receipt:\s*(\d+)\s*$')
-          $action = [regex]::Match($body, '(?m)^action:\s*(MINIMAL_HERDR_ACK)\s*$')
+          $action = [regex]::Match($body, '(?m)^action:\s*(MINIMAL_HERDR_ACK|FRESH_WEBGPT_REVIEW_120)\s*$')
           $idem = [regex]::Match($body, '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$')
           if (-not ($gen.Success -and $card.Success -and $source.Success -and $action.Success -and $idem.Success)) { throw 'Malformed HERDR_CONTROL_WAKE_V1' }
           if ($gen.Groups[1].Value -cne '009') { throw 'Wake is not generation009' }
-          if ($card.Groups[1].Value -cne 'HERDR-G9-MINIMAL-DIRECT-WAKE-01') { throw 'Wrong card' }
-          if ($source.Groups[1].Value -cne '5525544200') { throw 'Wrong source dispatch receipt' }
+
+          $requestedAction = $action.Groups[1].Value
+          $requestedCard = $card.Groups[1].Value
+          $requestedSource = $source.Groups[1].Value
+          if ($requestedAction -eq 'MINIMAL_HERDR_ACK') {
+            if ($requestedCard -cne 'HERDR-G9-MINIMAL-DIRECT-WAKE-01') { throw 'Wrong minimal-liveness card' }
+            if ($requestedSource -cne '5525544200') { throw 'Wrong minimal-liveness source dispatch receipt' }
+          } elseif ($requestedAction -eq 'FRESH_WEBGPT_REVIEW_120') {
+            if ($requestedCard -cne 'GBB-SIMPLIFICATION-NIGHT-AUDIT-00') { throw 'Wrong fresh-review card' }
+            if ($requestedSource -cne '5532944810') { throw 'Wrong fresh-review transport authority receipt' }
+          } else {
+            throw 'Unsupported action'
+          }
 
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-herdr-outbound-g9'; Accept = 'application/vnd.github+json' }
           $all = [System.Collections.Generic.List[object]]::new()
@@ -76,7 +87,9 @@ jobs:
           if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "Unexpected runner: $env:RUNNER_NAME" }
 
           "WAKE_COMMENT_ID=$($event.comment.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "SOURCE_RECEIPT=$($source.Groups[1].Value)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "SOURCE_RECEIPT=$requestedSource" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "WAKE_ACTION=$requestedAction" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "WAKE_CARD_ID=$requestedCard" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "ACTIVE_SWITCH=$($latest.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "WAKE_IDEMPOTENCY=$($idem.Groups[1].Value)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
@@ -128,7 +141,12 @@ jobs:
 
           @{ status='SENDING'; pane_id=$pane; agent_session=$session; workflow_run_id=$env:GITHUB_RUN_ID; observed_at=(Get-Date).ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
 
-          $prompt = "Read GitHub directly. D22977/gpt-browser-bridge Issue #103 wake comment $($env:WAKE_COMMENT_ID) and source dispatch $($env:SOURCE_RECEIPT). Minimal Herdr liveness only. Publish and read back exactly one HERDR_MINIMAL_ACK_V1 on Issue #103 binding source_wake_comment_id $($env:WAKE_COMMENT_ID), your current pane_id, agent_session, `herdr --version`, and user_relay_count: 0. Do not open/control ChatGPT, DB01, or any browser. Do not mutate files, Control generation, product state, review, merge, release, or infer successor. GitHub is authority."
+          if ($env:WAKE_ACTION -eq 'MINIMAL_HERDR_ACK') {
+            $prompt = "Read GitHub directly. D22977/gpt-browser-bridge Issue #103 wake comment $($env:WAKE_COMMENT_ID) and source dispatch $($env:SOURCE_RECEIPT). Minimal Herdr liveness only. Publish and read back exactly one HERDR_MINIMAL_ACK_V1 on Issue #103 binding source_wake_comment_id $($env:WAKE_COMMENT_ID), your current pane_id, agent_session, `herdr --version`, and user_relay_count: 0. Do not open/control ChatGPT, DB01, or any browser. Do not mutate files, Control generation, product state, review, merge, release, or infer successor. GitHub is authority."
+          } else {
+            $prompt = "Read GitHub directly. Rehydrate D22977/gpt-browser-bridge Issue #120 GBB-SIMPLIFICATION-NIGHT-AUDIT-00 and transport authority comment 5532944810. You are transport/coordinator only, not the Reviewer. Perform ACCESS_CAPABILITY_CHECK_V1 for a currently admitted fresh ChatGPT Web route. Prefer the historically proven Codex In-app Browser / automation-owned isolated fresh-tab route from Issue #83; do not use Control009 conversation, prior Reviewer context, DB01, Playwright composer repair, or the human/default browser. If a current admitted fresh-WebGPT route is live, create exactly one NEW/fresh independent ChatGPT Web conversation, send only this minimal wake pointer: 'Read GitHub directly. You are the NEW fresh independent WebGPT Reviewer for D22977/gpt-browser-bridge Issue #120. Rehydrate #120 and review exactly as authorized. Publish and read back GBB_SIMPLIFICATION_FRESH_REVIEW_RESULT_V1 on #120. Do not mutate files, merge, release, migrate, or act as Control.' Then publish/read-back on Issue #120 exactly one GBB_FRESH_WEBGPT_REVIEW_LAUNCH_RESULT_V1 binding source_wake_comment_id $($env:WAKE_COMMENT_ID), herdr_pane $pane, herdr_agent_session $session, fresh reviewer conversation id/url or other exact binding, transport selected, user_relay_count: 0, and state: DELIVERED. If no current admitted fresh-WebGPT route is available, publish/read-back that same protocol with state: BLOCKED and first_missing_capability; do not invent/repair transport and do not blind retry. GitHub is authority."
+          }
+
           $promptRaw = & $herdr agent prompt $pane $prompt
           if ($LASTEXITCODE -ne 0) { throw 'herdr agent prompt failed; state remains SENDING; NO_BLIND_RETRY' }
           $result = $promptRaw | ConvertFrom-Json
@@ -138,8 +156,8 @@ jobs:
 
           @{ status='SENT'; pane_id=$pane; agent_session=$session; workflow_run_id=$env:GITHUB_RUN_ID; sent_at=(Get-Date).ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
 
-          $receipt = @('HERDR_GITHUB_EVENT_BRIDGE_DELIVERY_V1','state: CONSUMED_STARTED','decision: PASS','control_generation: 009',"active_switch_receipt: $($env:ACTIVE_SWITCH)","source_wake_comment_id: $($env:WAKE_COMMENT_ID)","source_dispatch_receipt: $($env:SOURCE_RECEIPT)",'card_id: HERDR-G9-MINIMAL-DIRECT-WAKE-01','action: MINIMAL_HERDR_ACK',"target_pane: $pane", "target_agent_session: $session", "runner_name: $env:RUNNER_NAME", "workflow_run_id: $env:GITHUB_RUN_ID", 'user_relay_count: 0', 'duplicate_prompt_count: 0', 'readback_required: true') -join "`n"
+          $receipt = @('HERDR_GITHUB_EVENT_BRIDGE_DELIVERY_V1','state: CONSUMED_STARTED','decision: PASS','control_generation: 009',"active_switch_receipt: $($env:ACTIVE_SWITCH)","source_wake_comment_id: $($env:WAKE_COMMENT_ID)","source_dispatch_receipt: $($env:SOURCE_RECEIPT)","card_id: $($env:WAKE_CARD_ID)","action: $($env:WAKE_ACTION)","target_pane: $pane", "target_agent_session: $session", "runner_name: $env:RUNNER_NAME", "workflow_run_id: $env:GITHUB_RUN_ID", 'user_relay_count: 0', 'duplicate_prompt_count: 0', 'readback_required: true') -join "`n"
           $posted = Publish $receipt
           $readback = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
           if ([string]$readback.body -cne $receipt) { throw "Durable delivery read-back mismatch receipt=$($posted.id)" }
-          Write-Output "Herdr prompted pane=$pane session=$session receipt=$($posted.id)"
+          Write-Output "Herdr prompted pane=$pane session=$session receipt=$($posted.id) action=$($env:WAKE_ACTION)"
