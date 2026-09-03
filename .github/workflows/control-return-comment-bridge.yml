@@ -40,7 +40,7 @@ jobs:
           $gen = [regex]::Match($body, '(?m)^control_generation:\s*(\d{3})\s*$')
           $card = [regex]::Match($body, '(?m)^card_id:\s*([A-Za-z0-9_-]+)\s*$')
           $source = [regex]::Match($body, '(?m)^source_dispatch_receipt:\s*(\d+)\s*$')
-          $action = [regex]::Match($body, '(?m)^action:\s*(MINIMAL_HERDR_ACK|FRESH_WEBGPT_REVIEW_120)\s*$')
+          $action = [regex]::Match($body, '(?m)^action:\s*(MINIMAL_HERDR_ACK|FRESH_WEBGPT_REVIEW_120|FRESH_REVIEW_STATUS_120)\s*$')
           $idem = [regex]::Match($body, '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$')
           if (-not ($gen.Success -and $card.Success -and $source.Success -and $action.Success -and $idem.Success)) { throw 'Malformed HERDR_CONTROL_WAKE_V1' }
           if ($gen.Groups[1].Value -cne '009') { throw 'Wake is not generation009' }
@@ -54,6 +54,9 @@ jobs:
           } elseif ($requestedAction -eq 'FRESH_WEBGPT_REVIEW_120') {
             if ($requestedCard -cne 'GBB-SIMPLIFICATION-NIGHT-AUDIT-00') { throw 'Wrong fresh-review card' }
             if ($requestedSource -cne '5532944810') { throw 'Wrong fresh-review transport authority receipt' }
+          } elseif ($requestedAction -eq 'FRESH_REVIEW_STATUS_120') {
+            if ($requestedCard -cne 'GBB-SIMPLIFICATION-NIGHT-AUDIT-00') { throw 'Wrong fresh-review adjudication card' }
+            if ($requestedSource -cne '5533031068') { throw 'Wrong fresh-review adjudication authority receipt' }
           } else {
             throw 'Unsupported action'
           }
@@ -93,7 +96,7 @@ jobs:
           "ACTIVE_SWITCH=$($latest.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "WAKE_IDEMPOTENCY=$($idem.Groups[1].Value)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Resolve one safe Herdr target and prompt exactly once
+      - name: Resolve or inspect Herdr target
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -102,19 +105,55 @@ jobs:
           if (-not (Test-Path -LiteralPath $herdr)) { throw "Herdr CLI missing: $herdr" }
 
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-herdr-outbound-g9'; Accept = 'application/vnd.github+json' }
-          function Publish([string]$body) {
+          function Publish103([string]$body) {
             $payload = @{ body = $body } | ConvertTo-Json -Compress
             return Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/103/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
           }
+          function Publish120([string]$body) {
+            $payload = @{ body = $body } | ConvertTo-Json -Compress
+            return Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/120/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+          }
 
           $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\github-event-herdr-bridge\state'
+
+          if ($env:WAKE_ACTION -eq 'FRESH_REVIEW_STATUS_120') {
+            $sourceStatePath = Join-Path $stateRoot 'g9-5532954594.json'
+            $wakeState = 'ABSENT'
+            $statePane = ''
+            $stateSession = ''
+            $stateRun = ''
+            if (Test-Path -LiteralPath $sourceStatePath) {
+              $prior = Get-Content -LiteralPath $sourceStatePath -Raw | ConvertFrom-Json
+              $wakeState = [string]$prior.status
+              $statePane = [string]$prior.pane_id
+              $stateSession = [string]$prior.agent_session
+              $stateRun = [string]$prior.workflow_run_id
+            }
+            $listRaw = & $herdr agent list
+            if ($LASTEXITCODE -ne 0) { throw "herdr agent list failed exit=$LASTEXITCODE" }
+            $list = $listRaw | ConvertFrom-Json
+            $agents = @($list.result.agents)
+            $targetRows = @($agents | Where-Object { $_.agent -eq 'codex' -and $_.pane_id -and $_.agent_session.value })
+            $snapshot = ($targetRows | ForEach-Object { "$($_.pane_id)|$($_.agent_status)|$($_.agent_session.value)|$($_.cwd)|$($_.name)" }) -join '; '
+            if ($wakeState -eq 'SENT') { $retry = 'NO_RESEND_AWAIT_TARGET_EVIDENCE' }
+            elseif ($wakeState -eq 'SENDING') { $retry = 'UNCERTAIN_SEND_NO_BLIND_RETRY' }
+            elseif ($wakeState -eq 'ABSENT') { $retry = 'NEW_LOGICAL_WAKE_ALLOWED_ONLY_AFTER_EXACT_TARGET_IDLE' }
+            else { $retry = 'CONTROL_REQUIRED_UNKNOWN_STATE' }
+            $body = @('GBB_FRESH_REVIEW_WAKE_ADJUDICATION_V1','state: PASS_READ_ONLY','control_generation: 009','source_fresh_review_wake: 5532954594',"wake_state: $wakeState", "state_pane: $statePane", "state_agent_session: $stateSession", "source_workflow_run_id: $stateRun", "current_codex_targets: $snapshot", "retry_legality: $retry", 'agent_prompt_performed: false', 'browser_action_performed: false', 'user_relay_count: 0', "adjudication_workflow_run_id: $env:GITHUB_RUN_ID", 'readback_required: true') -join "`n"
+            $posted = Publish120 $body
+            $readback = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$readback.body -cne $body) { throw "Adjudication read-back mismatch receipt=$($posted.id)" }
+            Write-Output "Fresh-review wake adjudicated state=$wakeState receipt=$($posted.id)"
+            exit 0
+          }
+
           New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
           $statePath = Join-Path $stateRoot "g9-$($env:WAKE_COMMENT_ID).json"
           if (Test-Path -LiteralPath $statePath) {
             $prior = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
             if ($prior.status -eq 'SENT') {
               $noop = @('HERDR_GITHUB_EVENT_BRIDGE_DELIVERY_V1','state: NO_OP_DUPLICATE','control_generation: 009',"source_wake_comment_id: $($env:WAKE_COMMENT_ID)","target_pane: $($prior.pane_id)","target_agent_session: $($prior.agent_session)",'second_prompt_sent: false',"workflow_run_id: $env:GITHUB_RUN_ID",'user_relay_count: 0') -join "`n"
-              [void](Publish $noop)
+              [void](Publish103 $noop)
               exit 0
             }
             if ($prior.status -eq 'SENDING') { throw 'UNCERTAIN_SEND / NO_BLIND_RETRY' }
@@ -157,7 +196,7 @@ jobs:
           @{ status='SENT'; pane_id=$pane; agent_session=$session; workflow_run_id=$env:GITHUB_RUN_ID; sent_at=(Get-Date).ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
 
           $receipt = @('HERDR_GITHUB_EVENT_BRIDGE_DELIVERY_V1','state: CONSUMED_STARTED','decision: PASS','control_generation: 009',"active_switch_receipt: $($env:ACTIVE_SWITCH)","source_wake_comment_id: $($env:WAKE_COMMENT_ID)","source_dispatch_receipt: $($env:SOURCE_RECEIPT)","card_id: $($env:WAKE_CARD_ID)","action: $($env:WAKE_ACTION)","target_pane: $pane", "target_agent_session: $session", "runner_name: $env:RUNNER_NAME", "workflow_run_id: $env:GITHUB_RUN_ID", 'user_relay_count: 0', 'duplicate_prompt_count: 0', 'readback_required: true') -join "`n"
-          $posted = Publish $receipt
+          $posted = Publish103 $receipt
           $readback = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
           if ([string]$readback.body -cne $receipt) { throw "Durable delivery read-back mismatch receipt=$($posted.id)" }
           Write-Output "Herdr prompted pane=$pane session=$session receipt=$($posted.id) action=$($env:WAKE_ACTION)"
