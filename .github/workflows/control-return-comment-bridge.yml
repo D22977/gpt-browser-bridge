@@ -40,7 +40,7 @@ jobs:
           $gen = [regex]::Match($body, '(?m)^control_generation:\s*(\d{3})\s*$')
           $card = [regex]::Match($body, '(?m)^card_id:\s*([A-Za-z0-9_-]+)\s*$')
           $source = [regex]::Match($body, '(?m)^source_dispatch_receipt:\s*(\d+)\s*$')
-          $action = [regex]::Match($body, '(?m)^action:\s*(MINIMAL_HERDR_ACK|FRESH_WEBGPT_REVIEW_120|FRESH_REVIEW_STATUS_120|FRESH_REVIEW_OBSERVE_120)\s*$')
+          $action = [regex]::Match($body, '(?m)^action:\s*(MINIMAL_HERDR_ACK|FRESH_WEBGPT_REVIEW_120|FRESH_REVIEW_STATUS_120|FRESH_REVIEW_OBSERVE_120|FRESH_REVIEW_BLOCKER_REPORT_120)\s*$')
           $idem = [regex]::Match($body, '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$')
           if (-not ($gen.Success -and $card.Success -and $source.Success -and $action.Success -and $idem.Success)) { throw 'Malformed HERDR_CONTROL_WAKE_V1' }
           if ($gen.Groups[1].Value -cne '009') { throw 'Wake is not generation009' }
@@ -60,6 +60,9 @@ jobs:
           } elseif ($requestedAction -eq 'FRESH_REVIEW_OBSERVE_120') {
             if ($requestedCard -cne 'GBB-SIMPLIFICATION-NIGHT-AUDIT-00') { throw 'Wrong fresh-review observation card' }
             if ($requestedSource -cne '5538759391') { throw 'Wrong fresh-review observation authority receipt' }
+          } elseif ($requestedAction -eq 'FRESH_REVIEW_BLOCKER_REPORT_120') {
+            if ($requestedCard -cne 'GBB-SIMPLIFICATION-NIGHT-AUDIT-00') { throw 'Wrong fresh-review blocker-report card' }
+            if ($requestedSource -cne '5538833098') { throw 'Wrong fresh-review blocker-report authority receipt' }
           } else {
             throw 'Unsupported action'
           }
@@ -261,6 +264,8 @@ jobs:
 
           if ($env:WAKE_ACTION -eq 'MINIMAL_HERDR_ACK') {
             $prompt = "Read GitHub directly. D22977/gpt-browser-bridge Issue #103 wake comment $($env:WAKE_COMMENT_ID) and source dispatch $($env:SOURCE_RECEIPT). Minimal Herdr liveness only. Publish and read back exactly one HERDR_MINIMAL_ACK_V1 on Issue #103 binding source_wake_comment_id $($env:WAKE_COMMENT_ID), your current pane_id, agent_session, `herdr --version`, and user_relay_count: 0. Do not open/control ChatGPT, DB01, or any browser. Do not mutate files, Control generation, product state, review, merge, release, or infer successor. GitHub is authority."
+          } elseif ($env:WAKE_ACTION -eq 'FRESH_REVIEW_BLOCKER_REPORT_120') {
+            $prompt = "Read GitHub directly. Rehydrate D22977/gpt-browser-bridge Issue #120, especially source fresh-review wake 5538710162, physical delivery 5538712722, read-only observation 5538812257, and blocker-report authority 5538833098. This is a NEW coordinator-status action, NOT a retry of the fresh-WebGPT launch. Do not open/control/send to any browser or ChatGPT context. Do not mutate files. Report only the typed terminal reason your prior FRESH_WEBGPT_REVIEW_120 attempt did not create a fresh WebGPT context. Publish and read back exactly one GBB_FRESH_WEBGPT_REVIEW_BLOCKER_REPORT_V1 on Issue #120 with source_fresh_review_wake: 5538710162; prior_target_pane: w2:p1; prior_target_agent_session: 01a0513f-4e68-7573-bf38-72e2120ebe1d; state: BLOCKED; first_missing_capability or first_failed_gate; observed_current_route_inventory; repair_class: TRANSPORT_MECHANICAL|ACCESS_ADMISSION|AUTHORITY|EXTERNAL_SERVICE|UNKNOWN; browser_action_performed: false; fresh_reviewer_created: false; user_relay_count: 0; readback_verified: true. If the prior attempt actually created a fresh WebGPT but publication alone failed, publish that fact and its exact fresh conversation binding instead. Do not publish hidden reasoning or transcript. GitHub is authority."
           } else {
             $prompt = "Read GitHub directly. Rehydrate D22977/gpt-browser-bridge Issue #120 GBB-SIMPLIFICATION-NIGHT-AUDIT-00 and transport authority comment 5532944810. You are transport/coordinator only, not the Reviewer. Perform ACCESS_CAPABILITY_CHECK_V1 for a currently admitted fresh ChatGPT Web route. Prefer the historically proven Codex In-app Browser / automation-owned isolated fresh-tab route from Issue #83; do not use Control009 conversation, prior Reviewer context, DB01, Playwright composer repair, or the human/default browser. If a current admitted fresh-WebGPT route is live, create exactly one NEW/fresh independent ChatGPT Web conversation, send only this minimal wake pointer: 'Read GitHub directly. You are the NEW fresh independent WebGPT Reviewer for D22977/gpt-browser-bridge Issue #120. Rehydrate #120 and review exactly as authorized. Publish and read back GBB_SIMPLIFICATION_FRESH_REVIEW_RESULT_V1 on #120. Do not mutate files, merge, release, migrate, or act as Control.' Then publish/read-back on Issue #120 exactly one GBB_FRESH_WEBGPT_REVIEW_LAUNCH_RESULT_V1 binding source_wake_comment_id $($env:WAKE_COMMENT_ID), herdr_pane $pane, herdr_agent_session $session, fresh reviewer conversation id/url or other exact binding, transport selected, user_relay_count: 0, and state: DELIVERED. If no current admitted fresh-WebGPT route is available, publish/read-back that same protocol with state: BLOCKED and first_missing_capability; do not invent/repair transport and do not blind retry. GitHub is authority."
           }
