@@ -481,3 +481,152 @@ test("unified project-state writer rejects NEEDS_HUMAN to RUNNING from every cal
   );
   assert.deepEqual(await readJson(paths.state), needsHuman);
 });
+
+
+// ---------------------------------------------------------------------------
+// Issue #89: optional Control-resume delivery hook (exact-once, duplicate-safe)
+// ---------------------------------------------------------------------------
+
+import { runResumeDeliveryCheck } from "../src/supervisor.mjs";
+
+const RESUME_SOURCE = 5307312987;
+const RESUME_CARD = "HERDR-NATIVE-REGISTERED-WATCH-AI70-ADMISSION-01";
+
+function resumeWaitTuple(overrides = {}) {
+  return {
+    source_terminal_receipt: RESUME_SOURCE,
+    control_generation: 2,
+    card_id: RESUME_CARD,
+    allowed_action_class: "RUNTIME_ADMISSION_OPERATOR",
+    target: {
+      agent_name: "LUNA_CLI_HERDR_W1",
+      executor_instance_id: "LUNA_CLI_HERDR_W1_01",
+      surface: "CLI",
+      herdr_agent: "w1",
+    },
+    ...overrides,
+  };
+}
+
+function resumeDecisionBody(overrides = {}) {
+  return `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 2
+decision_topic: TEST_RESUME
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #43 receipt ${overrides.sourceReceipt ?? RESUME_SOURCE}
+source_control_generation: 2
+resume_card_id: ${overrides.cardId ?? RESUME_CARD}
+
+EXACT_TARGET
+executor_role: RUNTIME_ADMISSION_OPERATOR
+agent_name: LUNA_CLI_HERDR_W1
+executor_instance_id: LUNA_CLI_HERDR_W1_01
+surface: CLI
+minimal_wake: Read GitHub directly. D22977/gpt-browser-bridge Issue #43 receipt 5307351523. Execute only that existing bounded native-watch admission card.
+`;
+}
+
+function resumeReceipt(logicalKey, id = 5309001001) {
+  return `HERDR_RESUME_DELIVERY_V1
+state: TERMINAL
+decision: DELIVERED
+logical_event_key: ${logicalKey}
+delivery_count: 1
+`;
+}
+
+test("resume delivery hook delivers exactly once through the configured boundary", async () => {
+  const prompts = [];
+  const published = [];
+  const cfg = {
+    waitTuple: resumeWaitTuple(),
+    protocol: "HERDR_RESUME_DELIVERY_V1",
+    readDecisionBody: async () => resumeDecisionBody(),
+    readComments: async () => [],
+    herdr: { prompt: async (agent, text) => { prompts.push({ agent, text }); return { accepted: true }; } },
+    publishReceipt: async (r) => { published.push(r); return { id: 5309001009 }; },
+  };
+  const result = await runResumeDeliveryCheck({ resumeDelivery: cfg }, { isoNow: "2026-08-01T09:00:00+08:00" });
+  assert.equal(result.delivered, true);
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].agent, "w1");
+  assert.match(prompts[0].text, /Read GitHub directly/);
+  assert.equal(published.length, 1);
+  assert.ok(result.events.some((e) => e.type === "resume_delivery_delivered"));
+});
+
+test("resume delivery hook is NO_OP_DUPLICATE when a prior receipt exists", async () => {
+  const prompts = [];
+  const published = [];
+  const key = "5307312987|2|HERDR-NATIVE-REGISTERED-WATCH-AI70-ADMISSION-01|LUNA_CLI_HERDR_W1|LUNA_CLI_HERDR_W1_01";
+  const cfg = {
+    waitTuple: resumeWaitTuple(),
+    protocol: "HERDR_RESUME_DELIVERY_V1",
+    readDecisionBody: async () => resumeDecisionBody(),
+    readComments: async () => [{ id: 5309001001, body: resumeReceipt(key) }],
+    herdr: { prompt: async () => { prompts.push(1); return {}; } },
+    publishReceipt: async () => { published.push(1); return { id: 1 }; },
+  };
+  const result = await runResumeDeliveryCheck({ resumeDelivery: cfg }, { isoNow: "2026-08-01T09:00:00+08:00" });
+  assert.equal(result.duplicate, true);
+  assert.equal(result.delivered, false);
+  assert.equal(prompts.length, 0);
+  assert.equal(published.length, 0);
+  assert.ok(result.events.some((e) => e.type === "resume_delivery_no_op_duplicate"));
+});
+
+test("resume delivery hook fails closed on wrong decision, stale tuple, and read errors", async () => {
+  const badGeneration = await runResumeDeliveryCheck(
+    { resumeDelivery: { waitTuple: resumeWaitTuple(), readDecisionBody: async () => resumeDecisionBody({ sourceReceipt: 999999 }) , readComments: async () => [], herdr: { prompt: async () => {} }, publishReceipt: async () => {} } },
+    { isoNow: "2026-08-01T09:00:00+08:00" }
+  );
+  assert.equal(badGeneration.delivered, false);
+  assert.equal(badGeneration.duplicate, false);
+  assert.ok(badGeneration.events.some((e) => e.type === "resume_delivery_decision_not_applicable"));
+
+  const badTuple = await runResumeDeliveryCheck(
+    { resumeDelivery: { waitTuple: { ...resumeWaitTuple(), control_generation: "x" }, readDecisionBody: async () => "", readComments: async () => [], herdr: { prompt: async () => {} }, publishReceipt: async () => {} } },
+    { isoNow: "2026-08-01T09:00:00+08:00" }
+  );
+  assert.equal(badTuple.delivered, false);
+  assert.ok(badTuple.events.some((e) => e.type === "resume_delivery_config_invalid"));
+
+  const readError = await runResumeDeliveryCheck(
+    { resumeDelivery: { waitTuple: resumeWaitTuple(), readDecisionBody: async () => { throw new Error("gh down"); }, readComments: async () => [], herdr: { prompt: async () => {} }, publishReceipt: async () => {} } },
+    { isoNow: "2026-08-01T09:00:00+08:00" }
+  );
+  assert.equal(readError.delivered, false);
+  assert.ok(readError.events.some((e) => e.type === "resume_delivery_decision_read_failed"));
+
+  const noConfig = await runResumeDeliveryCheck({}, { isoNow: "2026-08-01T09:00:00+08:00" });
+  assert.deepEqual(noConfig.events, []);
+  assert.equal(noConfig.delivered, false);
+});
+
+test("resume delivery hook runs inside a real supervisor tick without semantic authority", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const prompts = [];
+  const cfg = {
+    waitTuple: resumeWaitTuple(),
+    protocol: "HERDR_RESUME_DELIVERY_V1",
+    readDecisionBody: async () => resumeDecisionBody(),
+    readComments: async () => [],
+    herdr: { prompt: async (agent, text) => { prompts.push({ agent, text }); return { accepted: true }; } },
+    publishReceipt: async () => ({ id: 5309001011 }),
+  };
+  await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 771,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    resumeDelivery: cfg,
+  });
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].agent, "w1");
+  const state = await readJson(paths.state);
+  assert.equal(state.state, "RUNNING", "hook never changes project state / adds semantic authority");
+});
