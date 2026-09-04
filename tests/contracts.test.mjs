@@ -322,6 +322,216 @@ test("agentReportSchema discriminates on role", () => {
   assert.equal(agentReportSchema.parse(reviewer).role, "reviewer");
 });
 
+const CONTROL_TOWER_DIR = new URL("../skills/control-tower/", import.meta.url);
+
+async function readControlBundle() {
+  const names = [
+    "HANDOFF.md",
+    "SKILL_V4_1_CANDIDATE.md",
+    "CONTROL_HANDOFF_PROTOCOL.md",
+    "INVARIANTS_AND_LESSONS.md",
+  ];
+  const entries = await Promise.all(
+    names.map(async (name) => [name, await readFile(new URL(name, CONTROL_TOWER_DIR), "utf8")])
+  );
+  return Object.fromEntries(entries);
+}
+
+function scenario(bundle, id) {
+  const source = Object.values(bundle).join("\n");
+  const match = source.match(new RegExp(`### ${id}\\b[\\s\\S]*?(?=### R\\d{2}\\b|$)`));
+  assert.ok(match, `missing control-return regression ${id}`);
+  return match[0];
+}
+
+function bidirectionalScenario(bundle, id) {
+  const source = Object.values(bundle).join("\n");
+  const match = source.match(new RegExp(`### ${id}\\b[\\s\\S]*?(?=### BH\\d{2}\\b|$)`));
+  assert.ok(match, `missing bidirectional handoff regression ${id}`);
+  return match[0];
+}
+
+test("Control-return contract keeps HANDOFF navigation-only and preserves canonical Skill freeze", async () => {
+  const bundle = await readControlBundle();
+  assert.match(bundle["HANDOFF.md"], /navigation pointer|navigation only/i);
+  assert.match(bundle["HANDOFF.md"], /latest valid ACTIVE CONTROL|ACTIVE CONTROL/i);
+  assert.match(bundle["SKILL_V4_1_CANDIDATE.md"], /SKILL\.md.*MUST NOT be modified|canonical.*SKILL\.md.*not.*modif/i);
+});
+
+test("R01 head drift returns CONTROL_REQUIRED before mutation and owner relay", async () => {
+  const text = scenario(await readControlBundle(), "R01");
+  assert.match(text, /head drift/i);
+  assert.match(text, /CONTROL_REQUIRED|LOCAL_CONTROL_RETURN_V1/);
+  assert.match(text, /mutation_state[^\n]*NO_MUTATION|no mutation/i);
+  assert.match(text, /user_relay_count[^\n]*0|no owner relay/i);
+});
+
+test("R02 unexpected implementation branch never resets or deletes", async () => {
+  const text = scenario(await readControlBundle(), "R02");
+  assert.match(text, /existing implementation branch|unexpected.*branch/i);
+  assert.match(text, /CONTROL_REQUIRED|LOCAL_CONTROL_RETURN_V1/);
+  assert.match(text, /no reset|no delete|reset\/delete/i);
+});
+
+test("R03 unavailable Worker requires Control rebinding and forbids silent substitution", async () => {
+  const text = scenario(await readControlBundle(), "R03");
+  assert.match(text, /Worker unavailable|worker.*unavailable/i);
+  assert.match(text, /REBIND_EXECUTOR|CONTROL_REQUIRED/);
+  assert.match(text, /no silent substitute|silent substitution.*forbidden/i);
+});
+
+test("R04 ambiguous test failure returns before any repair", async () => {
+  const text = scenario(await readControlBundle(), "R04");
+  assert.match(text, /non-preauthorized test failure|ambiguous.*test failure/i);
+  assert.match(text, /before repair|repair.*forbidden/i);
+  assert.match(text, /CONTROL_REQUIRED|LOCAL_CONTROL_RETURN_V1/);
+});
+
+test("R05 newer malformed or conflicting authority fails closed without older fallback", async () => {
+  const text = scenario(await readControlBundle(), "R05");
+  assert.match(text, /newer malformed|conflicting authority/i);
+  assert.match(text, /fail closed|FAIL_CLOSED/i);
+  assert.match(text, /never.*older|no older.*fallback/i);
+});
+
+test("R06 Herdr cannot invent BEST_NEXT or repair scope", async () => {
+  const text = scenario(await readControlBundle(), "R06");
+  assert.match(text, /Herdr/i);
+  assert.match(text, /BEST_NEXT/);
+  assert.match(text, /repair scope|repair.*decision/i);
+  assert.match(text, /semantic authority[\s\S]*NONE|no semantic authority/i);
+});
+
+test("R07 return payload binds the exact current event and idempotency key", async () => {
+  const bundle = await readControlBundle();
+  const text = scenario(bundle, "R07");
+  for (const field of [
+    "event_id",
+    "idempotency_key",
+    "card_id",
+    "phase",
+    "generation",
+    "dispatch",
+    "head",
+    "branch",
+    "problem_class",
+    "mutation_state",
+    "last_known_safe_point",
+  ]) {
+    assert.match(text, new RegExp(`\\b${field}\\b`), `R07 missing ${field}`);
+  }
+  assert.match(bundle["CONTROL_HANDOFF_PROTOCOL.md"], /LOCAL_CONTROL_RETURN_V1/);
+});
+
+test("R08 duplicate return delivery is NO_OP_DUPLICATE", async () => {
+  const text = scenario(await readControlBundle(), "R08");
+  assert.match(text, /duplicate return delivery|duplicate.*return/i);
+  assert.match(text, /NO_OP_DUPLICATE|NO_OP/);
+  assert.match(text, /no second semantic decision|no second.*decision/i);
+});
+
+test("R09 Control response binds the return event before resume", async () => {
+  const text = scenario(await readControlBundle(), "R09");
+  assert.match(text, /Control response/i);
+  assert.match(text, /bind[\s\S]*return event|return event[\s\S]*bind/i);
+  assert.match(text, /before.*resume|resume.*only after/i);
+});
+
+test("R10 Control-delivery transport failure never becomes user relay", async () => {
+  const text = scenario(await readControlBundle(), "R10");
+  assert.match(text, /transport failure/i);
+  assert.match(text, /user relay|user_relay_count/);
+  assert.match(text, /CONTROL_DELIVERY_BLOCKED_V1/);
+  assert.match(text, /deterministic route|admitted.*route/i);
+});
+
+test("R11 HUMAN_REQUIRED is last resort for genuinely human-only conditions", async () => {
+  const text = scenario(await readControlBundle(), "R11");
+  assert.match(text, /HUMAN_REQUIRED/);
+  assert.match(text, /credential|payment|security consent/i);
+  assert.match(text, /irreversible owner choice|product.*scope/i);
+  assert.match(text, /last resort|last-resort/i);
+  assert.match(text, /not.*carry.*result|no.*courier|user_relay_count[^\\n]*0/i);
+});
+
+test("R12 Reviewer FIX_REQUIRED cannot silently route to an unauthorized Worker", async () => {
+  const text = scenario(await readControlBundle(), "R12");
+  assert.match(text, /Reviewer FIX_REQUIRED|FIX_REQUIRED/);
+  assert.match(text, /not.*silently.*route|silent.*route.*forbidden/i);
+  assert.match(text, /ACTIVE CONTROL|explicitly authorized deterministic edge/i);
+});
+
+test("BH01 durable dispatch without consume or resident binding forbids Control idle", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH01");
+  assert.match(text, /durable dispatch/i);
+  assert.match(text, /consume|resident.*binding/i);
+  assert.match(text, /CONTROL_IDLE_FORBIDDEN/);
+});
+
+test("BH02 exact consume and future binding allow idle without model polling", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH02");
+  assert.match(text, /exact.*consume|consumed.*started/i);
+  assert.match(text, /current[\s\S]*future.*consumer.*binding|resident[\s\S]*future/i);
+  assert.match(text, /CONTROL_IDLE_ALLOWED/);
+  assert.match(text, /no model polling|model polling.*forbidden/i);
+});
+
+test("BH03 terminal without return request and doorbell is incomplete", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH03");
+  assert.match(text, /terminal/i);
+  assert.match(text, /return request.*doorbell|doorbell.*return request/i);
+  assert.match(text, /AUTO_REPORT_INCOMPLETE/);
+});
+
+test("BH04 stale or retired Control target is a retired no-op", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH04");
+  assert.match(text, /stale|retired/i);
+  assert.match(text, /NO_OP_RETIRED/);
+  assert.match(text, /current ACTIVE generation/i);
+});
+
+test("BH05 duplicate outbound wake does not send a second prompt", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH05");
+  assert.match(text, /duplicate outbound wake/i);
+  assert.match(text, /NO_OP_DUPLICATE/);
+  assert.match(text, /no second prompt|second prompt[\s\S]*forbidden/i);
+});
+
+test("BH06 duplicate inbound doorbell does not create a second decision", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH06");
+  assert.match(text, /duplicate inbound.*doorbell|inbound.*doorbell.*duplicate/i);
+  assert.match(text, /NO_OP_DUPLICATE/);
+  assert.match(text, /no second semantic decision|second semantic decision[\s\S]*forbidden/i);
+});
+
+test("BH07 Herdr runtime failure blocks liveness without erasing bounded capability", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH07");
+  assert.match(text, /Herdr.*runtime.*FAIL|runtime.*FAIL.*Herdr/i);
+  assert.match(text, /PROVEN_BOUNDED/);
+  assert.match(text, /current liveness.*block|blocks.*current liveness/i);
+  assert.match(text, /no new infrastructure|new infrastructure[\s\S]*forbidden/i);
+});
+
+test("BH08 child terminal without a resident successor fails with missing future binding", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH08");
+  assert.match(text, /child terminal[\s\S]*parent|parent[\s\S]*child terminal/i);
+  assert.match(text, /no.*future.*consumer|future.*successor/i);
+  assert.match(text, /FUTURE_WAKE_BOUND_MISSING|BLOCKED_NO_BOUND_SUCCESSOR/);
+});
+
+test("BH09 mismatched source/card/head/generation/target fails closed before mutation", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH09");
+  assert.match(text, /source.*card.*head.*generation.*target|mismatch/i);
+  assert.match(text, /FAIL_CLOSED/);
+  assert.match(text, /no mutation|NO_MUTATION/);
+});
+
+test("BH10 normal handoff keeps user and owner courier counts at zero", async () => {
+  const text = bidirectionalScenario(await readControlBundle(), "BH10");
+  assert.match(text, /user_relay_count[^\\n]*0/);
+  assert.match(text, /owner_courier_count[^\\n]*0/);
+});
+
 test("Reviewer canary workflow is a static, read-only, fail-closed runner contract", async () => {
   const source = await readFile(
     new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
@@ -347,3 +557,4 @@ test("Reviewer canary workflow is a static, read-only, fail-closed runner contra
   assert.doesNotMatch(source, /(?:Start-Process|&\s*)(?:opencode|chrome|msedge|node)\b/i);
   assert.doesNotMatch(source, /secrets\.|GITHUB_TOKEN/);
 });
+
