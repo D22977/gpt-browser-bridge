@@ -42,11 +42,16 @@ jobs:
           if (-not $idem.Success) { throw 'Missing idempotency key' }
 
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent'='g9-desktop-iab-entrypoint'; Accept='application/vnd.github+json' }
-          $all = @()
+          $all = [System.Collections.Generic.List[object]]::new()
+          function Add-Flat([object]$v) {
+            if ($null -eq $v) { return }
+            if ($v -is [System.Array]) { foreach ($x in $v) { Add-Flat $x }; return }
+            [void]$all.Add($v)
+          }
           for ($page=1; $page -le 20; $page++) {
-            $rows = @(Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
-            $all += $rows
-            if ($rows.Count -lt 100) { break }
+            $before = $all.Count
+            Add-Flat (Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+            if (($all.Count - $before) -lt 100) { break }
           }
           $switches = @($all | Where-Object {
             $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
