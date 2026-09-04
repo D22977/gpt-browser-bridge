@@ -13,19 +13,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare-main:
+  repair-test:
     if: >-
       github.event.issue.number == 120 &&
       github.event.comment.user.login == 'D22977' &&
       github.event.comment.author_association == 'OWNER' &&
       startsWith(github.event.comment.body, 'DESKTOP_IAB_COMPAT_WAKE_V1')
     runs-on: [self-hosted, Windows, GBB-REVIEWER]
-    timeout-minutes: 6
+    timeout-minutes: 8
     defaults:
       run:
         shell: pwsh -NoProfile -File {0}
     steps:
-      - name: Validate exact tail-inspection authority
+      - name: Validate repair-test authority and current generation
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -35,7 +35,7 @@ jobs:
           if ($event.repository.full_name -cne 'D22977/gpt-browser-bridge') { throw 'Wrong repository' }
           if ([int]$event.issue.number -ne 120) { throw 'Wrong issue' }
           if ($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong actor' }
-          if ($body -notmatch '(?m)^action:\s*PREPARE_MAIN\s*$') { throw 'Wrong action' }
+          if ($body -notmatch '(?m)^action:\s*REPAIR_TEST\s*$') { throw 'Wrong action' }
           if ($body -notmatch '(?m)^source_authority:\s*5540370230\s*$') { throw 'Wrong source authority' }
           if ($body -notmatch '(?m)^control_generation:\s*009\s*$') { throw 'Wrong generation' }
 
@@ -62,38 +62,107 @@ jobs:
           if (-not $gen.Success -or $gen.Groups[1].Value -cne '009') { throw "G009 not ACTIVE latest=$($latest.id)" }
           "ACTIVE_SWITCH=$($latest.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Read lines 180-310 only
+      - name: Build isolated compatibility copy and run native self-test
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $entry = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\desktop-wake\entrypoint.mjs'
-          if (-not (Test-Path -LiteralPath $entry)) { throw 'Entrypoint missing' }
-          $entrySha = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry).Hash.ToLowerInvariant()
-          if ($entrySha -cne '4a650750162e388801846087f2db090ce67c2bcf24263601ea163b58ec4d3921') { throw "Entrypoint drift: $entrySha" }
-          $lines = @(Get-Content -LiteralPath $entry)
-          $picked = [System.Collections.Generic.List[string]]::new()
-          $start = [Math]::Max(179, 0)
-          $end = [Math]::Min(309, $lines.Count - 1)
-          for ($i=$start; $i -le $end; $i++) {
-            $line = [string]$lines[$i]
-            if ($line -match '(?i)token|secret|cookie|password|credential|authorization') { continue }
-            $trim = $line.Trim()
-            if ($trim.Length -gt 360) { $trim = $trim.Substring(0,360) }
-            [void]$picked.Add("L$($i+1):$trim")
+          $liveRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\desktop-wake'
+          $entry = Join-Path $liveRoot 'entrypoint.mjs'
+          $desc = Join-Path $liveRoot 'entrypoint.json'
+          $expectedEntrySha = '4a650750162e388801846087f2db090ce67c2bcf24263601ea163b58ec4d3921'
+          $expectedDescSha = '4913368558f6fc323f2f259d7117ee09a743edb36b3fe08c4bee4d013fe90a96'
+          if (-not (Test-Path -LiteralPath $entry) -or -not (Test-Path -LiteralPath $desc)) { throw 'Live entrypoint/descriptor missing' }
+          $preEntrySha = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry).Hash.ToLowerInvariant()
+          $preDescSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $desc).Hash.ToLowerInvariant()
+          if ($preEntrySha -cne $expectedEntrySha) { throw "Entrypoint drift $preEntrySha" }
+          if ($preDescSha -cne $expectedDescSha) { throw "Descriptor drift $preDescSha" }
+
+          $testRoot = Join-Path 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\desktop-wake-recovery-tests' "g9-$env:GITHUB_RUN_ID"
+          if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
+          New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+          $testEntry = Join-Path $testRoot 'entrypoint.mjs'
+          $testDesc = Join-Path $testRoot 'entrypoint.json'
+
+          $src = Get-Content -LiteralPath $entry -Raw
+          $generationGate = 'tuple?.control_generation !== 1'
+          if (($src.Split($generationGate).Count - 1) -ne 1) { throw 'Unexpected generation gate occurrence count' }
+          $src = $src.Replace($generationGate, 'tuple?.control_generation !== 9')
+          $baseGen = 'control_generation: 1,'
+          if (($src.Split($baseGen).Count - 1) -ne 1) { throw 'Unexpected self-test base generation occurrence count' }
+          $src = $src.Replace($baseGen, 'control_generation: 9,')
+          $fixtureGen = '::1::${EXECUTOR}'
+          $fixtureCount = $src.Split($fixtureGen).Count - 1
+          if ($fixtureCount -lt 3) { throw "Unexpected fixture generation key count $fixtureCount" }
+          $src = $src.Replace($fixtureGen, '::9::${EXECUTOR}')
+          Set-Content -LiteralPath $testEntry -Value $src -Encoding utf8NoBOM
+
+          $cfg = Get-Content -LiteralPath $desc -Raw | ConvertFrom-Json
+          if ($cfg.entrypoint_id -cne 'CODEX-DESKTOP-WAKE-ENTRYPOINT-V1') { throw 'Wrong entrypoint id' }
+          if ($cfg.type -cne 'CODEX_DESKTOP_RUNTIME_INBOX') { throw 'Wrong entrypoint type' }
+          if ($cfg.executor -cne 'CODEX_DESKTOP_AGENT') { throw 'Wrong executor' }
+          if ($cfg.session.thread_id -cne '019fe592-b6cf-7bb3-9326-f008de7a64f4') { throw 'Wrong Desktop thread binding' }
+
+          $routes = [System.Collections.Generic.List[object]]::new()
+          foreach ($r in @($cfg.allowed_routes)) {
+            $routes.Add([pscustomobject]@{
+              source_issue = [int]$r.source_issue
+              routing_receipt_id = [int64]$r.routing_receipt_id
+              control_generation = 9
+            })
           }
-          $tail = ($picked -join ' || ')
+          $required = @(
+            [pscustomobject]@{ source_issue=56; routing_receipt_id=[int64]5231741295; control_generation=9 },
+            [pscustomobject]@{ source_issue=51; routing_receipt_id=[int64]5231742488; control_generation=9 },
+            [pscustomobject]@{ source_issue=120; routing_receipt_id=[int64]5540199156; control_generation=9 }
+          )
+          foreach ($rr in $required) {
+            $exists = @($routes | Where-Object { $_.source_issue -eq $rr.source_issue -and $_.routing_receipt_id -eq $rr.routing_receipt_id -and $_.control_generation -eq 9 }).Count -gt 0
+            if (-not $exists) { $routes.Add($rr) }
+          }
+          $cfg.allowed_routes = @($routes)
+          $cfg | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $testDesc -Encoding utf8NoBOM
+
+          $testOut = & node $testEntry self-test 2>&1 | Out-String
+          $nodeExit = $LASTEXITCODE
+          if ($nodeExit -ne 0) { throw "Native self-test exit=$nodeExit output=$testOut" }
+          $nonempty = @($testOut -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
+          if ($nonempty.Count -eq 0) { throw 'No self-test output' }
+          $test = $nonempty[-1] | ConvertFrom-Json
+          if (-not $test.all_passed) { throw 'Native self-test reported failure' }
+          if ([int]$test.total -lt 10 -or [int]$test.passed -ne [int]$test.total) { throw "Insufficient self-test coverage passed=$($test.passed) total=$($test.total)" }
+          $checkNames = @($test.checks | ForEach-Object { [string]$_.name })
+          foreach ($need in @('stale generation fails closed','wrong executor fails closed','wrong source issue fails closed','wrong source receipt fails closed','malformed tuple fails closed','wrong session fails closed','UNCERTAIN_SEND is not retried','restart reload preserves idempotency')) {
+            if ($checkNames -notcontains $need) { throw "Missing required self-test check: $need" }
+          }
+
+          $postEntrySha = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry).Hash.ToLowerInvariant()
+          $postDescSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $desc).Hash.ToLowerInvariant()
+          if ($postEntrySha -cne $preEntrySha -or $postDescSha -cne $preDescSha) { throw 'Live runtime files changed during isolated test' }
+          $patchedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $testEntry).Hash.ToLowerInvariant()
+          $testDescSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $testDesc).Hash.ToLowerInvariant()
+          $routeSummary = (@($cfg.allowed_routes) | ForEach-Object { "$($_.source_issue)/$($_.routing_receipt_id)/$($_.control_generation)" }) -join ';'
+
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent'='g9-desktop-iab-entrypoint'; Accept='application/vnd.github+json' }
           $result = @(
-            'GBB_DESKTOP_WAKE_MAIN_TAIL_V1',
-            'state: PASS_READ_ONLY',
+            'GBB_DESKTOP_WAKE_GENERATION_COMPAT_REPAIR_RESULT_V1',
+            'state: PASS',
             'control_generation: 009',
             'source_authority: 5540370230',
             "active_switch_receipt: $env:ACTIVE_SWITCH",
-            "entrypoint_sha256: $entrySha",
-            "main_tail_lines_180_310: $tail",
-            'entrypoint_invoked: false',
-            'runtime_file_mutated: false',
+            "live_entrypoint_pre_sha256: $preEntrySha",
+            "live_entrypoint_post_sha256: $postEntrySha",
+            "live_descriptor_pre_sha256: $preDescSha",
+            "live_descriptor_post_sha256: $postDescSha",
+            "isolated_patched_entrypoint_sha256: $patchedSha",
+            "isolated_recovery_descriptor_sha256: $testDescSha",
+            'exact_semantic_change: generation admission exact 1->9 in isolated copy; native self-test base/fixture generation synchronized; descriptor routes transformed to generation009 plus exact Issue120/5540199156/009 route',
+            "recovery_routes: $routeSummary",
+            "native_self_test_passed: $($test.passed)",
+            "native_self_test_total: $($test.total)",
+            "native_self_test_all_passed: $($test.all_passed.ToString().ToLowerInvariant())",
+            "desktop_thread_binding: $($cfg.session.thread_id)",
+            'live_runtime_mutated: false',
             'desktop_prompt_sent: false',
             'browser_action_performed: false',
             'user_relay_count: 0',
@@ -104,4 +173,5 @@ jobs:
           $posted = Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/120/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
           $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
           if ([string]$rb.body -cne $result) { throw "Read-back mismatch receipt=$($posted.id)" }
-          Write-Output "Main tail receipt=$($posted.id)"
+          Remove-Item -LiteralPath $testRoot -Recurse -Force
+          Write-Output "Compatibility repair test PASS receipt=$($posted.id)"
