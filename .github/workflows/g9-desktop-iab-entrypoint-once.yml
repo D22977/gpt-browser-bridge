@@ -1,0 +1,155 @@
+name: G9 Desktop IAB Entrypoint Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g9-desktop-iab-entrypoint-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: >-
+      github.event.issue.number == 120 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'DESKTOP_IAB_ENTRYPOINT_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 6
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Validate exact inspection authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $body = [string]$event.comment.body
+          if ($event.repository.full_name -cne 'D22977/gpt-browser-bridge') { throw 'Wrong repository' }
+          if ([int]$event.issue.number -ne 120) { throw 'Wrong issue' }
+          if ($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong actor' }
+          if ($body -notmatch '(?m)^action:\s*INSPECT\s*$') { throw 'Wrong action' }
+          if ($body -notmatch '(?m)^source_authority:\s*5540199156\s*$') { throw 'Wrong source authority' }
+          if ($body -notmatch '(?m)^control_generation:\s*009\s*$') { throw 'Wrong generation' }
+          $idem = [regex]::Match($body, '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$')
+          if (-not $idem.Success) { throw 'Missing idempotency key' }
+
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent'='g9-desktop-iab-entrypoint'; Accept='application/vnd.github+json' }
+          $all = @()
+          for ($page=1; $page -le 20; $page++) {
+            $rows = @(Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+            $all += $rows
+            if ($rows.Count -lt 100) { break }
+          }
+          $switches = @($all | Where-Object {
+            $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+            $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
+            $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
+          } | Sort-Object { [int64]$_.id })
+          if ($switches.Count -eq 0) { throw 'No ACTIVE switch' }
+          $latest = $switches[-1]
+          $gen = [regex]::Match([string]$latest.body, '(?m)^new_generation:\s*(\d{3})\s*$')
+          if (-not $gen.Success -or $gen.Groups[1].Value -cne '009') { throw "G009 not ACTIVE latest=$($latest.id)" }
+
+          $whoami = (& whoami).Trim()
+          $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+          if ($whoami -notmatch '(?i)^d22977\\lupun$') { throw "Unexpected Windows user: $whoami" }
+          if (-not [Environment]::UserInteractive -or $sessionId -eq 0) { throw 'Runner not interactive' }
+          if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "Unexpected runner: $env:RUNNER_NAME" }
+          "ACTIVE_SWITCH=$($latest.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "WAKE_IDEMPOTENCY=$($idem.Groups[1].Value)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Inspect existing Desktop wake entrypoint read-only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $entry = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\desktop-wake\entrypoint.mjs'
+          $desc = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\desktop-wake\entrypoint.json'
+          $entryExists = Test-Path -LiteralPath $entry
+          $descExists = Test-Path -LiteralPath $desc
+          $entrySha = ''
+          $descSha = ''
+          $safeDescriptor = ''
+          $markers = ''
+          $decision = 'PASS_READ_ONLY'
+          $firstMissing = ''
+
+          if (-not $entryExists) {
+            $decision = 'BLOCKED'
+            $firstMissing = 'DESKTOP_WAKE_ENTRYPOINT_FILE_MISSING'
+          } else {
+            $entrySha = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry).Hash.ToLowerInvariant()
+          }
+          if (-not $descExists) {
+            if ($decision -eq 'PASS_READ_ONLY') { $decision = 'BLOCKED'; $firstMissing = 'DESKTOP_WAKE_DESCRIPTOR_MISSING' }
+          } else {
+            $descSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $desc).Hash.ToLowerInvariant()
+            try {
+              $d = Get-Content -LiteralPath $desc -Raw | ConvertFrom-Json
+              $safe = [ordered]@{}
+              foreach ($p in $d.PSObject.Properties) {
+                if ($p.Name -match '(?i)identity|type|host|thread|surface|generation|session|executor|entrypoint|path') {
+                  if ($p.Name -notmatch '(?i)token|secret|cookie|password|credential') {
+                    $v = [string]$p.Value
+                    if ($v.Length -le 500) { $safe[$p.Name] = $v }
+                  }
+                }
+              }
+              $safeDescriptor = ($safe | ConvertTo-Json -Compress)
+            } catch {
+              if ($decision -eq 'PASS_READ_ONLY') { $decision = 'BLOCKED'; $firstMissing = 'DESKTOP_WAKE_DESCRIPTOR_UNREADABLE' }
+            }
+          }
+
+          if ($entryExists) {
+            $sourceLines = @(Get-Content -LiteralPath $entry)
+            $picked = [System.Collections.Generic.List[string]]::new()
+            for ($i=0; $i -lt $sourceLines.Count; $i++) {
+              $line = [string]$sourceLines[$i]
+              if ($line -match '(?i)token|secret|cookie|password|credential') { continue }
+              if ($line -match 'process\.argv|process\.stdin|readline|JSON\.parse|source_repo|source_issue|routing_receipt_id|control_generation|target_executor|idempotency_key|--[A-Za-z0-9_-]+') {
+                $trim = $line.Trim()
+                if ($trim.Length -gt 300) { $trim = $trim.Substring(0,300) }
+                [void]$picked.Add("L$($i+1):$trim")
+                if ($picked.Count -ge 24) { break }
+              }
+            }
+            $markers = ($picked -join ' || ')
+          }
+
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent'='g9-desktop-iab-entrypoint'; Accept='application/vnd.github+json' }
+          $body = @(
+            'GBB_DESKTOP_WAKE_ENTRYPOINT_CURRENT_INSPECTION_V1',
+            "state: $decision",
+            'control_generation: 009',
+            'source_authority: 5540289383',
+            'source_direct_iab_auth: 5540199156',
+            "active_switch_receipt: $env:ACTIVE_SWITCH",
+            "runner_name: $env:RUNNER_NAME",
+            "entrypoint_exists: $($entryExists.ToString().ToLowerInvariant())",
+            "descriptor_exists: $($descExists.ToString().ToLowerInvariant())",
+            "entrypoint_sha256: $entrySha",
+            "descriptor_sha256: $descSha",
+            "safe_descriptor: $safeDescriptor",
+            "invocation_shape_markers: $markers",
+            "first_missing_capability: $firstMissing",
+            'entrypoint_invoked: false',
+            'agent_prompt_performed: false',
+            'browser_action_performed: false',
+            'user_relay_count: 0',
+            "workflow_run_id: $env:GITHUB_RUN_ID",
+            'readback_required: true'
+          ) -join "`n"
+          $payload = @{ body=$body } | ConvertTo-Json -Compress
+          $posted = Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/120/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+          $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
+          if ([string]$rb.body -cne $body) { throw "Read-back mismatch receipt=$($posted.id)" }
+          Write-Output "Desktop entrypoint inspection decision=$decision receipt=$($posted.id)"
