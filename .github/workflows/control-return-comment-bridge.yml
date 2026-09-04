@@ -165,7 +165,7 @@ jobs:
           $agents = @($list.result.agents)
           $eligible = @($agents | Where-Object {
             $_.agent -eq 'codex' -and
-            $_.agent_status -eq 'idle' -and
+            $_.agent_status -in @('idle','done') -and
             $_.cwd -match '(?i)^C:\\WINDOWS\\system32$' -and
             ([string]::IsNullOrWhiteSpace([string]$_.name) -or $_.name -notmatch '(?i)(review|mep|pr\d+)') -and
             $_.pane_id -and $_.agent_session.value
