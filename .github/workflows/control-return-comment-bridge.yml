@@ -40,7 +40,7 @@ jobs:
           $gen = [regex]::Match($body, '(?m)^control_generation:\s*(\d{3})\s*$')
           $card = [regex]::Match($body, '(?m)^card_id:\s*([A-Za-z0-9_-]+)\s*$')
           $source = [regex]::Match($body, '(?m)^source_dispatch_receipt:\s*(\d+)\s*$')
-          $action = [regex]::Match($body, '(?m)^action:\s*(MINIMAL_HERDR_ACK|FRESH_WEBGPT_REVIEW_120|FRESH_REVIEW_STATUS_120)\s*$')
+          $action = [regex]::Match($body, '(?m)^action:\s*(MINIMAL_HERDR_ACK|FRESH_WEBGPT_REVIEW_120|FRESH_REVIEW_STATUS_120|FRESH_REVIEW_OBSERVE_120)\s*$')
           $idem = [regex]::Match($body, '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$')
           if (-not ($gen.Success -and $card.Success -and $source.Success -and $action.Success -and $idem.Success)) { throw 'Malformed HERDR_CONTROL_WAKE_V1' }
           if ($gen.Groups[1].Value -cne '009') { throw 'Wake is not generation009' }
@@ -57,6 +57,9 @@ jobs:
           } elseif ($requestedAction -eq 'FRESH_REVIEW_STATUS_120') {
             if ($requestedCard -cne 'GBB-SIMPLIFICATION-NIGHT-AUDIT-00') { throw 'Wrong fresh-review adjudication card' }
             if ($requestedSource -cne '5533031068') { throw 'Wrong fresh-review adjudication authority receipt' }
+          } elseif ($requestedAction -eq 'FRESH_REVIEW_OBSERVE_120') {
+            if ($requestedCard -cne 'GBB-SIMPLIFICATION-NIGHT-AUDIT-00') { throw 'Wrong fresh-review observation card' }
+            if ($requestedSource -cne '5538759391') { throw 'Wrong fresh-review observation authority receipt' }
           } else {
             throw 'Unsupported action'
           }
@@ -115,6 +118,82 @@ jobs:
           }
 
           $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\github-event-herdr-bridge\state'
+
+          if ($env:WAKE_ACTION -eq 'FRESH_REVIEW_OBSERVE_120') {
+            $listRaw = & $herdr agent list
+            if ($LASTEXITCODE -ne 0) { throw "herdr agent list failed exit=$LASTEXITCODE" }
+            $list = $listRaw | ConvertFrom-Json
+            $matches = @($list.result.agents | Where-Object {
+              [string]$_.pane_id -eq 'w2:p1' -and
+              [string]$_.agent -eq 'codex' -and
+              [string]$_.agent_session.value -eq '01a0513f-4e68-7573-bf38-72e2120ebe1d'
+            })
+            if ($matches.Count -ne 1) { throw "Exact bound coordinator target missing/ambiguous count=$($matches.Count)" }
+            $target = $matches[0]
+            $status = [string]$target.agent_status
+            $readPerformed = $false
+            $readExit = ''
+            $readSha = ''
+            $freshUrl = ''
+            $launchMarker = $false
+            $reviewMarker = $false
+            $blockedMarker = $false
+            $firstMissing = ''
+            $publicationError = $false
+            if ($status -in @('idle','done')) {
+              $readPerformed = $true
+              $readRaw = (& $herdr agent read 'w2:p1' --source recent-unwrapped --lines 160 2>&1 | Out-String)
+              $readExit = [string]$LASTEXITCODE
+              $bytes = [System.Text.Encoding]::UTF8.GetBytes($readRaw)
+              $readSha = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+              if ($LASTEXITCODE -eq 0) {
+                $urlMatch = [regex]::Match($readRaw, 'https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+')
+                if ($urlMatch.Success) { $freshUrl = $urlMatch.Value }
+                $launchMarker = $readRaw -match 'GBB_FRESH_WEBGPT_REVIEW_LAUNCH_RESULT_V1'
+                $reviewMarker = $readRaw -match 'GBB_SIMPLIFICATION_FRESH_REVIEW_RESULT_V1'
+                $blockedMarker = $readRaw -match '(?im)^state:\s*BLOCKED\s*$|\bBLOCKED\b'
+                $cap = [regex]::Match($readRaw, '(?im)^first_missing_capability:\s*([^\r\n]+)')
+                if ($cap.Success) { $firstMissing = $cap.Groups[1].Value.Trim() }
+                $publicationError = $readRaw -match '(?i)(publish|publication|comment).*(fail|error|denied|forbidden|401|403)|(?i)(fail|error).*(publish|publication|comment)'
+              }
+            }
+            if ($status -eq 'working') { $decision = 'WORKING_WAIT' }
+            elseif ($launchMarker -or -not [string]::IsNullOrWhiteSpace($freshUrl)) { $decision = 'SETTLED_FRESH_LAUNCH_EVIDENCE_PRESENT' }
+            elseif ($blockedMarker -or -not [string]::IsNullOrWhiteSpace($firstMissing)) { $decision = 'SETTLED_BLOCKED_EVIDENCE_PRESENT' }
+            else { $decision = 'SETTLED_NO_FRESH_LAUNCH_EVIDENCE' }
+            $body = @(
+              'GBB_FRESH_REVIEW_COORDINATOR_OBSERVATION_V1',
+              'state: PASS_READ_ONLY',
+              'control_generation: 009',
+              'source_observation_authority: 5538759391',
+              'source_fresh_review_wake: 5538710162',
+              'source_physical_delivery: 5538712722',
+              'target_pane: w2:p1',
+              'target_agent_session: 01a0513f-4e68-7573-bf38-72e2120ebe1d',
+              "target_status: $status",
+              "decision: $decision",
+              "terminal_read_performed: $($readPerformed.ToString().ToLowerInvariant())",
+              "terminal_read_exit: $readExit",
+              "terminal_output_sha256: $readSha",
+              "launch_protocol_marker_seen: $($launchMarker.ToString().ToLowerInvariant())",
+              "review_protocol_marker_seen: $($reviewMarker.ToString().ToLowerInvariant())",
+              "fresh_conversation_url_seen: $freshUrl",
+              "blocked_marker_seen: $($blockedMarker.ToString().ToLowerInvariant())",
+              "first_missing_capability_seen: $firstMissing",
+              "publication_error_pattern_seen: $($publicationError.ToString().ToLowerInvariant())",
+              'raw_terminal_output_published: false',
+              'agent_prompt_performed: false',
+              'browser_action_performed: false',
+              'user_relay_count: 0',
+              "observation_workflow_run_id: $env:GITHUB_RUN_ID",
+              'readback_required: true'
+            ) -join "`n"
+            $posted = Publish120 $body
+            $readback = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$readback.body -cne $body) { throw "Observation read-back mismatch receipt=$($posted.id)" }
+            Write-Output "Fresh-review coordinator observed status=$status decision=$decision receipt=$($posted.id)"
+            exit 0
+          }
 
           if ($env:WAKE_ACTION -eq 'FRESH_REVIEW_STATUS_120') {
             $sourceStatePath = Join-Path $stateRoot 'g9-5532954594.json'
