@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare:
+  prepare-main:
     if: >-
       github.event.issue.number == 120 &&
       github.event.comment.user.login == 'D22977' &&
@@ -25,7 +25,7 @@ jobs:
       run:
         shell: pwsh -NoProfile -File {0}
     steps:
-      - name: Validate exact prepare authority
+      - name: Validate exact tail-inspection authority
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -35,7 +35,7 @@ jobs:
           if ($event.repository.full_name -cne 'D22977/gpt-browser-bridge') { throw 'Wrong repository' }
           if ([int]$event.issue.number -ne 120) { throw 'Wrong issue' }
           if ($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong actor' }
-          if ($body -notmatch '(?m)^action:\s*PREPARE\s*$') { throw 'Wrong action' }
+          if ($body -notmatch '(?m)^action:\s*PREPARE_MAIN\s*$') { throw 'Wrong action' }
           if ($body -notmatch '(?m)^source_authority:\s*5540370230\s*$') { throw 'Wrong source authority' }
           if ($body -notmatch '(?m)^control_generation:\s*009\s*$') { throw 'Wrong generation' }
 
@@ -62,40 +62,36 @@ jobs:
           if (-not $gen.Success -or $gen.Groups[1].Value -cne '009') { throw "G009 not ACTIVE latest=$($latest.id)" }
           "ACTIVE_SWITCH=$($latest.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Read exact invocation and self-test shape only
+      - name: Read lines 180-310 only
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
           $entry = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\desktop-wake\entrypoint.mjs'
-          $desc = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\desktop-wake\entrypoint.json'
           if (-not (Test-Path -LiteralPath $entry)) { throw 'Entrypoint missing' }
-          if (-not (Test-Path -LiteralPath $desc)) { throw 'Descriptor missing' }
           $entrySha = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry).Hash.ToLowerInvariant()
           if ($entrySha -cne '4a650750162e388801846087f2db090ce67c2bcf24263601ea163b58ec4d3921') { throw "Entrypoint drift: $entrySha" }
           $lines = @(Get-Content -LiteralPath $entry)
           $picked = [System.Collections.Generic.List[string]]::new()
-          for ($i=0; $i -lt $lines.Count; $i++) {
+          $start = [Math]::Max(179, 0)
+          $end = [Math]::Min(309, $lines.Count - 1)
+          for ($i=$start; $i -le $end; $i++) {
             $line = [string]$lines[$i]
-            if ($line -match '(?i)token|secret|cookie|password|credential') { continue }
-            if ($line -match '(?i)^\s*(import|const|async function|function)|main\(|self.?test|negative|process\.|argv|stdin|stdout|readFile|writeFile|mkdir|rename|inbox|outbox|pending|consum|tuple|descriptor|route|expectedIdempotencyKey|validate|usage') {
-              $trim = $line.Trim()
-              if ($trim.Length -gt 360) { $trim = $trim.Substring(0,360) }
-              [void]$picked.Add("L$($i+1):$trim")
-              if ($picked.Count -ge 80) { break }
-            }
+            if ($line -match '(?i)token|secret|cookie|password|credential|authorization') { continue }
+            $trim = $line.Trim()
+            if ($trim.Length -gt 360) { $trim = $trim.Substring(0,360) }
+            [void]$picked.Add("L$($i+1):$trim")
           }
-          $markers = ($picked -join ' || ')
+          $tail = ($picked -join ' || ')
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent'='g9-desktop-iab-entrypoint'; Accept='application/vnd.github+json' }
           $result = @(
-            'GBB_DESKTOP_WAKE_INVOCATION_SHAPE_V1',
+            'GBB_DESKTOP_WAKE_MAIN_TAIL_V1',
             'state: PASS_READ_ONLY',
             'control_generation: 009',
             'source_authority: 5540370230',
             "active_switch_receipt: $env:ACTIVE_SWITCH",
             "entrypoint_sha256: $entrySha",
-            "source_line_count: $($lines.Count)",
-            "invocation_and_test_markers: $markers",
+            "main_tail_lines_180_310: $tail",
             'entrypoint_invoked: false',
             'runtime_file_mutated: false',
             'desktop_prompt_sent: false',
@@ -108,4 +104,4 @@ jobs:
           $posted = Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/120/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
           $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
           if ([string]$rb.body -cne $result) { throw "Read-back mismatch receipt=$($posted.id)" }
-          Write-Output "Invocation shape receipt=$($posted.id)"
+          Write-Output "Main tail receipt=$($posted.id)"
