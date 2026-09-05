@@ -1,0 +1,182 @@
+name: G9 G10 Issue123 Worker Wake Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g9-g10-issue123-worker-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  wake-worker:
+    if: >-
+      github.event.issue.number == 123 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'G9_G10_WORKER_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Validate exact recovery authority and ACTIVE generation009
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          if ($event.repository.full_name -cne 'D22977/gpt-browser-bridge') { throw 'Wrong repository' }
+          if ([int]$event.issue.number -ne 123) { throw 'Wrong issue' }
+          if ($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong actor' }
+
+          $body = [string]$event.comment.body
+          $gen = [regex]::Match($body, '(?m)^control_generation:\s*(\d{3})\s*$')
+          $card = [regex]::Match($body, '(?m)^card_id:\s*([A-Za-z0-9_-]+)\s*$')
+          $source = [regex]::Match($body, '(?m)^source_recovery_authority:\s*(\d+)\s*$')
+          $action = [regex]::Match($body, '(?m)^action:\s*([A-Z0-9_]+)\s*$')
+          $idem = [regex]::Match($body, '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$')
+          if (-not ($gen.Success -and $card.Success -and $source.Success -and $action.Success -and $idem.Success)) { throw 'Malformed G9_G10_WORKER_WAKE_V1' }
+          if ($gen.Groups[1].Value -cne '009') { throw 'Wrong control generation' }
+          if ($card.Groups[1].Value -cne 'CONTROL-G9-G10-AUTO-CAPTURE-REBOOT-01') { throw 'Wrong card' }
+          if ($source.Groups[1].Value -cne '5555242920') { throw 'Wrong recovery authority receipt' }
+          if ($action.Groups[1].Value -cne 'EXECUTE_ISSUE123_WORKER') { throw 'Wrong action' }
+
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent'='g9-g10-issue123-worker-once'; Accept='application/vnd.github+json' }
+          $auth = Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/5555242920' -Headers $headers -Method Get -TimeoutSec 30
+          if ([string]$auth.body -notmatch '(?m)^CONTROL_RECOVERY_DECISION_V1\s*$' -or [string]$auth.body -notmatch '(?m)^state:\s*EXECUTE_NOW\s*$') { throw 'Recovery authority receipt malformed or superseded locally' }
+          $binding = Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/5555193319' -Headers $headers -Method Get -TimeoutSec 30
+          if ([string]$binding.body -notmatch '(?m)^CONTROL_GENERATION_010_CANDIDATE_BINDING_V1\s*$' -or [string]$binding.body -notmatch '(?m)^candidate_conversation_id:\s*6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562\s*$') { throw 'Candidate010 binding mismatch' }
+
+          $all = [System.Collections.Generic.List[object]]::new()
+          function Add-Flat([object]$v) {
+            if ($null -eq $v) { return }
+            if ($v -is [System.Array]) { foreach ($x in $v) { Add-Flat $x }; return }
+            [void]$all.Add($v)
+          }
+          for ($page=1; $page -le 20; $page++) {
+            $before = $all.Count
+            Add-Flat (Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+            if (($all.Count - $before) -lt 100) { break }
+          }
+          $switches = @($all | Where-Object {
+            $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+            $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
+            $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
+          } | Sort-Object { [int64]$_.id })
+          if ($switches.Count -eq 0) { throw 'No ACTIVE Control switch' }
+          $latest = $switches[-1]
+          $active = [regex]::Match([string]$latest.body, '(?m)^new_generation:\s*(\d{3})\s*$')
+          if (-not $active.Success -or $active.Groups[1].Value -cne '009') { throw "generation009 is not ACTIVE; latest switch=$($latest.id)" }
+
+          "WAKE_COMMENT_ID=$($event.comment.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "WAKE_IDEMPOTENCY=$($idem.Groups[1].Value)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "ACTIVE_SWITCH=$($latest.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Fresh-resolve one Herdr Worker and deliver Issue123
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          if (-not (Test-Path -LiteralPath $herdr)) { throw "Herdr CLI missing: $herdr" }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent'='g9-g10-issue123-worker-once'; Accept='application/vnd.github+json' }
+          function Publish123([string]$body) {
+            $payload = @{ body=$body } | ConvertTo-Json -Compress
+            return Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/123/comments' -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+          }
+
+          $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\github-event-herdr-bridge\state'
+          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+          $statePath = Join-Path $stateRoot "g9-g10-issue123-$($env:WAKE_COMMENT_ID).json"
+          if (Test-Path -LiteralPath $statePath) {
+            $prior = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            if ($prior.status -eq 'SENT') {
+              $noop = @(
+                'G9_G10_ISSUE123_WORKER_DELIVERY_V1',
+                'state: NO_OP_DUPLICATE',
+                'control_generation: 009',
+                'source_recovery_authority: 5555242920',
+                "source_wake_comment_id: $env:WAKE_COMMENT_ID",
+                "target_pane: $($prior.pane_id)",
+                "target_agent_session: $($prior.agent_session)",
+                'second_prompt_sent: false',
+                "workflow_run_id: $env:GITHUB_RUN_ID",
+                'user_relay_count: 0'
+              ) -join "`n"
+              $posted = Publish123 $noop
+              $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
+              if ([string]$rb.body -cne $noop) { throw 'Duplicate receipt read-back mismatch' }
+              exit 0
+            }
+            if ($prior.status -eq 'SENDING') { throw 'UNCERTAIN_SEND / NO_BLIND_RETRY' }
+          }
+
+          $listRaw = & $herdr agent list
+          if ($LASTEXITCODE -ne 0) { throw "herdr agent list failed exit=$LASTEXITCODE" }
+          $list = $listRaw | ConvertFrom-Json
+          $agents = @($list.result.agents)
+          $eligible = @($agents | Where-Object {
+            $_.agent -eq 'codex' -and
+            $_.agent_status -in @('idle','done') -and
+            $_.cwd -match '(?i)^C:\\WINDOWS\\system32$' -and
+            ([string]::IsNullOrWhiteSpace([string]$_.name) -or $_.name -notmatch '(?i)(review|mep|pr\d+)') -and
+            $_.pane_id -and $_.agent_session.value
+          })
+          if ($eligible.Count -ne 1) {
+            $summary = ($agents | ForEach-Object { "$($_.pane_id):$($_.agent):$($_.agent_status):$($_.cwd):$($_.name)" }) -join '; '
+            throw "Expected exactly one safe idle generic Codex Worker; eligible=$($eligible.Count); agents=$summary"
+          }
+          $target = $eligible[0]
+          $pane = [string]$target.pane_id
+          $session = [string]$target.agent_session.value
+
+          $listRaw2 = & $herdr agent list
+          if ($LASTEXITCODE -ne 0) { throw 'second herdr agent list failed' }
+          $list2 = $listRaw2 | ConvertFrom-Json
+          $same = @($list2.result.agents | Where-Object {
+            [string]$_.pane_id -eq $pane -and
+            [string]$_.agent_session.value -eq $session -and
+            $_.agent -eq 'codex' -and
+            $_.agent_status -in @('idle','done')
+          })
+          if ($same.Count -ne 1) { throw 'Herdr target drifted between enumeration and send; no prompt sent' }
+
+          @{ status='SENDING'; pane_id=$pane; agent_session=$session; workflow_run_id=$env:GITHUB_RUN_ID; observed_at=(Get-Date).ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+          $prompt = "Read GitHub directly. Rehydrate D22977/gpt-browser-bridge Issue #123 card CONTROL-G9-G10-AUTO-CAPTURE-REBOOT-01 and current Issues #43, #81, #88, #103. You are the bounded WORKER for Issue #123, not Control and not Reviewer. Perform ACCESS_CAPABILITY_CHECK_V1 and execute only the currently authorized bounded card. Do not create a second generation010 candidate. Do not start MEP. Do not merge or release. If tracked implementation is needed, stay within the card's exact allowed paths and publish/read-back the required READY/BLOCKED/CONTROL_REQUIRED evidence on Issue #123. The temporary one-shot workflow is transport only and cleanup belongs to Control. GitHub is authority."
+          $promptRaw = & $herdr agent prompt $pane $prompt
+          if ($LASTEXITCODE -ne 0) { throw 'herdr agent prompt failed; state remains SENDING; NO_BLIND_RETRY' }
+          $result = $promptRaw | ConvertFrom-Json
+          if ($result.result.type -ne 'agent_prompted') { throw "Unexpected prompt result type $($result.result.type)" }
+          if ([string]$result.result.agent.pane_id -cne $pane) { throw 'Prompt pane mismatch' }
+          if ([string]$result.result.agent.agent_session.value -cne $session) { throw 'Prompt session mismatch' }
+
+          @{ status='SENT'; pane_id=$pane; agent_session=$session; workflow_run_id=$env:GITHUB_RUN_ID; sent_at=(Get-Date).ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+          $receipt = @(
+            'G9_G10_ISSUE123_WORKER_DELIVERY_V1',
+            'state: CONSUMED_STARTED',
+            'decision: PASS',
+            'control_generation: 009',
+            'card_id: CONTROL-G9-G10-AUTO-CAPTURE-REBOOT-01',
+            'source_recovery_authority: 5555242920',
+            "active_switch_receipt: $env:ACTIVE_SWITCH",
+            "source_wake_comment_id: $env:WAKE_COMMENT_ID",
+            "target_pane: $pane",
+            "target_agent_session: $session",
+            "runner_name: $env:RUNNER_NAME",
+            "workflow_run_id: $env:GITHUB_RUN_ID",
+            'user_relay_count: 0',
+            'duplicate_prompt_count: 0',
+            'readback_required: true'
+          ) -join "`n"
+          $posted = Publish123 $receipt
+          $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
+          if ([string]$rb.body -cne $receipt) { throw "Delivery read-back mismatch receipt=$($posted.id)" }
+          Write-Output "Issue123 Worker prompted pane=$pane session=$session receipt=$($posted.id)"
