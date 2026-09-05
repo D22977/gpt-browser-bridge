@@ -18,7 +18,7 @@ jobs:
       github.event.issue.number == 88 &&
       github.event.comment.user.login == 'D22977' &&
       github.event.comment.author_association == 'OWNER' &&
-      startsWith(github.event.comment.body, 'CONTROL_G10_G11_CREATE_REPAIR_EVENT_V1')
+      startsWith(github.event.comment.body, 'CONTROL_G10_G11_CREATE_RECOVERY_V2_EVENT_V1')
     runs-on: [self-hosted, Windows, GBB-REVIEWER]
     timeout-minutes: 8
     defaults:
@@ -35,6 +35,7 @@ jobs:
           $issue = 88
           $transportAuthority = '5555517740'
           $repairAuthority = '5555553572'
+          $recoveryAuthority = '5555594313'
           $rotationRequired = '5555500259'
           $currentSwitch = '5555495204'
           $logicalKey = 'G10-G11-CREATE-20260906-01'
@@ -91,7 +92,8 @@ jobs:
           if ($event.repository.full_name -cne $repo -or [int]$event.issue.number -ne $issue) { throw 'Wrong event target' }
           if ($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong event actor' }
           $body = [string]$event.comment.body
-          if ($body -notmatch '(?m)^CONTROL_G10_G11_CREATE_REPAIR_EVENT_V1\s*$') { throw 'Missing repair protocol header' }
+          if ($body -notmatch '(?m)^CONTROL_G10_G11_CREATE_RECOVERY_V2_EVENT_V1\s*$') { throw 'Missing recovery protocol header' }
+          if ($body -notmatch '(?m)^source_recovery_authority:\s*5555594313\s*$') { throw 'Wrong recovery authority' }
           if ($body -notmatch '(?m)^source_repair_authority:\s*5555553572\s*$') { throw 'Wrong repair authority' }
           if ($body -notmatch '(?m)^source_transport_authority:\s*5555517740\s*$') { throw 'Wrong transport authority' }
           if ($body -notmatch '(?m)^source_rotation_required:\s*5555500259\s*$') { throw 'Wrong rotation receipt' }
@@ -99,7 +101,7 @@ jobs:
           if ($body -notmatch '(?m)^idempotency_key:\s*G10-G11-CREATE-20260906-01\s*$') { throw 'Wrong logical idempotency key' }
           $sourceEvent = [string]$event.comment.id
 
-          foreach ($cid in @($transportAuthority, $repairAuthority, $rotationRequired, $currentSwitch)) {
+          foreach ($cid in @($transportAuthority, $repairAuthority, $recoveryAuthority, $rotationRequired, $currentSwitch)) {
             $c = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$cid" -Headers $headers -Method Get -TimeoutSec 30
             if ([string]$c.issue_url -notmatch '/issues/88$') { throw "Authority $cid is not on Issue #88" }
           }
@@ -202,14 +204,26 @@ jobs:
 
               $tabs = (& $pw cli "-s=$session" tab-list 2>&1 | Out-String)
               if ($LASTEXITCODE -ne 0) { throw 'PRESEND_ABORT: DB01 tab-list failed' }
-              $chatLines = @($tabs -split "`r?`n" | Where-Object { $_ -match '\]\(https://chatgpt\.com(?:/[^)]*)?\)\s*$' })
-              if ($chatLines.Count -ne 1) { throw "PRESEND_ABORT: exact chatgpt tab count=$($chatLines.Count)" }
-              $ix = [regex]::Match($chatLines[0], '^\s*-\s*(\d+):')
-              if (-not $ix.Success) { throw 'PRESEND_ABORT: ChatGPT tab index parse failed' }
+              $tabLines = @($tabs -split "`r?`n" | Where-Object { $_ -match '^\s*-\s*\d+:' })
+              $chatLines = @($tabLines | Where-Object { $_ -match '\]\(https://chatgpt\.com(?:/[^)]*)?\)\s*$' })
+              if ($chatLines.Count -gt 1) { throw "PRESEND_ABORT: multiple ChatGPT tabs count=$($chatLines.Count)" }
+              if ($chatLines.Count -eq 1) {
+                $targetLine = $chatLines[0]
+              } elseif ($tabLines.Count -eq 1) {
+                $targetLine = $tabLines[0]
+              } else {
+                throw "PRESEND_ABORT: no unique recoverable browser tab total=$($tabLines.Count) chatgpt=$($chatLines.Count)"
+              }
+              $ix = [regex]::Match($targetLine, '^\s*-\s*(\d+):')
+              if (-not $ix.Success) { throw 'PRESEND_ABORT: browser tab index parse failed' }
               $null = (& $pw cli "-s=$session" tab-select $ix.Groups[1].Value 2>&1 | Out-String)
-              if ($LASTEXITCODE -ne 0) { throw 'PRESEND_ABORT: ChatGPT tab-select failed' }
+              if ($LASTEXITCODE -ne 0) { throw 'PRESEND_ABORT: browser tab-select failed' }
               $go = (& $pw cli "-s=$session" goto $projectRoot 2>&1 | Out-String)
               if ($LASTEXITCODE -ne 0) { throw "PRESEND_ABORT: project-root navigation failed $go" }
+              $postTabs = (& $pw cli "-s=$session" tab-list 2>&1 | Out-String)
+              if ($LASTEXITCODE -ne 0) { throw 'PRESEND_ABORT: post-navigation tab-list failed' }
+              $postChatLines = @($postTabs -split "`r?`n" | Where-Object { $_ -match '\]\(https://chatgpt\.com(?:/[^)]*)?\)\s*$' })
+              if ($postChatLines.Count -ne 1) { throw "PRESEND_ABORT: post-recovery exact ChatGPT tab count=$($postChatLines.Count)" }
             } finally {
               Pop-Location
             }
@@ -287,6 +301,7 @@ jobs:
               'required_display_name: 控制塔-011',
               "source_transport_authority: $transportAuthority",
               "source_repair_authority: $repairAuthority",
+              "source_recovery_authority: $recoveryAuthority",
               "source_rotation_required: $rotationRequired",
               "source_current_switch: $currentSwitch",
               "source_create_event_comment_id: $sourceEvent",
@@ -326,7 +341,7 @@ jobs:
                 'decision: UNCERTAIN_SEND_NO_BLIND_RETRY',
                 "source_event_comment_id: $sourceEvent",
                 "logical_idempotency_key: $logicalKey",
-                "source_repair_authority: $repairAuthority",
+                "source_recovery_authority: $recoveryAuthority",
                 "workflow_run_id: $env:GITHUB_RUN_ID",
                 "diagnostic: $detail",
                 'second_physical_send: false',
@@ -342,7 +357,7 @@ jobs:
                 'decision: BLOCKED_PRESEND_NO_BROWSER_SEND',
                 "source_event_comment_id: $sourceEvent",
                 "logical_idempotency_key: $logicalKey",
-                "source_repair_authority: $repairAuthority",
+                "source_recovery_authority: $recoveryAuthority",
                 "workflow_run_id: $env:GITHUB_RUN_ID",
                 "diagnostic: $detail",
                 'physical_send_count: 0',
