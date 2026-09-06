@@ -1,0 +1,62 @@
+name: G10 G11 Herdr Review Retrieval Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g10-g11-herdr-review-retrieval-target-bound-20260906
+  cancel-in-progress: false
+
+jobs:
+  deliver:
+    if: >-
+      github.event.issue.number == 88 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'CONTROL_G10_G11_HERDR_REVIEW_RETRIEVAL_TARGET_BOUND_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Deliver retrieval card to exact fresh Herdr target once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $repo='D22977/gpt-browser-bridge'; $issue=88
+          $dispatch='5555812210'; $recovery='5555840238'; $switch='5555495204'
+          $targetPane='w2:p1'; $targetSession='01a0513f-4e68-7573-bf38-72e2120ebe1d'
+          $herdr='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $stateRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-herdr-review-retrieval-once\state'
+          $statePath=Join-Path $stateRoot 'CONTROL-G10-G11-EXTERNAL-REVIEW-RETRIEVAL-01-20260906.json'
+          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g10-g11-herdr-review-retrieval-target-bound';Accept='application/vnd.github+json'}
+          function Publish([string]$text){$p=@{body=$text}|ConvertTo-Json -Compress;$r=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $p -ContentType 'application/json' -TimeoutSec 30;$rb=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30;if([string]$rb.body -cne $text){throw 'readback mismatch'};return [string]$r.id}
+          function All88{$all=[System.Collections.Generic.List[object]]::new();function Add([object]$v){if($null-eq$v){return};if($v-is[System.Array]){foreach($x in $v){Add $x};return};[void]$all.Add($v)};for($p=1;$p-le40;$p++){$n=$all.Count;Add(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30);if(($all.Count-$n)-lt100){break}};return $all.ToArray()}
+          $event=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json;$body=[string]$event.comment.body
+          if($body-notmatch'(?m)^CONTROL_G10_G11_HERDR_REVIEW_RETRIEVAL_TARGET_BOUND_WAKE_V1\s*$'){throw 'bad protocol'}
+          if($body-notmatch'(?m)^source_dispatch_receipt:\s*5555812210\s*$' -or $body-notmatch'(?m)^source_recovery_authority:\s*5555840238\s*$' -or $body-notmatch'(?m)^source_current_switch:\s*5555495204\s*$'){throw 'bad binding'}
+          foreach($cid in @($dispatch,$recovery,$switch)){$c=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$cid" -Headers $headers -Method Get -TimeoutSec 30;if([string]$c.issue_url-notmatch'/issues/88$'){throw "authority mismatch $cid"}}
+          $all=@(All88);$newer=@($all|Where-Object{$_.PSObject.Properties.Name-contains'id'-and[int64]$_.id-gt[int64]$switch-and[string]$_.body-match'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$'-and[string]$_.body-match'(?m)^state:\s*SWITCH_COMMITTED\s*$'});if($newer.Count-gt0){throw 'STALE newer switch'}
+          $terminal=@($all|Where-Object{[string]$_.body-match'(?m)^CONTROL_G10_G11_EXTERNAL_REVIEW_RETRIEVAL_RESULT_V1\s*$'-and[string]$_.body-match'(?m)^source_dispatch_receipt:\s*5555812210\s*$'});if($terminal.Count-gt0){$rid=Publish(@('CONTROL_G10_G11_HERDR_REVIEW_RETRIEVAL_DELIVERY_V1','state: NO_OP_EXISTING_TERMINAL',"source_dispatch_receipt: $dispatch",'second_physical_prompt: false','user_relay_count: 0','readback_required: true')-join"`n");Write-Output "NO_OP terminal $rid";exit 0}
+          if(Test-Path $statePath){$s=Get-Content $statePath -Raw|ConvertFrom-Json;if([string]$s.status-eq'SENT'){$rid=Publish(@('CONTROL_G10_G11_HERDR_REVIEW_RETRIEVAL_DELIVERY_V1','state: NO_OP_DUPLICATE',"source_dispatch_receipt: $dispatch",'second_physical_prompt: false','user_relay_count: 0','readback_required: true')-join"`n");Write-Output "NO_OP duplicate $rid";exit 0};if([string]$s.status-eq'SENDING'){throw 'UNCERTAIN_SEND / NO_BLIND_RETRY'}}
+          if(-not(Test-Path $herdr)){throw 'BLOCKED_PRESEND Herdr CLI missing'}
+          $raw=& $herdr agent list 2>&1|Out-String;if($LASTEXITCODE-ne0){throw 'BLOCKED_PRESEND herdr list failed'};$list=$raw|ConvertFrom-Json
+          $exact=@($list.result.agents|Where-Object{[string]$_.agent-eq'codex'-and[string]$_.pane_id-ceq$targetPane-and[string]$_.agent_session.value-ceq$targetSession-and([string]$_.agent_status-in@('idle','done'))})
+          if($exact.Count-ne1){$rid=Publish(@('CONTROL_G10_G11_HERDR_REVIEW_RETRIEVAL_DELIVERY_V1','state: BLOCKED_PRESEND',"source_dispatch_receipt: $dispatch",'first_failed_gate: EXACT_TARGET_FRESH_REVALIDATION',"target_pane: $targetPane","target_agent_session: $targetSession",'physical_prompt_count: 0','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "BLOCKED_PRESEND receipt=$rid"}
+          $p3=@($list.result.agents|Where-Object{[string]$_.pane_id-eq'w2:p3'-and[string]$_.agent_session.value-eq'01a04e25-60e3-7a03-8cf1-b54a98d60fdc'});if($p3.Count-ne1-or[string]$p3[0].name-ne'codex_generic_pr98_r2_codex'){throw 'BLOCKED_PRESEND PR98 exclusion binding changed'}
+          $prompt='Read GitHub directly. Execute only D22977/gpt-browser-bridge Issue #88 dispatch receipt 5555812210 / card CONTROL-G10-G11-EXTERNAL-REVIEW-RETRIEVAL-01. GitHub is durable authority. Retrieve and durably publish only the external-review result exactly as that card authorizes. Do not execute the V2 candidate-creation workflow, do not act as Control or Reviewer, do not mutate product state, and do not use the owner human/default browser profile.'
+          $ph=[Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($prompt))).ToLowerInvariant()
+          @{status='SENDING';pane_id=$targetPane;agent_session=$targetSession;prompt_sha256=$ph;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content $statePath -Encoding utf8
+          $out=& $herdr agent prompt $targetPane $prompt 2>&1|Out-String;if($LASTEXITCODE-ne0){$rid=Publish(@('CONTROL_G10_G11_HERDR_REVIEW_RETRIEVAL_DELIVERY_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_dispatch_receipt: $dispatch","target_pane: $targetPane","target_agent_session: $targetSession","prompt_sha256: $ph",'physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN_SEND receipt=$rid"}
+          try{$r=$out|ConvertFrom-Json}catch{$rid=Publish(@('CONTROL_G10_G11_HERDR_REVIEW_RETRIEVAL_DELIVERY_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_dispatch_receipt: $dispatch",'first_failed_gate: POST_PROMPT_RESPONSE_NOT_JSON','physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN_SEND receipt=$rid"}
+          if([string]$r.result.type-ne'agent_prompted'-or[string]$r.result.agent.pane_id-cne$targetPane-or[string]$r.result.agent.agent_session.value-cne$targetSession){$rid=Publish(@('CONTROL_G10_G11_HERDR_REVIEW_RETRIEVAL_DELIVERY_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_dispatch_receipt: $dispatch",'first_failed_gate: POST_PROMPT_BINDING_MISMATCH','physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN_SEND receipt=$rid"}
+          @{status='SENT';pane_id=$targetPane;agent_session=$targetSession;prompt_sha256=$ph;workflow_run_id=$env:GITHUB_RUN_ID;sent_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content $statePath -Encoding utf8
+          $rid=Publish(@('CONTROL_G10_G11_HERDR_REVIEW_RETRIEVAL_DELIVERY_V1','state: DELIVERED','decision: PASS_TRANSPORT_ONLY',"source_dispatch_receipt: $dispatch","source_recovery_authority: $recovery","source_current_switch: $switch","target_pane: $targetPane","target_agent_session: $targetSession","prompt_sha256: $ph",'physical_prompt_count: 1','second_physical_prompt: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");Write-Output "DELIVERED receipt=$rid"
