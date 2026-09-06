@@ -62,6 +62,54 @@ function jsonStdout(value) {
   return { stdout: JSON.stringify({ result: value }), stderr: "" };
 }
 
+function composerSnapshot(url, text = "", overrides = {}) {
+  return jsonStdout({
+    url,
+    candidates: [
+      {
+        index: 0,
+        tagName: "DIV",
+        id: "prompt-textarea",
+        role: "textbox",
+        contentEditable: true,
+        editable: true,
+        disabled: false,
+        readOnly: false,
+        ariaDisabled: false,
+        visible: true,
+        text,
+        ...overrides,
+      },
+    ],
+  });
+}
+
+function composerSnapshotValue(url, text = "", overrides = {}) {
+  return {
+    url,
+    candidates: [
+      {
+        index: 0,
+        tagName: "DIV",
+        id: "prompt-textarea",
+        role: "textbox",
+        contentEditable: true,
+        editable: true,
+        disabled: false,
+        readOnly: false,
+        ariaDisabled: false,
+        visible: true,
+        text,
+        ...overrides,
+      },
+    ],
+  };
+}
+
+function isComposerSnapshotEval(args) {
+  return String(args[3] ?? "").includes("candidates");
+}
+
 // ---------------------------------------------------------------------------
 // Pure logic
 // ---------------------------------------------------------------------------
@@ -293,10 +341,14 @@ test("sendJob reads baseline, sends, waits for URL, writes job.json, and never r
   const fixture = await loadFixture("six_answers_snapshot.json");
   const preSend = { url: conversationUrl, assistantMessages: fixture.assistantMessages.slice(0, 5) };
 
+  let composerReads = 0;
   const exec = fakeExecFactory({
     "tab-list": () => jsonStdout(tabs),
     "tab-select": () => jsonStdout(null),
-    eval: (args, callIndex) => (callIndex === 1 ? jsonStdout(preSend) : jsonStdout({ url: conversationUrl })),
+    eval: (args, callIndex) => {
+      if (isComposerSnapshotEval(args)) return composerSnapshot(conversationUrl, composerReads++ === 0 ? "" : "review pack T2");
+      return callIndex === 1 ? jsonStdout(preSend) : jsonStdout({ url: conversationUrl });
+    },
     fill: () => jsonStdout(null),
     click: () => jsonStdout(null),
   });
@@ -332,13 +384,96 @@ test("sendJob reads baseline, sends, waits for URL, writes job.json, and never r
 // ---------------------------------------------------------------------------
 
 test("sendPrompt fills the editor then clicks the send button (never presses a selector as a key)", async () => {
+  let composerReads = 0;
   const exec = fakeExecFactory({
+    eval: () => composerSnapshot("https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949", composerReads++ === 0 ? "" : "hello"),
     fill: () => jsonStdout(null),
     click: () => jsonStdout(null),
   });
   await sendPrompt("hello", { session: "s", exec });
-  assert.deepEqual(exec.calls.map((c) => c.args[2]), ["fill", "click"]);
-  assert.ok(exec.calls[1].args.includes(SEND_BUTTON_SELECTOR), "click must target the send button selector");
+  assert.deepEqual(exec.calls.map((c) => c.args[2]), ["eval", "fill", "eval", "click"]);
+  assert.ok(exec.calls[3].args.includes(SEND_BUTTON_SELECTOR), "click must target the send button selector");
+});
+
+test("composer target validation fails closed for missing, ambiguous, disabled, and non-editable targets before fill", async () => {
+  const url = "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949";
+  const cases = [
+    { name: "missing", snapshot: { url, candidates: [] } },
+    { name: "ambiguous", snapshot: { url, candidates: [{ editable: true }, { editable: true }] } },
+    { name: "disabled", snapshot: composerSnapshotValue(url, "", { disabled: true, editable: false }) },
+    { name: "non-editable", snapshot: composerSnapshotValue(url, "", { contentEditable: false, editable: false }) },
+  ];
+  for (const { name, snapshot } of cases) {
+    const exec = fakeExecFactory({
+      eval: () => jsonStdout(snapshot),
+      fill: () => jsonStdout(null),
+      click: () => jsonStdout(null),
+    });
+    await assert.rejects(
+      () => sendPrompt("hello", { session: "s", exec, conversationUrl: url }),
+      (err) => err instanceof SendInvalidationError && err.code === "PRE_CLICK_COMPOSER_TARGET_INVALID" && err.phase === "PRE_CLICK" && err.physicalSendCount === 0,
+      `${name} composer target must fail closed`
+    );
+    assert.equal(exec.counts.fill, undefined, `${name} target must not invoke fill`);
+    assert.equal(exec.counts.click, undefined, `${name} target must not invoke click`);
+  }
+});
+
+test("fill CLI error is structured as PRE_CLICK NO_SEND and never reaches click", async () => {
+  const url = "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949";
+  const exec = fakeExecFactory({
+    eval: (args, callIndex) => composerSnapshot(url, callIndex === 1 ? "" : "hello"),
+    fill: () => ({ stdout: JSON.stringify({ isError: true, error: "locator is not actionable" }), stderr: "" }),
+    click: () => jsonStdout(null),
+  });
+  await assert.rejects(
+    () => sendPrompt("hello", { session: "s", exec, conversationUrl: url }),
+    (err) => err instanceof SendInvalidationError && err.code === "PRE_CLICK_FILL_FAILED" && err.phase === "PRE_CLICK" && err.physicalSendCount === 0 && err.terminalState === "CONTROL_REQUIRED_NO_SEND" && err.cause?.code === "CLI_ERROR_RESPONSE:fill"
+  );
+  assert.equal(exec.counts.click, undefined);
+});
+
+test("fill readback mismatch is a PRE_CLICK NO_SEND failure", async () => {
+  const url = "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949";
+  const exec = fakeExecFactory({
+    eval: (args, callIndex) => composerSnapshot(url, callIndex === 1 ? "" : "different text"),
+    fill: () => jsonStdout(null),
+    click: () => jsonStdout(null),
+  });
+  await assert.rejects(
+    () => sendPrompt("hello", { session: "s", exec, conversationUrl: url }),
+    (err) => err instanceof SendInvalidationError && err.code === "PRE_CLICK_FILL_READBACK_MISMATCH" && err.phase === "PRE_CLICK" && err.physicalSendCount === 0 && err.terminalState === "CONTROL_REQUIRED_NO_SEND"
+  );
+  assert.equal(exec.counts.click, undefined);
+});
+
+test("successful fill readback returns POST_CLICK evidence and invokes click once", async () => {
+  const url = "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949";
+  const exec = fakeExecFactory({
+    eval: (args, callIndex) => composerSnapshot(url, callIndex === 1 ? "" : "hello"),
+    fill: () => jsonStdout(null),
+    click: () => jsonStdout(null),
+  });
+  const evidence = await sendPrompt("hello", { session: "s", exec, conversationUrl: url });
+  assert.equal(evidence.phase, "POST_CLICK");
+  assert.equal(evidence.physical_send_count, 1);
+  assert.equal(evidence.click_invoked, true);
+  assert.equal(evidence.fill_readback_verified, true);
+  assert.equal(exec.counts.click, 1);
+});
+
+test("click ambiguity is CLICK_INVOKED uncertain and cannot be classified as pre-click", async () => {
+  const url = "https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949";
+  const exec = fakeExecFactory({
+    eval: (args, callIndex) => composerSnapshot(url, callIndex === 1 ? "" : "hello"),
+    fill: () => jsonStdout(null),
+    click: () => ({ stdout: JSON.stringify({ isError: true, error: "send button actionability timeout" }), stderr: "" }),
+  });
+  await assert.rejects(
+    () => sendPrompt("hello", { session: "s", exec, conversationUrl: url }),
+    (err) => err instanceof SendInvalidationError && err.code === "CLICK_INVOKED_UNCERTAIN" && err.phase === "CLICK_INVOKED" && err.physicalSendCount === "UNKNOWN_AFTER_SEND_BOUNDARY" && err.terminalState === "UNCERTAIN_SEND_NO_BLIND_RETRY" && err.cause?.code === "CLI_ERROR_RESPONSE:click"
+  );
+  assert.equal(exec.counts.click, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -428,10 +563,14 @@ test("sendJob completes an authorized background-tab send (allowBackgroundTab: t
     visibilityState: "hidden",
   };
 
+  let composerReads = 0;
   const exec = fakeExecFactory({
     "tab-list": () => jsonStdout(tabs),
     "tab-select": () => jsonStdout(null),
-    eval: (args, callIndex) => (callIndex === 1 ? jsonStdout(preSend) : jsonStdout({ url: conversationUrl })),
+    eval: (args, callIndex) => {
+      if (isComposerSnapshotEval(args)) return composerSnapshot(conversationUrl, composerReads++ === 0 ? "" : "review pack T2");
+      return callIndex === 1 ? jsonStdout(preSend) : jsonStdout({ url: conversationUrl });
+    },
     fill: () => jsonStdout(null),
     click: () => jsonStdout(null),
   });
@@ -685,25 +824,29 @@ test("validateAttachments rejects a non-file attachment path (a directory) witho
 });
 
 test("sendPrompt uploads attachments before filling the editor, then clicks send (allowlist/upload order)", async () => {
+  let composerReads = 0;
   const exec = fakeExecFactory({
+    eval: () => composerSnapshot("https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949", composerReads++ === 0 ? "" : "hello"),
     upload: () => jsonStdout(null),
     fill: () => jsonStdout(null),
     click: () => jsonStdout(null),
   });
   await sendPrompt("hello", { session: "s", exec, attachments: ["C:\\pack\\review.pdf", "C:\\pack\\notes.txt"] });
-  assert.deepEqual(exec.calls.map((c) => c.args[2]), ["upload", "fill", "click"]);
-  assert.deepEqual(exec.calls[0].args.slice(3, 5), ["C:\\pack\\review.pdf", "C:\\pack\\notes.txt"]);
+  assert.deepEqual(exec.calls.map((c) => c.args[2]), ["eval", "upload", "fill", "eval", "click"]);
+  assert.deepEqual(exec.calls[1].args.slice(3, 5), ["C:\\pack\\review.pdf", "C:\\pack\\notes.txt"]);
 });
 
 test("sendPrompt never calls upload when attachments is omitted or empty (default behavior preserved)", async () => {
+  let composerReads = 0;
   const exec = fakeExecFactory({
+    eval: () => composerSnapshot("https://chatgpt.com/c/6a6cc7f7-6ec8-83ee-8c86-8fe600980949", composerReads++ % 2 === 0 ? "" : "hello"),
     fill: () => jsonStdout(null),
     click: () => jsonStdout(null),
   });
   await sendPrompt("hello", { session: "s", exec });
   await sendPrompt("hello", { session: "s", exec, attachments: [] });
   assert.equal(exec.counts.upload, undefined);
-  assert.deepEqual(exec.calls.map((c) => c.args[2]), ["fill", "click", "fill", "click"]);
+  assert.deepEqual(exec.calls.map((c) => c.args[2]), ["eval", "fill", "eval", "click", "eval", "fill", "eval", "click"]);
 });
 
 test("sendJob rejects a missing attachment before touching the browser at all", async () => {
@@ -739,13 +882,16 @@ test("sendJob uploads attachments then sends, while the default PAGE_HIDDEN gate
   const attachmentPath = path.join(dir, "review_pack.pdf");
   await writeFile(attachmentPath, "stub bytes");
 
+  let composerReads = 0;
   const exec = fakeExecFactory({
     "tab-list": () => jsonStdout(tabs),
     "tab-select": () => jsonStdout(null),
-    eval: (args, callIndex) =>
-      callIndex === 1
+    eval: (args, callIndex) => {
+      if (isComposerSnapshotEval(args)) return composerSnapshot(conversationUrl, composerReads++ === 0 ? "" : "review pack T2");
+      return callIndex === 1
         ? jsonStdout({ url: conversationUrl, assistantMessages: [], visibilityState: "visible" })
-        : jsonStdout({ url: conversationUrl }),
+        : jsonStdout({ url: conversationUrl });
+    },
     upload: () => jsonStdout(null),
     fill: () => jsonStdout(null),
     click: () => jsonStdout(null),
@@ -968,6 +1114,17 @@ test("the downstream canary matcher binds source terminal, card, and candidate h
   assert.match(guard, /Wait-ForDoorbellCanary[\s\S]*source_terminal_receipt/);
   assert.match(guard, /Wait-ForDoorbellCanary[\s\S]*source_card_id/);
   assert.match(guard, /Wait-ForDoorbellCanary[\s\S]*candidate_head/);
+});
+
+test("doorbell classifies sender phase evidence as definite no-send or click ambiguity", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  assert.match(doorbell, /sender_phase/);
+  assert.match(doorbell, /PRE_CLICK/);
+  assert.match(doorbell, /PRE_CLICK_FILL_FAILED|PRE_CLICK_FILL_READBACK_MISMATCH/);
+  assert.match(doorbell, /CONTROL_REQUIRED_NO_SEND/);
+  assert.match(doorbell, /CLICK_INVOKED/);
+  assert.match(doorbell, /UNCERTAIN_SEND_NO_BLIND_RETRY/);
+  assert.match(doorbell, /UNKNOWN_AFTER_SEND_BOUNDARY/);
 });
 
 // ---------------------------------------------------------------------------

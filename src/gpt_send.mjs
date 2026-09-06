@@ -46,6 +46,42 @@ export const BASELINE_SNAPSHOT_SCRIPT = `() => {
 export const PROMPT_TEXTAREA_SELECTOR = '#prompt-textarea';
 export const SEND_BUTTON_SELECTOR = '[data-testid="send-button"]';
 
+export const SENDER_PHASES = Object.freeze({
+  PRE_CLICK: "PRE_CLICK",
+  CLICK_INVOKED: "CLICK_INVOKED",
+  POST_CLICK: "POST_CLICK",
+});
+
+// Read-only composer inspection used immediately before any sender mutation
+// and again after fill. The selector is intentionally exact: a missing,
+// duplicate, disabled, hidden, or non-editable #prompt-textarea is never
+// guessed around and can never reach the send-button click.
+export const COMPOSER_SNAPSHOT_SCRIPT = `() => {
+  const nodes = Array.from(document.querySelectorAll('#prompt-textarea'));
+  return {
+    url: location.href,
+    candidates: nodes.map((node, index) => {
+      const formControl = node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement;
+      const text = formControl ? node.value : (node.innerText || node.textContent || '');
+      const editable = !node.disabled && !node.readOnly && node.getAttribute('aria-disabled') !== 'true' &&
+        (node.isContentEditable || node.tagName === 'TEXTAREA' || node.tagName === 'INPUT');
+      return {
+        index,
+        tagName: node.tagName,
+        id: node.id,
+        role: node.getAttribute('role'),
+        contentEditable: node.isContentEditable,
+        editable,
+        disabled: Boolean(node.disabled),
+        readOnly: Boolean(node.readOnly),
+        ariaDisabled: node.getAttribute('aria-disabled') === 'true',
+        visible: Boolean(node.offsetWidth || node.offsetHeight || node.getClientRects().length),
+        text,
+      };
+    }),
+  };
+}`;
+
 export const DEFAULT_CLI_PATH =
   process.env.GBB_PLAYWRIGHT_CLI_PATH ||
   "C:\\Users\\Lupun\\AppData\\Roaming\\npm\\node_modules\\@playwright\\cli\\node_modules\\.bin\\playwright.cmd";
@@ -126,10 +162,14 @@ export async function writeJobFile(jobDir, job, { existsCheck } = {}) {
 // ---------------------------------------------------------------------------
 
 export class SendInvalidationError extends Error {
-  constructor(code, options) {
+  constructor(code, options = {}) {
     super(code, options);
     this.name = "SendInvalidationError";
     this.code = code;
+    this.phase = options.phase ?? null;
+    this.physicalSendCount = options.physicalSendCount ?? null;
+    this.terminalState = options.terminalState ?? null;
+    this.details = options.details ?? null;
   }
 }
 
@@ -306,6 +346,60 @@ export async function readBaseline(conversationUrl, opts) {
   return readBaselineFromSnapshot(snapshot);
 }
 
+export function validateComposerSnapshot(snapshot, { conversationUrl } = {}) {
+  const candidates = Array.isArray(snapshot?.candidates) ? snapshot.candidates : [];
+  const preClick = {
+    phase: SENDER_PHASES.PRE_CLICK,
+    physicalSendCount: 0,
+    terminalState: "CONTROL_REQUIRED_NO_SEND",
+  };
+  if (candidates.length !== 1) {
+    throw new SendInvalidationError("PRE_CLICK_COMPOSER_TARGET_INVALID", {
+      ...preClick,
+      details: { reason: candidates.length === 0 ? "TARGET_MISSING" : "TARGET_AMBIGUOUS", candidate_count: candidates.length },
+    });
+  }
+  const [candidate] = candidates;
+  if (candidate?.id !== "prompt-textarea" || candidate.editable !== true || candidate.disabled === true || candidate.readOnly === true || candidate.ariaDisabled === true || candidate.visible === false) {
+    throw new SendInvalidationError("PRE_CLICK_COMPOSER_TARGET_INVALID", {
+      ...preClick,
+      details: {
+        reason: candidate?.disabled === true ? "TARGET_DISABLED" : "TARGET_NOT_EDITABLE",
+        candidate_id: candidate?.id ?? null,
+      },
+    });
+  }
+  if (conversationUrl && extractConversationId(snapshot?.url) !== extractConversationId(conversationUrl)) {
+    throw new SendInvalidationError("PRE_CLICK_COMPOSER_TARGET_INVALID", {
+      ...preClick,
+      details: { reason: "TARGET_CONVERSATION_MISMATCH", observed_url: snapshot?.url ?? null },
+    });
+  }
+  if (typeof candidate.text !== "string") {
+    throw new SendInvalidationError("PRE_CLICK_COMPOSER_TARGET_INVALID", {
+      ...preClick,
+      details: { reason: "TARGET_TEXT_UNREADABLE" },
+    });
+  }
+  return candidate;
+}
+
+async function readComposerSnapshot(opts, { conversationUrl } = {}) {
+  let snapshot;
+  try {
+    snapshot = await runCliCommand("eval", [COMPOSER_SNAPSHOT_SCRIPT], opts);
+  } catch (error) {
+    throw new SendInvalidationError("PRE_CLICK_COMPOSER_INSPECTION_FAILED", {
+      cause: error,
+      phase: SENDER_PHASES.PRE_CLICK,
+      physicalSendCount: 0,
+      terminalState: "CONTROL_REQUIRED_NO_SEND",
+      details: { source_error_code: error?.code ?? null },
+    });
+  }
+  return { snapshot, target: validateComposerSnapshot(snapshot, { conversationUrl }) };
+}
+
 // Validates that every attachment path is an explicit, existing regular
 // file before any browser mutation happens. Fails closed with a structured
 // SendInvalidationError on a missing path or a non-file (directory, socket,
@@ -341,12 +435,64 @@ export async function validateAttachments(attachments) {
 // `press` takes a key name like "Enter", not a CSS selector; clicking is the
 // correct way to activate the send button.)
 export async function sendPrompt(prompt, opts) {
-  const { attachments, ...cliOpts } = opts || {};
+  const { attachments, conversationUrl, ...cliOpts } = opts || {};
+  const { target: initialTarget } = await readComposerSnapshot(cliOpts, { conversationUrl });
   if (Array.isArray(attachments) && attachments.length > 0) {
     await runCliCommand("upload", attachments, cliOpts);
   }
-  await runCliCommand("fill", [PROMPT_TEXTAREA_SELECTOR, prompt], cliOpts);
-  await runCliCommand("click", [SEND_BUTTON_SELECTOR], cliOpts);
+  try {
+    await runCliCommand("fill", [PROMPT_TEXTAREA_SELECTOR, prompt], cliOpts);
+  } catch (error) {
+    throw new SendInvalidationError("PRE_CLICK_FILL_FAILED", {
+      cause: error,
+      phase: SENDER_PHASES.PRE_CLICK,
+      physicalSendCount: 0,
+      terminalState: "CONTROL_REQUIRED_NO_SEND",
+      details: { composer_selector: PROMPT_TEXTAREA_SELECTOR, source_error_code: error?.code ?? null },
+    });
+  }
+
+  let readbackTarget;
+  try {
+    ({ target: readbackTarget } = await readComposerSnapshot(cliOpts, { conversationUrl }));
+  } catch (error) {
+    if (error instanceof SendInvalidationError && error.phase === SENDER_PHASES.PRE_CLICK) throw error;
+    throw new SendInvalidationError("PRE_CLICK_FILL_READBACK_FAILED", {
+      cause: error,
+      phase: SENDER_PHASES.PRE_CLICK,
+      physicalSendCount: 0,
+      terminalState: "CONTROL_REQUIRED_NO_SEND",
+      details: { composer_selector: PROMPT_TEXTAREA_SELECTOR },
+    });
+  }
+  if (readbackTarget.text !== prompt) {
+    throw new SendInvalidationError("PRE_CLICK_FILL_READBACK_MISMATCH", {
+      phase: SENDER_PHASES.PRE_CLICK,
+      physicalSendCount: 0,
+      terminalState: "CONTROL_REQUIRED_NO_SEND",
+      details: { composer_selector: PROMPT_TEXTAREA_SELECTOR, expected_length: prompt.length, observed_length: readbackTarget.text.length },
+    });
+  }
+
+  try {
+    await runCliCommand("click", [SEND_BUTTON_SELECTOR], cliOpts);
+  } catch (error) {
+    throw new SendInvalidationError("CLICK_INVOKED_UNCERTAIN", {
+      cause: error,
+      phase: SENDER_PHASES.CLICK_INVOKED,
+      physicalSendCount: "UNKNOWN_AFTER_SEND_BOUNDARY",
+      terminalState: "UNCERTAIN_SEND_NO_BLIND_RETRY",
+      details: { composer_selector: PROMPT_TEXTAREA_SELECTOR, click_selector: SEND_BUTTON_SELECTOR },
+    });
+  }
+  return {
+    phase: SENDER_PHASES.POST_CLICK,
+    physical_send_count: 1,
+    click_invoked: true,
+    fill_readback_verified: true,
+    composer_selector: PROMPT_TEXTAREA_SELECTOR,
+    initial_composer_text_length: initialTarget.text.length,
+  };
 }
 
 export async function waitConversationUrl(opts = {}) {
@@ -388,7 +534,7 @@ export async function sendJob({
 }) {
   const validAttachments = await validateAttachments(attachments);
   const baseline = await readBaseline(conversationUrl, cliOpts);
-  await sendPrompt(prompt, { attachments: validAttachments, ...cliOpts });
+  const phaseEvidence = await sendPrompt(prompt, { attachments: validAttachments, conversationUrl, ...cliOpts });
   const finalUrl = await waitConversationUrl({ ...cliOpts, now });
 
   const job = buildJob({
@@ -401,5 +547,5 @@ export async function sendJob({
 
   const jobDir = resolveJobDir(runtimeRoot, job.job_id);
   const jobPath = await writeJobFile(jobDir, job, { existsCheck });
-  return { job, jobPath };
+  return { job, jobPath, phaseEvidence };
 }

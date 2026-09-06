@@ -48,7 +48,7 @@ jobs:
           $ErrorActionPreference='Stop'
           $repo='D22977/gpt-browser-bridge'; $issue=88
           $expectedSwitch='5555495204'; $expectedGeneration='010';$expectedConversationId='6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';$expectedConversationUrl='https://chatgpt.com/c/6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562'
-          $expectedSenderBlob='6b7a523f98a9655ba2ca28f42696b80da365c92b'
+          $expectedSenderBlob='42e55aa194fee1243f8cf32e3c1a63e7ad86f78a'
           $allowedSourceCards=@('GBB-UNATTENDED-RETURN-TRANSPORT-01','GBB-READY-RETURN-CLOSURE-01','GBB-UNATTENDED-RETURN-E2E-REPAIR-03')
           $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g10-g11-ready-return-doorbell-v2';Accept='application/vnd.github+json'}
           $stateRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-ready-return-doorbell-v2\state'
@@ -245,6 +245,8 @@ jobs:
           if(Test-Path -LiteralPath $statePath){
             try{$stored=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json}catch{Fail-NoSend 'CORRUPT_LOCAL_SEND_STATE'}
             switch([string]$stored.status){
+              'PRE_CLICK' {$id=Publish-Canary 'CONTROL_REQUIRED_NO_SEND' '0' 'false' $activeSwitch.Receipt $activeSwitch.Generation $activeSwitch.ConversationId $activeSwitch.ConversationUrl 'sender_phase: PRE_CLICK`nsender_error_code: PRE_CLICK_INTERRUPTED_BEFORE_SENDER_RESULT';throw "CONTROL_REQUIRED_NO_SEND receipt=$id"}
+              'PRE_CLICK_FAILED' {$id=Publish-Canary 'CONTROL_REQUIRED_NO_SEND' '0' 'false' $activeSwitch.Receipt $activeSwitch.Generation $activeSwitch.ConversationId $activeSwitch.ConversationUrl 'sender_phase: PRE_CLICK`nsender_error_code: PRE_CLICK_FAILED`nexisting_pre_click_failure: true';throw "CONTROL_REQUIRED_NO_SEND receipt=$id"}
               'SENDING' {$id=Publish-Canary 'UNCERTAIN_SEND_NO_BLIND_RETRY' 'UNKNOWN_AFTER_SEND_BOUNDARY' 'false' $activeSwitch.Receipt $activeSwitch.Generation $activeSwitch.ConversationId $activeSwitch.ConversationUrl 'reason: existing SENDING state';throw "UNCERTAIN_SEND_NO_BLIND_RETRY receipt=$id"}
               'UNCERTAIN' {$id=Publish-Canary 'UNCERTAIN_SEND_NO_BLIND_RETRY' 'UNKNOWN_AFTER_SEND_BOUNDARY' 'false' $activeSwitch.Receipt $activeSwitch.Generation $activeSwitch.ConversationId $activeSwitch.ConversationUrl 'reason: existing UNCERTAIN state';throw "UNCERTAIN_SEND_NO_BLIND_RETRY receipt=$id"}
               'SENT' {
@@ -283,20 +285,39 @@ jobs:
           $env:GBB_SENDER_PATH=$senderPath;$env:GBB_SENDER_SESSION=$senderSession;$env:GBB_RUNTIME_ROOT=$runtimeRoot;$env:GBB_TARGET_URL=$finalSwitch.ConversationUrl;$env:GBB_PROMPT="Read GitHub directly. Rehydrate D22977/gpt-browser-bridge #43/#81/#88 and handle terminal receipt $terminal for card $sourceCard as the current ACTIVE Control only. GitHub is durable authority."
           $script=@'
           import { pathToFileURL } from 'node:url';
-          const mod = await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
-          await mod.readBaseline(process.env.GBB_TARGET_URL,{session:process.env.GBB_SENDER_SESSION,allowBackgroundTab:true});
-          const result=await mod.sendJob({prompt:process.env.GBB_PROMPT,attempt:1,conversationUrl:process.env.GBB_TARGET_URL,runtimeRoot:process.env.GBB_RUNTIME_ROOT,session:process.env.GBB_SENDER_SESSION,allowBackgroundTab:true});
-          console.log(JSON.stringify({job_id:result.job.job_id,prompt_hash:result.job.prompt_hash}));
+          function errorEvidence(error){
+            return {ok:false,code:error?.code??'SENDER_ERROR',phase:error?.phase??'CLICK_INVOKED',physical_send_count:error?.physicalSendCount??'UNKNOWN_AFTER_SEND_BOUNDARY',terminal_state:error?.terminalState??'UNCERTAIN_SEND_NO_BLIND_RETRY',source_error_code:error?.cause?.code??null,source_error_cause:error?.cause?.cause?.message??error?.cause?.message??error?.message??'unknown sender error'};
+          }
+          try{
+            const mod = await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
+            await mod.readBaseline(process.env.GBB_TARGET_URL,{session:process.env.GBB_SENDER_SESSION,allowBackgroundTab:true});
+            const result=await mod.sendJob({prompt:process.env.GBB_PROMPT,attempt:1,conversationUrl:process.env.GBB_TARGET_URL,runtimeRoot:process.env.GBB_RUNTIME_ROOT,session:process.env.GBB_SENDER_SESSION,allowBackgroundTab:true});
+            console.log(JSON.stringify({ok:true,job_id:result.job.job_id,prompt_hash:result.job.prompt_hash,phase:result.phaseEvidence.phase,physical_send_count:result.phaseEvidence.physical_send_count,click_invoked:result.phaseEvidence.click_invoked,fill_readback_verified:result.phaseEvidence.fill_readback_verified}));
+          }catch(error){console.log(JSON.stringify(errorEvidence(error)));process.exitCode=17}
           '@
           $scriptPath=Join-Path $env:RUNNER_TEMP "ready-return-doorbell-$keyHash-$env:GITHUB_RUN_ID.mjs";Set-Content -LiteralPath $scriptPath -Value $script -Encoding utf8
-          @{status='SENDING';logical_key=$logicalKey;source_card_id=$sourceCard;source_terminal_receipt=$terminal;candidate_head=$candidateHead;active_switch_receipt=$finalSwitch.Receipt;target_generation=$finalSwitch.Generation;target_conversation_id=$finalSwitch.ConversationId;target_conversation_url=$finalSwitch.ConversationUrl;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+          @{status='PRE_CLICK';logical_key=$logicalKey;source_card_id=$sourceCard;source_terminal_receipt=$terminal;candidate_head=$candidateHead;active_switch_receipt=$finalSwitch.Receipt;target_generation=$finalSwitch.Generation;target_conversation_id=$finalSwitch.ConversationId;target_conversation_url=$finalSwitch.ConversationUrl;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+          $senderResult=$null
           try{
-            $out=(& node $scriptPath 2>&1|Out-String).Trim();if($LASTEXITCODE-ne0){throw $out};$json=($out-split"`n"|Where-Object{$_.Trim().StartsWith('{')}|Select-Object -Last 1);if(-not$json){throw 'No sender JSON'};$sent=$json|ConvertFrom-Json
+            $out=(& node $scriptPath 2>&1|Out-String).Trim();$senderExit=$LASTEXITCODE;$json=($out-split"`n"|Where-Object{$_.Trim().StartsWith('{')}|Select-Object -Last 1);if(-not$json){throw 'No sender JSON'};$senderResult=$json|ConvertFrom-Json;if($senderExit-ne0-or$senderResult.ok-ne$true){throw "sender terminal failure: $out"};$sent=$senderResult
           }catch{
-            $detail=($_.Exception.Message-replace'[\r\n]+',' ');if($detail.Length-gt500){$detail=$detail.Substring(0,500)}
-            $id=Publish-Canary 'UNCERTAIN_SEND_NO_BLIND_RETRY' 'UNKNOWN_AFTER_SEND_BOUNDARY' 'false' $finalSwitch.Receipt $finalSwitch.Generation $finalSwitch.ConversationId $finalSwitch.ConversationUrl "diagnostic: $detail";throw "UNCERTAIN_SEND_NO_BLIND_RETRY receipt=$id"
+            $phase=if($null-ne$senderResult){[string]$senderResult.phase}else{'CLICK_INVOKED'}
+            $senderCode=if($null-ne$senderResult){[string]$senderResult.code}else{'SENDER_RESULT_MISSING'}
+            $sourceCode=if($null-ne$senderResult){[string]$senderResult.source_error_code}else{''}
+            $sourceCause=if($null-ne$senderResult){[string]$senderResult.source_error_cause}else{[string]$_.Exception.Message}
+            $safeCause=($sourceCause-replace'[\r\n]+',' ');if($safeCause.Length-gt500){$safeCause=$safeCause.Substring(0,500)}
+            $preClickFailureCodes=@('PRE_CLICK_COMPOSER_TARGET_INVALID','PRE_CLICK_COMPOSER_INSPECTION_FAILED','PRE_CLICK_FILL_FAILED','PRE_CLICK_FILL_READBACK_MISMATCH')
+            $isPreClickNoSend=($phase-eq'PRE_CLICK' -and ($senderCode -in $preClickFailureCodes -or [string]::IsNullOrWhiteSpace($senderCode)))
+            if($isPreClickNoSend -or $phase-eq'PRE_CLICK'){
+              $stored=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json;$stored.status='PRE_CLICK_FAILED';$stored.sender_phase=$phase;$stored.sender_error_code=$senderCode;$stored.sender_source_error_code=$sourceCode;$stored.sender_source_error_cause=$safeCause;$stored.physical_send_count=0;$stored|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+              $extra="sender_phase: PRE_CLICK`nsender_error_code: $senderCode`nsender_source_error_code: $sourceCode`nsender_source_error_cause: $safeCause`nsender_physical_send_count: 0"
+              $id=Publish-Canary 'CONTROL_REQUIRED_NO_SEND' '0' 'false' $finalSwitch.Receipt $finalSwitch.Generation $finalSwitch.ConversationId $finalSwitch.ConversationUrl $extra;throw "CONTROL_REQUIRED_NO_SEND receipt=$id"
+            }
+            $stored=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json;$stored.status='UNCERTAIN';$stored.sender_phase=$phase;$stored.sender_error_code=$senderCode;$stored.sender_source_error_code=$sourceCode;$stored.sender_source_error_cause=$safeCause;$stored.physical_send_count='UNKNOWN_AFTER_SEND_BOUNDARY';$stored|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+            $extra="sender_phase: $phase`nsender_error_code: $senderCode`nsender_source_error_code: $sourceCode`nsender_source_error_cause: $safeCause"
+            $id=Publish-Canary 'UNCERTAIN_SEND_NO_BLIND_RETRY' 'UNKNOWN_AFTER_SEND_BOUNDARY' 'false' $finalSwitch.Receipt $finalSwitch.Generation $finalSwitch.ConversationId $finalSwitch.ConversationUrl $extra;throw "UNCERTAIN_SEND_NO_BLIND_RETRY receipt=$id"
           }finally{Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue}
-          $stored=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json;$stored.status='SENT';$stored.sent_at=(Get-Date).ToString('o');$stored.sender_job_id=[string]$sent.job_id;$stored.sender_prompt_hash=[string]$sent.prompt_hash;$stored|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
-          $delivery=Publish-Canary 'DELIVERED' '1' 'false' $finalSwitch.Receipt $finalSwitch.Generation $finalSwitch.ConversationId $finalSwitch.ConversationUrl "sender_job_id: $($sent.job_id)`nsender_prompt_hash: $($sent.prompt_hash)"
+          $stored=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json;$stored.status='SENT';$stored.sent_at=(Get-Date).ToString('o');$stored.sender_job_id=[string]$sent.job_id;$stored.sender_prompt_hash=[string]$sent.prompt_hash;$stored.sender_phase=[string]$sent.phase;$stored.fill_readback_verified=[string]$sent.fill_readback_verified;$stored.physical_send_count=[string]$sent.physical_send_count;$stored|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+          $delivery=Publish-Canary 'DELIVERED' '1' 'false' $finalSwitch.Receipt $finalSwitch.Generation $finalSwitch.ConversationId $finalSwitch.ConversationUrl "sender_job_id: $($sent.job_id)`nsender_prompt_hash: $($sent.prompt_hash)`nsender_phase: $($sent.phase)`nfill_readback_verified: $($sent.fill_readback_verified)"
           $stored.delivery_receipt=$delivery;$stored.receipt_published=$true;$stored|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
           Write-Output "DELIVERED receipt=$delivery"
