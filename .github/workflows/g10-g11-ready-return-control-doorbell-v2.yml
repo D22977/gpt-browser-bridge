@@ -48,8 +48,8 @@ jobs:
           $ErrorActionPreference='Stop'
           $repo='D22977/gpt-browser-bridge'; $issue=88
           $expectedSwitch='5555495204'; $expectedGeneration='010';$expectedConversationId='6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';$expectedConversationUrl='https://chatgpt.com/c/6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562'
-          $expectedSenderBlob='42e55aa194fee1243f8cf32e3c1a63e7ad86f78a'
-          $allowedSourceCards=@('GBB-UNATTENDED-RETURN-TRANSPORT-01','GBB-READY-RETURN-CLOSURE-01','GBB-UNATTENDED-RETURN-E2E-REPAIR-03','GBB-UNATTENDED-COMPOSER-SENDER-REPAIR-04','GBB-UNATTENDED-DOORBELL-BINDING-REPAIR-05')
+          $expectedSenderBlob='42e55aa194fee1243f8cf32e3c1a63e7ad86f78a';$expectedContractsBlob='9b0822388d7bd3ecc0c51e98836846ae9b192ce3';$expectedResultStoreBlob='ec3a14825ed13681e4a3d0d29ec2612ba3eb2fbf'
+          $allowedSourceCards=@('GBB-UNATTENDED-RETURN-TRANSPORT-01','GBB-READY-RETURN-CLOSURE-01','GBB-UNATTENDED-RETURN-E2E-REPAIR-03','GBB-UNATTENDED-COMPOSER-SENDER-REPAIR-04','GBB-UNATTENDED-DOORBELL-BINDING-REPAIR-05','GBB-UNATTENDED-RUNTIME-ARTIFACT-MATERIALIZATION-REPAIR-06')
           $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g10-g11-ready-return-doorbell-v2';Accept='application/vnd.github+json'}
           $stateRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-ready-return-doorbell-v2\state'
           New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
@@ -214,7 +214,8 @@ jobs:
           $isRepair03Terminal=Has-Protocol $terminalComment 'GBB_UNATTENDED_RETURN_E2E_REPAIR03_READY_V1'
           $isRepair04Terminal=Has-Protocol $terminalComment 'GBB_UNATTENDED_COMPOSER_SENDER_REPAIR04_READY_V1'
           $isRepair05Terminal=Has-Protocol $terminalComment 'GBB_UNATTENDED_DOORBELL_BINDING_REPAIR05_READY_V1'
-          if(-not($isTransportTerminal-or$isClosureTerminal-or$isRepair03Terminal-or$isRepair04Terminal-or$isRepair05Terminal)){Fail-NoSend 'UNRECOGNIZED_SOURCE_TERMINAL'}
+          $isRepair06Terminal=Has-Protocol $terminalComment 'GBB_UNATTENDED_RUNTIME_ARTIFACT_REPAIR06_READY_V1'
+          if(-not($isTransportTerminal-or$isClosureTerminal-or$isRepair03Terminal-or$isRepair04Terminal-or$isRepair05Terminal-or$isRepair06Terminal)){Fail-NoSend 'UNRECOGNIZED_SOURCE_TERMINAL'}
           $terminalCard=[regex]::Match($terminalBody,'(?m)^card_id:\s*([A-Za-z0-9._:-]+)\s*$')
           if(-not$terminalCard.Success-or$terminalCard.Groups[1].Value-cne$sourceCard){Fail-NoSend 'SOURCE_TERMINAL_CARD_MISMATCH'}
           $terminalState=[regex]::Match($terminalBody,'(?m)^state:\s*(READY_FOR_CONTROL_CANARY|BLOCKED|CONTROL_REQUIRED)\s*$')
@@ -263,9 +264,39 @@ jobs:
             }
           }
 
-          $repoRoot='D:\AIWORK\GPT_BROWSER_BRIDGE';$senderRel='src/gpt_send.mjs';$senderPath=Join-Path $repoRoot $senderRel
-          if(-not(Test-Path -LiteralPath $senderPath)){Fail-NoSend 'LOCAL_SENDER_MISSING'}
-          $actualBlob=(& git -C $repoRoot hash-object -- $senderRel).Trim();if($actualBlob-cne$expectedSenderBlob){Fail-NoSend "LOCAL_SENDER_BLOB_MISMATCH_$actualBlob"}
+          $repoRoot='D:\AIWORK\GPT_BROWSER_BRIDGE';$artifactRoot=$null;$artifactCreated=$false;$senderPath=$null
+          $repoFull=[IO.Path]::GetFullPath($repoRoot);$repoPrefix=$repoFull.TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+          $artifactRoot=Join-Path $repoRoot ".gbb-runtime-artifact-$keyHash-$env:GITHUB_RUN_ID";$artifactFull=[IO.Path]::GetFullPath($artifactRoot)
+          $artifactLeaf=Split-Path -Leaf $artifactFull
+          if(-not(Test-Path -LiteralPath $repoRoot -PathType Container)){Fail-NoSend 'CANONICAL_CHECKOUT_MISSING'}
+          if(-not(Test-Path -LiteralPath (Join-Path $repoRoot 'node_modules') -PathType Container)){Fail-NoSend 'NODE_MODULES_MISSING'}
+          if(-not($artifactFull.StartsWith($repoPrefix,[StringComparison]::OrdinalIgnoreCase))-or$artifactLeaf-notmatch'^\.gbb-runtime-artifact-[0-9a-f]{64}-\d+$'){Fail-NoSend 'MATERIALIZATION_UNSAFE_PATH'}
+          if(Test-Path -LiteralPath $artifactRoot){Fail-NoSend 'MATERIALIZATION_COLLISION'}
+          try{
+          New-Item -ItemType Directory -LiteralPath $artifactRoot -Force:$false | Out-Null;$artifactCreated=$true
+          New-Item -ItemType Directory -LiteralPath (Join-Path $artifactRoot 'src') -Force:$false | Out-Null
+          # The artifact is transient and isolated; canonical_tracked_source_mutated=false; canonical tracked sources are never overwritten or used as the sender.
+          function Get-GitHubBlobBytes([string]$blobSha){
+            $blob=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/blobs/$blobSha" -Headers $headers -Method Get -TimeoutSec 30
+            if([string]$blob.encoding-cne'base64'-or[string]::IsNullOrWhiteSpace([string]$blob.content)){throw "MATERIALIZATION_BLOB_FETCH_FAILED_$blobSha"}
+            try{return [Convert]::FromBase64String(([string]$blob.content-replace'\s',''))}catch{throw "MATERIALIZATION_BLOB_DECODE_FAILED_$blobSha"}
+          }
+          function Materialize-ExactBlob([string]$blobSha,[string]$relativePath){
+            if($relativePath-notmatch'^src/(gpt_send|contracts|result_store)\.mjs$'){throw 'MATERIALIZATION_UNSAFE_PATH'}
+            $target=Join-Path $artifactRoot ($relativePath-replace'/','\');if(Test-Path -LiteralPath $target){throw "MATERIALIZATION_COLLISION_$relativePath"}
+            $bytes=Get-GitHubBlobBytes $blobSha;[IO.File]::WriteAllBytes($target,$bytes)
+            $actual=(& git hash-object --no-filters -- $target).Trim();if($LASTEXITCODE-ne0-or$actual-cne$blobSha){throw "MATERIALIZED_BLOB_MISMATCH_${relativePath}_$actual"}
+            return $target
+          }
+            try{$senderPath=Materialize-ExactBlob $expectedSenderBlob 'src/gpt_send.mjs';[void](Materialize-ExactBlob $expectedContractsBlob 'src/contracts.mjs');[void](Materialize-ExactBlob $expectedResultStoreBlob 'src/result_store.mjs')}catch{Fail-NoSend "RUNTIME_ARTIFACT_MATERIALIZATION_FAILED: $($_.Exception.Message)"}
+            $env:GBB_ARTIFACT_SENDER_PATH=$senderPath
+            $importScriptPath=Join-Path $env:RUNNER_TEMP "g10-g11-runtime-artifact-import-$keyHash-$env:GITHUB_RUN_ID.mjs"
+            $importScript=@'
+            import { pathToFileURL } from 'node:url';
+            const mod=await import(pathToFileURL(process.env.GBB_ARTIFACT_SENDER_PATH).href);
+            if(typeof mod.sendJob !== 'function' || typeof mod.readBaseline !== 'function') throw new Error('MATERIALIZED_IMPORT_FAILED_EXPORTS');
+            '@
+            try{Set-Content -LiteralPath $importScriptPath -Value $importScript -Encoding utf8;$importOut=(& node $importScriptPath 2>&1|Out-String);if($LASTEXITCODE-ne0){Fail-NoSend "MATERIALIZED_IMPORT_FAILED: $importOut"}}finally{Remove-Item -LiteralPath $importScriptPath -Force -ErrorAction SilentlyContinue}
           $playwright='C:\Users\Lupun\AppData\Roaming\npm\node_modules\@playwright\cli\node_modules\.bin\playwright.cmd';$senderSession='HERDR-DOORBELL-DB01-G1-20260816';$db01Root='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell';$db01Profile='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell\db01-profile';$runtimeRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-ready-return-doorbell-v2'
           if(-not(Test-Path -LiteralPath $playwright)){Fail-NoSend 'PLAYWRIGHT_CLI_MISSING'}
           if(-not(Test-Path -LiteralPath $db01Root -PathType Container)){Fail-NoSend 'DB01_RUNTIME_ROOT_MISSING'}
@@ -321,5 +352,12 @@ jobs:
           }finally{Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue}
           $stored=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json;$stored.status='SENT';$stored.sent_at=(Get-Date).ToString('o');$stored.sender_job_id=[string]$sent.job_id;$stored.sender_prompt_hash=[string]$sent.prompt_hash;$stored.sender_phase=[string]$sent.phase;$stored.fill_readback_verified=[string]$sent.fill_readback_verified;$stored.physical_send_count=[string]$sent.physical_send_count;$stored|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
           $delivery=Publish-Canary 'DELIVERED' '1' 'false' $finalSwitch.Receipt $finalSwitch.Generation $finalSwitch.ConversationId $finalSwitch.ConversationUrl "sender_job_id: $($sent.job_id)`nsender_prompt_hash: $($sent.prompt_hash)`nsender_phase: $($sent.phase)`nfill_readback_verified: $($sent.fill_readback_verified)"
-          $stored.delivery_receipt=$delivery;$stored.receipt_published=$true;$stored|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
-          Write-Output "DELIVERED receipt=$delivery"
+           $stored.delivery_receipt=$delivery;$stored.receipt_published=$true;$stored|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+           Write-Output "DELIVERED receipt=$delivery"
+          }finally{
+            if($artifactCreated -and (Test-Path -LiteralPath $artifactRoot)){
+              $cleanupFull=[IO.Path]::GetFullPath($artifactRoot)
+              if(-not($cleanupFull.StartsWith($repoPrefix,[StringComparison]::OrdinalIgnoreCase))){throw 'MATERIALIZATION_CLEANUP_PATH_INVALID'}
+              Remove-Item -LiteralPath $artifactRoot -Recurse -Force -ErrorAction Stop
+            }
+          }

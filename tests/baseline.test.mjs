@@ -4,10 +4,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, mkdir as mkdirAsync, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, mkdir as mkdirAsync, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   computePromptHash,
@@ -1242,6 +1242,202 @@ test("REPAIR-05 terminal validation admits Repair05 and preserves exact Repair04
   };
   assert.deepEqual(evaluateTerminalFixture(doorbell, repair04), { accepted: true, marker: repair04.marker, cardId: repair04.cardId, candidateHead: repair04.candidateHead });
   assert.match(doorbell, /42e55aa194fee1243f8cf32e3c1a63e7ad86f78a/);
+});
+
+test("REPAIR-06 source admission and terminal validation preserve the exact Repair05/Repair04 chain", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  const allowed = new Set(extractPowerShellArray(doorbell, "allowedSourceCards"));
+  assert.equal(allowed.has("GBB-UNATTENDED-RUNTIME-ARTIFACT-MATERIALIZATION-REPAIR-06"), true);
+  assert.equal(allowed.has("GBB-UNATTENDED-DOORBELL-BINDING-REPAIR-05"), true);
+  assert.equal(allowed.has("GBB-UNATTENDED-COMPOSER-SENDER-REPAIR-04"), true);
+  assert.equal(allowed.has("GBB-UNAUTHORIZED-SOURCE"), false);
+
+  const repair06 = {
+    marker: "GBB_UNATTENDED_RUNTIME_ARTIFACT_REPAIR06_READY_V1",
+    cardId: "GBB-UNATTENDED-RUNTIME-ARTIFACT-MATERIALIZATION-REPAIR-06",
+    candidateHead: "fa1b0fa7c8ab8add8e1f24eed7e4ab76637b6b99",
+  };
+  assert.deepEqual(evaluateTerminalFixture(doorbell, repair06), { accepted: true, marker: repair06.marker, cardId: repair06.cardId, candidateHead: repair06.candidateHead });
+  assert.equal(evaluateTerminalFixture(doorbell, { ...repair06, terminalCardId: "GBB-UNAUTHORIZED-SOURCE" }).reason, "SOURCE_TERMINAL_CARD_MISMATCH");
+  assert.equal(evaluateTerminalFixture(doorbell, { ...repair06, terminalHeadValue: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }).reason, "SOURCE_TERMINAL_HEAD_MISMATCH");
+  assert.equal(evaluateTerminalFixture(doorbell, { ...repair06, marker: "UNKNOWN_TERMINAL_V1" }).reason, "UNRECOGNIZED_SOURCE_TERMINAL");
+  assert.equal(evaluateTerminalFixture(doorbell, { ...repair06, mechanism: "DIRECT_FALLBACK" }).reason, "SOURCE_TERMINAL_MECHANISM_MISMATCH");
+});
+
+const AUTHORIZED_RUNTIME_BLOBS = Object.freeze({
+  "src/gpt_send.mjs": "42e55aa194fee1243f8cf32e3c1a63e7ad86f78a",
+  "src/contracts.mjs": "9b0822388d7bd3ecc0c51e98836846ae9b192ce3",
+  "src/result_store.mjs": "ec3a14825ed13681e4a3d0d29ec2612ba3eb2fbf",
+});
+
+function gitBlobSha(bytes) {
+  const value = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  return createHash("sha1").update(Buffer.from(`blob ${value.length}\0`)).update(value).digest("hex");
+}
+
+async function pathExists(candidate) {
+  try {
+    await stat(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function materializeRuntimeArtifactForTest({ canonicalRoot, artifactRoot, blobs, importer, sender }) {
+  const canonicalPrefix = `${path.resolve(canonicalRoot)}${path.sep}`;
+  const artifactPath = path.resolve(artifactRoot);
+  if (!artifactPath.startsWith(canonicalPrefix)) {
+    throw Object.assign(new Error("MATERIALIZATION_UNSAFE_PATH"), { code: "MATERIALIZATION_UNSAFE_PATH", phase: "PRE_CLICK", physicalSendCount: 0 });
+  }
+  if (await pathExists(artifactPath)) {
+    throw Object.assign(new Error("MATERIALIZATION_COLLISION"), { code: "MATERIALIZATION_COLLISION", phase: "PRE_CLICK", physicalSendCount: 0 });
+  }
+  let created = false;
+  try {
+    await mkdirAsync(path.join(artifactPath, "src"), { recursive: true });
+    created = true;
+    for (const [relativePath, expectedSha] of Object.entries(AUTHORIZED_RUNTIME_BLOBS)) {
+      const bytes = blobs[relativePath];
+      if (!Buffer.isBuffer(bytes)) {
+        throw Object.assign(new Error(`MATERIALIZATION_MISSING_BLOB:${relativePath}`), { code: "MATERIALIZATION_MISSING_BLOB", phase: "PRE_CLICK", physicalSendCount: 0 });
+      }
+      const actualSha = gitBlobSha(bytes);
+      if (actualSha !== expectedSha) {
+        throw Object.assign(new Error(`MATERIALIZED_BLOB_MISMATCH:${relativePath}`), { code: "MATERIALIZED_BLOB_MISMATCH", phase: "PRE_CLICK", physicalSendCount: 0 });
+      }
+      await writeFile(path.join(artifactPath, relativePath), bytes, { flag: "wx" });
+    }
+    const senderPath = path.join(artifactPath, "src", "gpt_send.mjs");
+    try {
+      await importer(senderPath);
+    } catch (error) {
+      throw Object.assign(new Error("MATERIALIZED_IMPORT_FAILED"), { code: "MATERIALIZED_IMPORT_FAILED", phase: "PRE_CLICK", physicalSendCount: 0, cause: error });
+    }
+    return await sender(senderPath);
+  } finally {
+    if (created) await rm(artifactPath, { recursive: true, force: true });
+  }
+}
+
+async function loadAuthorizedRuntimeBlobs() {
+  const blobs = {};
+  for (const relativePath of Object.keys(AUTHORIZED_RUNTIME_BLOBS)) {
+    const text = await readFile(path.join(__dirname, "..", relativePath), "utf8");
+    blobs[relativePath] = Buffer.from(text.replaceAll("\r\n", "\n"), "utf8");
+  }
+  return blobs;
+}
+
+test("REPAIR-06 materializes exact modules, imports before sender, uses the materialized path, preserves stale canonical source, and cleans up", async () => {
+  const canonicalRoot = await mkdtemp(path.join(__dirname, "..", ".repair06-canonical-"));
+  const artifactRoot = path.join(canonicalRoot, ".repair06-artifact");
+  const staleSenderPath = path.join(canonicalRoot, "src", "gpt_send.mjs");
+  const staleSender = Buffer.from("export const staleCanonicalSender = true;\n");
+  await mkdirAsync(path.dirname(staleSenderPath), { recursive: true });
+  await writeFile(staleSenderPath, staleSender);
+  const blobs = await loadAuthorizedRuntimeBlobs();
+  const events = [];
+  try {
+    const result = await materializeRuntimeArtifactForTest({
+      canonicalRoot,
+      artifactRoot,
+      blobs,
+      importer: async (senderPath) => {
+        events.push(["import", senderPath]);
+        const imported = await import(pathToFileURL(senderPath).href);
+        assert.equal(typeof imported.sendJob, "function");
+      },
+      sender: async (senderPath) => {
+        events.push(["send", senderPath]);
+        return "DELIVERED";
+      },
+    });
+    assert.equal(result, "DELIVERED");
+    assert.equal(events[0][0], "import");
+    assert.equal(events[1][0], "send");
+    assert.equal(events[1][1], events[0][1]);
+    assert.equal(events[1][1].startsWith(artifactRoot), true);
+    assert.deepEqual(await readFile(staleSenderPath), staleSender);
+    assert.equal(await pathExists(artifactRoot), false);
+  } finally {
+    await rm(canonicalRoot, { recursive: true, force: true });
+  }
+});
+
+test("REPAIR-06 wrong or missing runtime blobs fail PRE_CLICK before sender and clean up", async () => {
+  const canonicalRoot = await mkdtemp(path.join(__dirname, "..", ".repair06-failure-"));
+  const blobs = await loadAuthorizedRuntimeBlobs();
+  try {
+    for (const relativePath of ["src/gpt_send.mjs", "src/contracts.mjs"]) {
+      const wrong = { ...blobs, [relativePath]: Buffer.from("wrong runtime bytes\n") };
+      const artifactRoot = path.join(canonicalRoot, `.artifact-${relativePath.replaceAll("/", "-")}`);
+      let senderCalls = 0;
+      await assert.rejects(
+        () => materializeRuntimeArtifactForTest({ canonicalRoot, artifactRoot, blobs: wrong, importer: async () => {}, sender: async () => { senderCalls += 1; } }),
+        (error) => error.code === "MATERIALIZED_BLOB_MISMATCH" && error.phase === "PRE_CLICK" && error.physicalSendCount === 0
+      );
+      assert.equal(senderCalls, 0);
+      assert.equal(await pathExists(artifactRoot), false);
+    }
+
+    const missing = { ...blobs };
+    delete missing["src/result_store.mjs"];
+    const missingRoot = path.join(canonicalRoot, ".artifact-missing");
+    await assert.rejects(
+      () => materializeRuntimeArtifactForTest({ canonicalRoot, artifactRoot: missingRoot, blobs: missing, importer: async () => {}, sender: async () => {} }),
+      (error) => error.code === "MATERIALIZATION_MISSING_BLOB" && error.phase === "PRE_CLICK" && error.physicalSendCount === 0
+    );
+    assert.equal(await pathExists(missingRoot), false);
+  } finally {
+    await rm(canonicalRoot, { recursive: true, force: true });
+  }
+});
+
+test("REPAIR-06 import failure, collision, and unsafe path fail closed before sender", async () => {
+  const canonicalRoot = await mkdtemp(path.join(__dirname, "..", ".repair06-gates-"));
+  const blobs = await loadAuthorizedRuntimeBlobs();
+  try {
+    const importFailureRoot = path.join(canonicalRoot, ".artifact-import-failure");
+    await assert.rejects(
+      () => materializeRuntimeArtifactForTest({ canonicalRoot, artifactRoot: importFailureRoot, blobs, importer: async () => { throw new Error("dependency import failed"); }, sender: async () => {} }),
+      (error) => error.code === "MATERIALIZED_IMPORT_FAILED" && error.phase === "PRE_CLICK" && error.physicalSendCount === 0
+    );
+    assert.equal(await pathExists(importFailureRoot), false);
+
+    const collisionRoot = path.join(canonicalRoot, ".artifact-collision");
+    await mkdirAsync(collisionRoot);
+    await assert.rejects(
+      () => materializeRuntimeArtifactForTest({ canonicalRoot, artifactRoot: collisionRoot, blobs, importer: async () => {}, sender: async () => {} }),
+      (error) => error.code === "MATERIALIZATION_COLLISION" && error.phase === "PRE_CLICK" && error.physicalSendCount === 0
+    );
+
+    const unsafeRoot = path.join(path.dirname(canonicalRoot), "outside-repair06-artifact");
+    await assert.rejects(
+      () => materializeRuntimeArtifactForTest({ canonicalRoot, artifactRoot: unsafeRoot, blobs, importer: async () => {}, sender: async () => {} }),
+      (error) => error.code === "MATERIALIZATION_UNSAFE_PATH" && error.phase === "PRE_CLICK" && error.physicalSendCount === 0
+    );
+  } finally {
+    await rm(canonicalRoot, { recursive: true, force: true });
+  }
+});
+
+test("REPAIR-06 workflow binds exact runtime blobs and never falls back to the stale canonical sender", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  for (const [relativePath, blob] of Object.entries(AUTHORIZED_RUNTIME_BLOBS)) {
+    assert.match(doorbell, new RegExp(blob));
+    assert.match(doorbell, new RegExp(relativePath.replaceAll(".", "\\.")));
+  }
+  assert.match(doorbell, /Materialize|materializ/i);
+  assert.match(doorbell, /MATERIALIZED_BLOB_MISMATCH/);
+  assert.match(doorbell, /MATERIALIZED_IMPORT_FAILED/);
+  assert.match(doorbell, /MATERIALIZATION_COLLISION/);
+  assert.match(doorbell, /MATERIALIZATION_UNSAFE_PATH/);
+  assert.match(doorbell, /Remove-Item[\s\S]*artifactRoot|artifactRoot[\s\S]*Remove-Item/);
+  assert.match(doorbell, /GBB_SENDER_PATH=\$senderPath/);
+  assert.doesNotMatch(doorbell, /actualBlob=.*expectedSenderBlob/);
+  assert.doesNotMatch(doorbell, /senderPath=Join-Path \$repoRoot \$senderRel/);
+  assert.match(doorbell, /canonical_tracked_source_mutated|tracked canonical/);
 });
 
 test("current switch fixture accepts only exact ACTIVE binding and fails closed on malformed or newer evidence", async () => {
