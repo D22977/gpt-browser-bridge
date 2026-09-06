@@ -1,0 +1,91 @@
+name: G11 Issue124 External Advisory Guard Return Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  return-control:
+    if: >-
+      github.event.issue.number == 124 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_GUARD_V1')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Publish exact Control return once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D22977/gpt-browser-bridge'
+          $expectedWake = '5562601089'
+          $workPackage = 'GBB-HANDOFF-CONTINUITY-E2E-COMPLETION-G11'
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            'User-Agent' = 'g11-ext-advisory-return-once'
+            Accept = 'application/vnd.github+json'
+          }
+
+          function GetComments([int]$issue) {
+            $all = [System.Collections.Generic.List[object]]::new()
+            for ($page = 1; $page -le 100; $page++) {
+              $xs = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+              foreach ($x in $xs) { if ($null -ne $x) { [void]$all.Add($x) } }
+              if ($xs.Count -lt 100) { break }
+            }
+            return $all.ToArray()
+          }
+
+          function Publish([int]$issue, [string]$text) {
+            $payload = @{ body = $text } | ConvertTo-Json -Compress
+            $posted = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $readback = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$readback.body -cne $text) { throw "readback mismatch receipt=$($posted.id)" }
+            return [string]$posted.id
+          }
+
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $guardBody = [string]$event.comment.body
+          $guardId = [string]$event.comment.id
+          $wake = [regex]::Match($guardBody, '(?m)^source_wake_comment_id:\s*(\d+)\s*$')
+          if (-not $wake.Success -or $wake.Groups[1].Value -cne $expectedWake) { throw 'Wrong external advisory guard binding' }
+
+          $switches = @(GetComments 88 | Where-Object {
+            [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+            [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
+            [string]$_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
+          } | Sort-Object { [int64]$_.id })
+          if ($switches.Count -eq 0) { throw 'No ACTIVE Control switch' }
+          $latest = $switches[-1]
+          $generation = [regex]::Match([string]$latest.body, '(?m)^new_generation:\s*(\d{3})\s*$')
+          if (-not $generation.Success -or $generation.Groups[1].Value -cne '011') { throw "generation011 no longer ACTIVE latest=$($latest.id)" }
+
+          $existing = @(GetComments 88 | Where-Object {
+            [string]$_.body -match '(?m)^CONTROL_RETURN_REQUEST_V1\s*$' -and
+            [string]$_.body -match "(?m)^source_guard_receipt:\s*$([regex]::Escape($guardId))\s*$" -and
+            [string]$_.body -match "(?m)^source_external_advisory_wake:\s*$expectedWake\s*$"
+          })
+          if ($existing.Count -gt 0) { exit 0 }
+
+          $body = @(
+            'CONTROL_RETURN_REQUEST_V1'
+            'state: RETURN_REQUESTED'
+            'source_issue: 124'
+            "source_guard_receipt: $guardId"
+            "source_external_advisory_wake: $expectedWake"
+            "work_package_id: $workPackage"
+            "target_control_generation: $($generation.Groups[1].Value)"
+            "active_switch_receipt: $($latest.id)"
+            'reason: EXTERNAL_ADVISORY_GUARD_TERMINAL_REQUIRES_CONTROL_DECISION'
+            'user_relay_count: 0'
+            'readback_required: true'
+            "idempotency_key: GBB124-G11-EXT-ADVISORY-GUARD-RETURN-$guardId"
+          ) -join "`n"
+          [void](Publish 88 $body)
