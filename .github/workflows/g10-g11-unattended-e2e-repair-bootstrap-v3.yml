@@ -19,43 +19,270 @@ jobs:
       github.event.issue.number == 88 &&
       github.event.comment.user.login == 'D22977' &&
       github.event.comment.author_association == 'OWNER' &&
-      startsWith(github.event.comment.body, 'CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_WAKE_V3')
+      startsWith(github.event.comment.body, 'CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_WAKE_V31')
     runs-on: [self-hosted, Windows, GBB-REVIEWER]
     timeout-minutes: 330
     defaults:
       run:
         shell: pwsh -NoProfile -File {0}
     steps:
-      - name: Wake repair Worker and guard downstream canary
+      - name: Wake repair Worker and guard through downstream canary
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $ErrorActionPreference='Stop'
-          $repo='D22977/gpt-browser-bridge';$issue=88
-          $card='5557143472';$cardId='GBB-UNATTENDED-RETURN-E2E-REPAIR-02';$authority='5557145496';$expectedSwitch='5555495204'
-          $herdr='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
-          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g10-g11-unattended-e2e-repair-v3';Accept='application/vnd.github+json'}
-          $stateRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-unattended-e2e-repair-v3';New-Item -ItemType Directory -Force -Path $stateRoot|Out-Null
-          $statePath=Join-Path $stateRoot 'worker-send.json'
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D22977/gpt-browser-bridge'
+          $issue = 88
+          $cardReceipt = '5557143472'
+          $cardId = 'GBB-UNATTENDED-RETURN-E2E-REPAIR-02'
+          $transportAuthority = '5557145496'
+          $presendAdjudication = '5557170472'
+          $expectedSwitch = '5555495204'
+          $expectedGeneration = '010'
+          $expectedConversation = '6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'g10-g11-unattended-e2e-v31'; Accept = 'application/vnd.github+json' }
+          $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-unattended-e2e-repair-v31'
+          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+          $sendState = Join-Path $stateRoot 'worker-send.json'
 
-          function Publish([string]$text){$p=@{body=$text}|ConvertTo-Json -Compress;$r=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $p -ContentType 'application/json';$rb=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($r.id)" -Headers $headers -Method Get;if([string]$rb.body-cne$text){throw 'readback mismatch'};return [string]$r.id}
-          function Comment([string]$id){$c=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$id" -Headers $headers -Method Get;if([string]$c.issue_url-notmatch'/issues/88$'){throw 'authority issue mismatch'};return $c}
-          function CurrentSwitch{
-            $a=Comment $expectedSwitch;$b=[string]$a.body;if($b-notmatch'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$'-or$b-notmatch'(?m)^state:\s*SWITCH_COMMITTED\s*$'-or$b-notmatch'(?m)^new_generation:\s*010\s*$'-or$b-notmatch'(?m)^new_status:\s*ACTIVE\s*$'){throw 'expected switch malformed'}
-            $since=[uri]::EscapeDataString(([DateTimeOffset]$a.created_at).ToString('o'));$all=@();for($p=1;$p-le50;$p++){$x=@(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=$since&per_page=100&page=$p" -Headers $headers -Method Get);$all+=$x;if($x.Count-lt100){break}}
-            $newer=@($all|Where-Object{([string]$_.id-cne$expectedSwitch)-and([string]$_.body-match'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$')});if($newer.Count-gt0){throw 'newer Control switch evidence exists'};return $a
+          function Publish([string]$text) {
+            $payload = @{ body = $text } | ConvertTo-Json -Compress
+            $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if (([string]$rb.body) -cne $text) { throw 'durable read-back mismatch' }
+            return [string]$r.id
           }
-          function Recent{$a=CurrentSwitch;$since=[uri]::EscapeDataString(([DateTimeOffset]$a.created_at).ToString('o'));$all=@();for($p=1;$p-le50;$p++){$x=@(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=$since&per_page=100&page=$p" -Headers $headers -Method Get);$all+=$x;if($x.Count-lt100){break}};return $all}
-          function Verify{foreach($id in @($card,$authority,$expectedSwitch)){$null=Comment $id};$null=CurrentSwitch}
-          function Result([string]$state,[string]$terminal,[string]$head,[string]$canary,[string]$detail){return Publish(@('CONTROL_G10_G11_UNATTENDED_E2E_RESULT_V1',"state: $state","source_repair_card: $card","source_worker_terminal_receipt: $terminal","candidate_head: $head","downstream_canary_receipt: $canary",'target_control_generation: 010','target_control_conversation_id: 6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562','user_relay_count: 0',"detail: $detail","workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")}
-          function Block([string]$why){$id=Publish(@('CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_V3_DELIVERY_V1','state: BLOCKED_PRESEND',"reason: $why",'physical_worker_prompt_count: 0','second_physical_prompt: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "BLOCKED $id"}
 
-          $event=Get-Content $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json;$wake=[string]$event.comment.body;if($wake-notmatch'(?m)^source_repair_card:\s*5557143472\s*$'-or$wake-notmatch'(?m)^source_transport_authority:\s*5557145496\s*$'-or$wake-notmatch'(?m)^source_current_switch:\s*5555495204\s*$'){throw 'wake binding mismatch'}
-          try{Verify}catch{Block $_.Exception.Message};if(Test-Path $statePath){$s=Get-Content $statePath -Raw|ConvertFrom-Json;if([string]$s.status-eq'SENDING'){throw 'UNCERTAIN_SEND_NO_BLIND_RETRY'};if([string]$s.status-eq'SENT'){throw 'NO_OP_DUPLICATE_WORKER_SEND'}}
-          if(-not(Test-Path $herdr)){Block 'Herdr missing'};$raw=& $herdr agent list 2>&1|Out-String;if($LASTEXITCODE-ne0){Block 'Herdr list failed'};try{$list=$raw|ConvertFrom-Json}catch{Block 'Herdr list not JSON'};$eligible=@($list.result.agents|Where-Object{[string]$_.agent-eq'codex'-and[string]$_.agent_status-in@('idle','done')-and[string]::IsNullOrWhiteSpace([string]$_.name)-and[string]$_.cwd-ceq'C:\WINDOWS\system32'});if($eligible.Count-ne1){Block "GENERIC_WORKER_COUNT_$($eligible.Count)"};$pane=[string]$eligible[0].pane_id;$session=[string]$eligible[0].agent_session.value
-          try{Verify}catch{Block $_.Exception.Message};$prompt='Read GitHub directly. Execute only D22977/gpt-browser-bridge Issue #88 card 5557143472 / GBB-UNATTENDED-RETURN-E2E-REPAIR-02 as WORKER, base exact ea32690ae31bb02d6c51abd2adb955dec7cb0405. Repair only allowed paths, publish/read-back GBB_UNATTENDED_RETURN_E2E_REPAIR_READY_V1, then stop. Do not act as Control/Reviewer and do not create/send generation011.';$hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($prompt))).ToLowerInvariant();@{status='SENDING';pane=$pane;session=$session}|ConvertTo-Json|Set-Content $statePath -Encoding utf8;$out=& $herdr agent prompt $pane $prompt 2>&1|Out-String;if($LASTEXITCODE-ne0){throw 'UNCERTAIN_SEND_NO_BLIND_RETRY'};try{$resp=$out|ConvertFrom-Json}catch{throw 'UNCERTAIN_SEND_NO_BLIND_RETRY'};if([string]$resp.result.type-ne'agent_prompted'){throw 'UNCERTAIN_SEND_NO_BLIND_RETRY'};$delivery=Publish(@('CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_V3_DELIVERY_V1','state: DELIVERED',"source_repair_card: $card","target_pane: $pane","target_agent_session: $session","prompt_sha256: $hash",'physical_worker_prompt_count: 1','second_physical_prompt: false','post_dispatch_terminal_guard: ACTIVE','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");@{status='SENT';delivery=$delivery}|ConvertTo-Json|Set-Content $statePath -Encoding utf8
+          function GetComment([string]$id) {
+            $c = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$id" -Headers $headers -Method Get -TimeoutSec 30
+            if (([string]$c.issue_url) -notmatch '/issues/88$') { throw "comment $id issue mismatch" }
+            return $c
+          }
 
-          $terminal=$null;$idle=0;for($n=0;$n-lt1080;$n++){Verify;$m=@((Recent)|Where-Object{[string]$_.body-match'(?m)^GBB_UNATTENDED_RETURN_E2E_REPAIR_READY_V1\s*$'-and[string]$_.body-match'(?m)^card_id:\s*GBB-UNATTENDED-RETURN-E2E-REPAIR-02\s*$'});if($m.Count-gt1){$r=Result 'CONTROL_REQUIRED' 'CONFLICT' 'NONE' 'NONE' 'multiple repair terminals';throw "CONTROL_REQUIRED $r"};if($m.Count-eq1){$terminal=$m[0];break};$lr=(& $herdr agent list 2>&1|Out-String)|ConvertFrom-Json;$ex=@($lr.result.agents|Where-Object{[string]$_.pane_id-ceq$pane-and[string]$_.agent_session.value-ceq$session});if($ex.Count-ne1){$r=Result 'CONTROL_REQUIRED' 'NONE' 'NONE' 'NONE' 'bound Worker disappeared';throw "CONTROL_REQUIRED $r"};if([string]$ex[0].agent_status-in@('idle','done')){$idle++}else{$idle=0};if($idle-ge4){$r=Result 'CONTROL_REQUIRED' 'NONE' 'NONE' 'NONE' 'terminal missing after Worker idle/done';throw "CONTROL_REQUIRED $r"};Start-Sleep 15};if($null-eq$terminal){throw 'repair terminal timeout'};$tb=[string]$terminal.body;$tm=[regex]::Match($tb,'(?m)^state:\s*(READY_FOR_CONTROL_CANARY|BLOCKED|CONTROL_REQUIRED)\s*$');if(-not$tm.Success-or$tm.Groups[1].Value-cne'READY_FOR_CONTROL_CANARY'){$r=Result 'CONTROL_REQUIRED' ([string]$terminal.id) 'NONE' 'NONE' 'repair terminal not READY';throw "CONTROL_REQUIRED $r"}
-          $bm=[regex]::Match($tb,'(?m)^worker_branch:\s*(\S+)\s*$');$hm=[regex]::Match($tb,'(?m)^candidate_head:\s*([0-9a-f]{40})\s*$');$pm=[regex]::Match($tb,'(?m)^candidate_parent:\s*([0-9a-f]{40})\s*$');if(-not($bm.Success-and$hm.Success-and$pm.Success)){throw 'READY binding missing'};$branch=$bm.Groups[1].Value;$head=$hm.Groups[1].Value;if($pm.Groups[1].Value-cne'ea32690ae31bb02d6c51abd2adb955dec7cb0405'){throw 'wrong candidate parent'};$ref=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/ref/heads/$([uri]::EscapeDataString($branch))" -Headers $headers -Method Get;if([string]$ref.object.sha-cne$head){throw 'remote head mismatch'};$terminalId=[string]$terminal.id;$idem="$cardId`:$terminalId`:$head";$payload=@{ref=$branch;inputs=@{source_terminal_receipt=$terminalId;source_card_id=$cardId;candidate_head=$head;idempotency_key=$idem}}|ConvertTo-Json -Depth 5 -Compress;Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/actions/workflows/g10-g11-ready-return-control-doorbell-v2.yml/dispatches" -Headers $headers -Method Post -Body $payload -ContentType 'application/json'|Out-Null;$null=Publish(@('CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_CANARY_DISPATCH_V1','state: DISPATCHED',"source_worker_terminal_receipt: $terminalId","source_card_id: $cardId","worker_branch: $branch","candidate_head: $head",'selected_return_mechanism: WORKFLOW_DISPATCH','post_dispatch_terminal_guard: ACTIVE','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
+          function GetRecent([string]$since) {
+            $all = @()
+            $encoded = [uri]::EscapeDataString($since)
+            for ($page = 1; $page -le 50; $page++) {
+              $items = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=$encoded&per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+              $all += $items
+              if ($items.Count -lt 100) { break }
+            }
+            return @($all)
+          }
 
-          $canary=$null;for($n=0;$n-lt240;$n++){Verify;$m=@((Recent)|Where-Object{$b=[string]$_.body;$b-match'(?m)^CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1\s*$'-and$b-match("(?m)^source_terminal_receipt:\s*$terminalId\s*$")-and$b-match("(?m)^source_card_id:\s*$cardId\s*$")-and$b-match("(?m)^candidate_head:\s*$head\s*$")});if($m.Count-gt1){$r=Result 'CONTROL_REQUIRED' $terminalId $head 'CONFLICT' 'multiple downstream canary terminals';throw "CONTROL_REQUIRED $r"};if($m.Count-eq1){$canary=$m[0];break};Start-Sleep 15};if($null-eq$canary){$r=Result 'CONTROL_REQUIRED' $terminalId $head 'NONE' 'downstream canary timeout';throw "CONTROL_REQUIRED $r"};$cb=[string]$canary.body;$sm=[regex]::Match($cb,'(?m)^state:\s*([A-Z_]+)\s*$');$state=$sm.Groups[1].Value;$cid=[string]$canary.id;if($state-ceq'DELIVERED'-and$cb-match'(?m)^physical_send_count:\s*1\s*$'-and$cb-match'(?m)^second_physical_send:\s*false\s*$'-and$cb-match'(?m)^active_switch_receipt:\s*5555495204\s*$'-and$cb-match'(?m)^target_control_generation:\s*010\s*$'-and$cb-match'(?m)^target_control_conversation_id:\s*6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562\s*$'-and$cb-match'(?m)^user_relay_count:\s*0\s*$'){$pass=Result 'PASS' $terminalId $head $cid 'candidate workflow_dispatch path delivered exact current Control wake';Write-Output "UNATTENDED_E2E_PASS $pass";exit 0};$r=Result 'CONTROL_REQUIRED' $terminalId $head $cid "downstream state=$state";throw "CONTROL_REQUIRED $r"
+          function VerifyCurrentControl {
+            foreach ($id in @($cardReceipt, $transportAuthority, $presendAdjudication, $expectedSwitch)) { $null = GetComment $id }
+            $anchor = GetComment $expectedSwitch
+            $body = [string]$anchor.body
+            $first = (($body -split "\r?\n", 2)[0]).Trim()
+            if ($first -cne 'CONTROL_GENERATION_SWITCH_V1') { throw 'expected switch protocol marker malformed' }
+            if ($body -notmatch '(?m)^state:\s*SWITCH_COMMITTED\s*$') { throw 'expected switch not committed' }
+            if ($body -notmatch '(?m)^new_generation:\s*010\s*$') { throw 'expected switch generation mismatch' }
+            if ($body -notmatch '(?m)^new_conversation_id:\s*6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562\s*$') { throw 'expected switch conversation mismatch' }
+            if ($body -notmatch '(?m)^new_status:\s*ACTIVE\s*$') { throw 'expected switch status mismatch' }
+            $anchorIdText = [string]$anchor.id
+            if ($anchorIdText -notmatch '^\d+$') { throw 'expected switch id non-numeric' }
+            $anchorId = [UInt64]::Parse($anchorIdText, [Globalization.CultureInfo]::InvariantCulture)
+            $since = ([DateTimeOffset]$anchor.created_at).ToString('o')
+            foreach ($c in @(GetRecent $since)) {
+              if ($null -eq $c) { continue }
+              $cidText = [string]$c.id
+              if ($cidText -ceq $expectedSwitch) { continue }
+              $cb = [string]$c.body
+              $cf = (($cb -split "\r?\n", 2)[0]).Trim()
+              if ($cf -cne 'CONTROL_GENERATION_SWITCH_V1') { continue }
+              if ($cidText -notmatch '^\d+$') { throw 'newer switch receipt id malformed' }
+              $cid = [UInt64]::Parse($cidText, [Globalization.CultureInfo]::InvariantCulture)
+              if ($cid -gt $anchorId) { throw "newer Control switch receipt exists: $cidText" }
+            }
+            return $since
+          }
+
+          function FindRepairTerminals([string]$since) {
+            $found = @()
+            foreach ($c in @(GetRecent $since)) {
+              if ($null -eq $c) { continue }
+              $b = [string]$c.body
+              $first = (($b -split "\r?\n", 2)[0]).Trim()
+              if ($first -cne 'GBB_UNATTENDED_RETURN_E2E_REPAIR_READY_V1') { continue }
+              if ($b -match '(?m)^card_id:\s*GBB-UNATTENDED-RETURN-E2E-REPAIR-02\s*$') { $found += $c }
+            }
+            return @($found)
+          }
+
+          function FindCanaries([string]$since, [string]$terminalId, [string]$head) {
+            $found = @()
+            foreach ($c in @(GetRecent $since)) {
+              if ($null -eq $c) { continue }
+              $b = [string]$c.body
+              $first = (($b -split "\r?\n", 2)[0]).Trim()
+              if ($first -cne 'CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1') { continue }
+              if ($b -notmatch "(?m)^source_terminal_receipt:\s*$([regex]::Escape($terminalId))\s*$") { continue }
+              if ($b -notmatch "(?m)^source_card_id:\s*$([regex]::Escape($cardId))\s*$") { continue }
+              if ($b -notmatch "(?m)^candidate_head:\s*$([regex]::Escape($head))\s*$") { continue }
+              $found += $c
+            }
+            return @($found)
+          }
+
+          function PublishResult([string]$state, [string]$terminalId, [string]$head, [string]$canaryId, [string]$detail) {
+            return Publish (@(
+              'CONTROL_G10_G11_UNATTENDED_E2E_RESULT_V1',
+              "state: $state",
+              "source_repair_card: $cardReceipt",
+              "source_worker_terminal_receipt: $terminalId",
+              "candidate_head: $head",
+              "downstream_canary_receipt: $canaryId",
+              "target_control_generation: $expectedGeneration",
+              "target_control_conversation_id: $expectedConversation",
+              'user_relay_count: 0',
+              "detail: $detail",
+              "workflow_run_id: $env:GITHUB_RUN_ID",
+              'readback_required: true'
+            ) -join "`n")
+          }
+
+          function BlockPresend([string]$why) {
+            $id = Publish (@(
+              'CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_V31_DELIVERY_V1',
+              'state: BLOCKED_PRESEND',
+              "reason: $($why -replace '[\r\n]+',' ')",
+              'physical_worker_prompt_count: 0',
+              'second_physical_prompt: false',
+              'user_relay_count: 0',
+              "workflow_run_id: $env:GITHUB_RUN_ID",
+              'readback_required: true'
+            ) -join "`n")
+            throw "BLOCKED_PRESEND receipt=$id"
+          }
+
+          $event = Get-Content $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $wake = [string]$event.comment.body
+          if ($wake -notmatch '(?m)^source_repair_card:\s*5557143472\s*$' -or
+              $wake -notmatch '(?m)^source_transport_authority:\s*5557145496\s*$' -or
+              $wake -notmatch '(?m)^source_presend_adjudication:\s*5557170472\s*$' -or
+              $wake -notmatch '(?m)^source_current_switch:\s*5555495204\s*$') { throw 'wake binding mismatch' }
+
+          try { $since = VerifyCurrentControl } catch { BlockPresend $_.Exception.Message }
+          if (Test-Path $sendState) {
+            $old = Get-Content $sendState -Raw | ConvertFrom-Json
+            if (([string]$old.status) -ceq 'SENDING') { throw 'UNCERTAIN_SEND_NO_BLIND_RETRY' }
+            if (([string]$old.status) -ceq 'SENT') { throw 'NO_OP_DUPLICATE_WORKER_SEND' }
+          }
+          if (-not (Test-Path $herdr)) { BlockPresend 'Herdr CLI missing' }
+          $raw = & $herdr agent list 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { BlockPresend 'Herdr agent list failed' }
+          try { $list = $raw | ConvertFrom-Json } catch { BlockPresend 'Herdr agent list not JSON' }
+          $eligible = @()
+          foreach ($a in @($list.result.agents)) {
+            if ($null -eq $a) { continue }
+            $agent = [string]$a.agent; $status = [string]$a.agent_status; $name = [string]$a.name; $cwd = [string]$a.cwd
+            if ($agent -ceq 'codex' -and $status -in @('idle','done') -and [string]::IsNullOrWhiteSpace($name) -and $cwd -ceq 'C:\WINDOWS\system32') { $eligible += $a }
+          }
+          if ($eligible.Count -ne 1) { BlockPresend "GENERIC_WORKER_COUNT_$($eligible.Count)" }
+          $pane = [string]$eligible[0].pane_id
+          $session = [string]$eligible[0].agent_session.value
+          if ([string]::IsNullOrWhiteSpace($pane) -or [string]::IsNullOrWhiteSpace($session)) { BlockPresend 'Worker binding missing' }
+          try { $since = VerifyCurrentControl } catch { BlockPresend $_.Exception.Message }
+
+          $prompt = 'Read GitHub directly. Execute only D22977/gpt-browser-bridge Issue #88 card 5557143472 / GBB-UNATTENDED-RETURN-E2E-REPAIR-02 as WORKER. Base exact ea32690ae31bb02d6c51abd2adb955dec7cb0405. Repair only allowed paths, publish/read-back GBB_UNATTENDED_RETURN_E2E_REPAIR_READY_V1, then stop. Do not act as Control/Reviewer and do not create/send generation011.'
+          $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($prompt))).ToLowerInvariant()
+          @{ status='SENDING'; pane=$pane; session=$session; prompt_hash=$hash } | ConvertTo-Json | Set-Content $sendState -Encoding utf8
+          $out = & $herdr agent prompt $pane $prompt 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw 'UNCERTAIN_SEND_NO_BLIND_RETRY' }
+          try { $resp = $out | ConvertFrom-Json } catch { throw 'UNCERTAIN_SEND_NO_BLIND_RETRY' }
+          if (([string]$resp.result.type) -cne 'agent_prompted' -or ([string]$resp.result.agent.pane_id) -cne $pane -or ([string]$resp.result.agent.agent_session.value) -cne $session) { throw 'UNCERTAIN_SEND_NO_BLIND_RETRY' }
+          $delivery = Publish (@(
+            'CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_V31_DELIVERY_V1',
+            'state: DELIVERED',
+            "source_repair_card: $cardReceipt",
+            "target_pane: $pane",
+            "target_agent_session: $session",
+            "prompt_sha256: $hash",
+            'physical_worker_prompt_count: 1',
+            'second_physical_prompt: false',
+            'post_dispatch_terminal_guard: ACTIVE',
+            'downstream_canary_guard_required: true',
+            'user_relay_count: 0',
+            "workflow_run_id: $env:GITHUB_RUN_ID",
+            'readback_required: true'
+          ) -join "`n")
+          @{ status='SENT'; delivery_receipt=$delivery; pane=$pane; session=$session } | ConvertTo-Json | Set-Content $sendState -Encoding utf8
+
+          $terminal = $null
+          $idlePolls = 0
+          for ($n=0; $n -lt 1080; $n++) {
+            $since = VerifyCurrentControl
+            $matches = @(FindRepairTerminals $since)
+            if ($matches.Count -gt 1) { $r=PublishResult 'CONTROL_REQUIRED' 'CONFLICT' 'NONE' 'NONE' 'multiple repair terminals'; throw "CONTROL_REQUIRED receipt=$r" }
+            if ($matches.Count -eq 1) { $terminal = $matches[0]; break }
+            $lrRaw = & $herdr agent list 2>&1 | Out-String
+            try { $lr = $lrRaw | ConvertFrom-Json } catch { $r=PublishResult 'CONTROL_REQUIRED' 'NONE' 'NONE' 'NONE' 'Herdr inventory unreadable'; throw "CONTROL_REQUIRED receipt=$r" }
+            $exact = @()
+            foreach ($a in @($lr.result.agents)) { if ($null -ne $a -and ([string]$a.pane_id) -ceq $pane -and ([string]$a.agent_session.value) -ceq $session) { $exact += $a } }
+            if ($exact.Count -ne 1) { $r=PublishResult 'CONTROL_REQUIRED' 'NONE' 'NONE' 'NONE' 'bound Worker disappeared'; throw "CONTROL_REQUIRED receipt=$r" }
+            if (([string]$exact[0].agent_status) -in @('idle','done')) { $idlePolls++ } else { $idlePolls=0 }
+            if ($idlePolls -ge 4) { $r=PublishResult 'CONTROL_REQUIRED' 'NONE' 'NONE' 'NONE' 'terminal missing after Worker idle/done'; throw "CONTROL_REQUIRED receipt=$r" }
+            Start-Sleep 15
+          }
+          if ($null -eq $terminal) { $r=PublishResult 'CONTROL_REQUIRED' 'NONE' 'NONE' 'NONE' 'repair terminal timeout'; throw "CONTROL_REQUIRED receipt=$r" }
+
+          $tb = [string]$terminal.body
+          $stateMatch = [regex]::Match($tb, '(?m)^state:\s*(READY_FOR_CONTROL_CANARY|BLOCKED|CONTROL_REQUIRED)\s*$')
+          $terminalId = [string]$terminal.id
+          if (-not $stateMatch.Success -or $stateMatch.Groups[1].Value -cne 'READY_FOR_CONTROL_CANARY') { $r=PublishResult 'CONTROL_REQUIRED' $terminalId 'NONE' 'NONE' 'repair terminal not READY'; throw "CONTROL_REQUIRED receipt=$r" }
+          $branchMatch = [regex]::Match($tb, '(?m)^worker_branch:\s*(\S+)\s*$')
+          $headMatch = [regex]::Match($tb, '(?m)^candidate_head:\s*([0-9a-f]{40})\s*$')
+          $parentMatch = [regex]::Match($tb, '(?m)^candidate_parent:\s*([0-9a-f]{40})\s*$')
+          if (-not ($branchMatch.Success -and $headMatch.Success -and $parentMatch.Success)) { throw 'READY candidate binding missing' }
+          $branch = $branchMatch.Groups[1].Value
+          $head = $headMatch.Groups[1].Value
+          $parent = $parentMatch.Groups[1].Value
+          if ($parent -cne 'ea32690ae31bb02d6c51abd2adb955dec7cb0405') { throw "candidate parent mismatch $parent" }
+          $ref = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/ref/heads/$([uri]::EscapeDataString($branch))" -Headers $headers -Method Get -TimeoutSec 30
+          if (([string]$ref.object.sha) -cne $head) { throw 'remote branch/head mismatch' }
+          $idem = "$cardId`:$terminalId`:$head"
+          $dispatch = @{ ref=$branch; inputs=@{ source_terminal_receipt=$terminalId; source_card_id=$cardId; candidate_head=$head; idempotency_key=$idem } } | ConvertTo-Json -Depth 5 -Compress
+          Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/actions/workflows/g10-g11-ready-return-control-doorbell-v2.yml/dispatches" -Headers $headers -Method Post -Body $dispatch -ContentType 'application/json' -TimeoutSec 30 | Out-Null
+          $null = Publish (@(
+            'CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_CANARY_DISPATCH_V1',
+            'state: DISPATCHED',
+            "source_worker_terminal_receipt: $terminalId",
+            "source_card_id: $cardId",
+            "worker_branch: $branch",
+            "candidate_head: $head",
+            'selected_return_mechanism: WORKFLOW_DISPATCH',
+            'post_dispatch_terminal_guard: ACTIVE',
+            'user_relay_count: 0',
+            "workflow_run_id: $env:GITHUB_RUN_ID",
+            'readback_required: true'
+          ) -join "`n")
+
+          $canary = $null
+          for ($n=0; $n -lt 240; $n++) {
+            $since = VerifyCurrentControl
+            $matches = @(FindCanaries $since $terminalId $head)
+            if ($matches.Count -gt 1) { $r=PublishResult 'CONTROL_REQUIRED' $terminalId $head 'CONFLICT' 'multiple downstream canary terminals'; throw "CONTROL_REQUIRED receipt=$r" }
+            if ($matches.Count -eq 1) { $canary = $matches[0]; break }
+            Start-Sleep 15
+          }
+          if ($null -eq $canary) { $r=PublishResult 'CONTROL_REQUIRED' $terminalId $head 'NONE' 'downstream canary timeout'; throw "CONTROL_REQUIRED receipt=$r" }
+          $cb = [string]$canary.body
+          $canaryId = [string]$canary.id
+          $sm = [regex]::Match($cb, '(?m)^state:\s*([A-Z_]+)\s*$')
+          if (-not $sm.Success) { $r=PublishResult 'CONTROL_REQUIRED' $terminalId $head $canaryId 'downstream state missing'; throw "CONTROL_REQUIRED receipt=$r" }
+          $downstreamState = $sm.Groups[1].Value
+          if ($downstreamState -ceq 'DELIVERED' -and
+              $cb -match '(?m)^physical_send_count:\s*1\s*$' -and
+              $cb -match '(?m)^second_physical_send:\s*false\s*$' -and
+              $cb -match '(?m)^active_switch_receipt:\s*5555495204\s*$' -and
+              $cb -match '(?m)^target_control_generation:\s*010\s*$' -and
+              $cb -match '(?m)^target_control_conversation_id:\s*6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562\s*$' -and
+              $cb -match '(?m)^user_relay_count:\s*0\s*$') {
+            $pass = PublishResult 'PASS' $terminalId $head $canaryId 'candidate workflow_dispatch path physically delivered exact current Control wake'
+            Write-Output "UNATTENDED_E2E_PASS receipt=$pass"
+            exit 0
+          }
+          $r = PublishResult 'CONTROL_REQUIRED' $terminalId $head $canaryId "downstream state=$downstreamState"
+          throw "CONTROL_REQUIRED receipt=$r"
