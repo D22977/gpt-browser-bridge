@@ -284,3 +284,316 @@ jobs:
           $readback = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
           if ([string]$readback.body -cne $receipt) { throw "Durable delivery read-back mismatch receipt=$($posted.id)" }
           Write-Output "Herdr prompted pane=$pane session=$session receipt=$($posted.id) action=$($env:WAKE_ACTION)"
+
+  herdr-outbound-wake-g11:
+    name: GBB Herdr Outbound Wake Current Issue124
+    if: >-
+      github.event.issue.number == 124 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'HERDR_CONTROL_WAKE_V2')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Validate deliver and guard current G11 Issue124
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D22977/gpt-browser-bridge'
+          $issue = 124
+          $cardId = 'GBB-HANDOFF-CONTINUITY-REPAIR-01-G11'
+          $dispatchReceipt = '5559637021'
+          $requiredAction = 'HANDOFF_CONTINUITY_REPAIR_124'
+          $requiredIdem = 'HERDR-G11-ISSUE124-5559637021-V1'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-herdr-outbound-g11'; Accept = 'application/vnd.github+json' }
+
+          function Need([string]$body, [string]$pattern, [string]$name) {
+            $m = [regex]::Match($body, $pattern)
+            if (-not $m.Success) { throw "Malformed HERDR_CONTROL_WAKE_V2 field: $name" }
+            return $m.Groups[1].Value
+          }
+          function Get-AllComments([int]$issueNumber) {
+            $all = [System.Collections.Generic.List[object]]::new()
+            for ($page = 1; $page -le 100; $page++) {
+              $xs = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issueNumber/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30
+              if ($null -eq $xs) { break }
+              $arr = @($xs)
+              foreach ($x in $arr) { if ($null -ne $x) { [void]$all.Add($x) } }
+              if ($arr.Count -lt 100) { break }
+            }
+            return $all.ToArray()
+          }
+          function Publish124([string]$text) {
+            $payload = @{ body = $text } | ConvertTo-Json -Compress
+            $p = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/124/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($p.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$rb.body -cne $text) { throw "Issue124 receipt readback mismatch id=$($p.id)" }
+            return [string]$p.id
+          }
+          function Resolve-CurrentSwitch {
+            $switches = @(Get-AllComments 88 | Where-Object {
+              [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+              [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
+              [string]$_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
+            } | Sort-Object { [int64]$_.id })
+            if ($switches.Count -eq 0) { throw 'No ACTIVE Control switch found' }
+            $latest = $switches[-1]
+            $g = [regex]::Match([string]$latest.body, '(?m)^new_generation:\s*(\d{3})\s*$')
+            if (-not $g.Success) { throw "Latest ACTIVE switch malformed id=$($latest.id)" }
+            return [pscustomobject]@{ Receipt = [string]$latest.id; Generation = $g.Groups[1].Value }
+          }
+
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          if ($event.repository.full_name -cne $repo) { throw 'Wrong repository' }
+          if ([int]$event.issue.number -ne 124) { throw 'Wrong issue' }
+          if ($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong actor' }
+          $body = [string]$event.comment.body
+          if ($body -notmatch '(?m)^HERDR_CONTROL_WAKE_V2\s*$') { throw 'Missing HERDR_CONTROL_WAKE_V2 header' }
+          $requestedGen = Need $body '(?m)^control_generation:\s*(\d{3})\s*$' 'control_generation'
+          $requestedCard = Need $body '(?m)^card_id:\s*([A-Za-z0-9._:-]+)\s*$' 'card_id'
+          $requestedSource = Need $body '(?m)^source_dispatch_receipt:\s*(\d+)\s*$' 'source_dispatch_receipt'
+          $requestedAction = Need $body '(?m)^action:\s*([A-Z0-9_]+)\s*$' 'action'
+          $requestedIdem = Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
+          if ($requestedCard -cne $cardId) { throw 'Wrong card' }
+          if ($requestedSource -cne $dispatchReceipt) { throw 'Wrong source dispatch receipt' }
+          if ($requestedAction -cne $requiredAction) { throw 'Wrong action' }
+          if ($requestedIdem -cne $requiredIdem) { throw 'Wrong idempotency key' }
+          $sw = Resolve-CurrentSwitch
+          if ($requestedGen -cne $sw.Generation) { throw "Stale requested generation=$requestedGen active=$($sw.Generation)" }
+
+          $whoami = (& whoami).Trim()
+          $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+          if ($whoami -notmatch '(?i)^d22977\\lupun$') { throw "Unexpected Windows user: $whoami" }
+          if (-not [Environment]::UserInteractive -or $sessionId -eq 0) { throw 'Runner is not interactive' }
+          if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "Unexpected runner: $env:RUNNER_NAME" }
+          if (-not (Test-Path -LiteralPath $herdr)) { throw "Herdr CLI missing: $herdr" }
+
+          $wakeId = [string]$event.comment.id
+          $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\github-event-herdr-bridge\state-g11'
+          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+          $statePath = Join-Path $stateRoot "$wakeId.json"
+
+          if (Test-Path -LiteralPath $statePath) {
+            $prior = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            if ([string]$prior.status -eq 'SENT') {
+              $noop = @(
+                'HERDR_G11_OUTBOUND_DELIVERY_V1',
+                'state: NO_OP_DUPLICATE',
+                "control_generation: $($sw.Generation)",
+                "active_switch_receipt: $($sw.Receipt)",
+                "source_wake_comment_id: $wakeId",
+                "source_dispatch_receipt: $dispatchReceipt",
+                "card_id: $cardId",
+                "target_pane: $($prior.pane_id)",
+                "target_agent_session: $($prior.agent_session)",
+                'physical_prompt_count: 0',
+                'second_prompt_sent: false',
+                'user_relay_count: 0',
+                "workflow_run_id: $env:GITHUB_RUN_ID",
+                'readback_required: true'
+              ) -join "`n"
+              [void](Publish124 $noop)
+              exit 0
+            }
+            if ([string]$prior.status -eq 'SENDING') {
+              $uncertain = @(
+                'HERDR_G11_OUTBOUND_DELIVERY_V1',
+                'state: UNCERTAIN_SEND_NO_BLIND_RETRY',
+                "control_generation: $($sw.Generation)",
+                "active_switch_receipt: $($sw.Receipt)",
+                "source_wake_comment_id: $wakeId",
+                "source_dispatch_receipt: $dispatchReceipt",
+                'physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY',
+                'second_prompt_sent: false',
+                'user_relay_count: 0',
+                "workflow_run_id: $env:GITHUB_RUN_ID",
+                'readback_required: true'
+              ) -join "`n"
+              [void](Publish124 $uncertain)
+              throw 'Existing SENDING state; NO_BLIND_RETRY'
+            }
+            throw "Unknown prior state=$($prior.status)"
+          }
+
+          $listRaw = & $herdr agent list
+          if ($LASTEXITCODE -ne 0) {
+            $blocked = @(
+              'HERDR_G11_OUTBOUND_GUARD_V1',
+              'state: BLOCKED_PRESEND',
+              'reason: HERDR_AGENT_LIST_FAILED',
+              "control_generation: $($sw.Generation)",
+              "active_switch_receipt: $($sw.Receipt)",
+              "source_wake_comment_id: $wakeId",
+              'physical_prompt_count: 0',
+              'user_relay_count: 0',
+              "workflow_run_id: $env:GITHUB_RUN_ID",
+              'readback_required: true'
+            ) -join "`n"
+            [void](Publish124 $blocked)
+            throw 'herdr agent list failed'
+          }
+          $list = $listRaw | ConvertFrom-Json
+          $agents = @($list.result.agents)
+          $eligible = @($agents | Where-Object {
+            $_.agent -eq 'codex' -and
+            $_.agent_status -in @('idle','done') -and
+            $_.cwd -match '(?i)^C:\\WINDOWS\\system32$' -and
+            ([string]::IsNullOrWhiteSpace([string]$_.name) -or $_.name -notmatch '(?i)(review|mep|pr\d+)') -and
+            $_.pane_id -and $_.agent_session.value
+          })
+          if ($eligible.Count -ne 1) {
+            $blocked = @(
+              'HERDR_G11_OUTBOUND_GUARD_V1',
+              'state: BLOCKED_PRESEND',
+              "reason: GENERIC_CODEX_TARGET_COUNT_$($eligible.Count)",
+              "control_generation: $($sw.Generation)",
+              "active_switch_receipt: $($sw.Receipt)",
+              "source_wake_comment_id: $wakeId",
+              'physical_prompt_count: 0',
+              'user_relay_count: 0',
+              "workflow_run_id: $env:GITHUB_RUN_ID",
+              'readback_required: true'
+            ) -join "`n"
+            [void](Publish124 $blocked)
+            throw "Expected exactly one eligible generic Codex target; count=$($eligible.Count)"
+          }
+          $target = $eligible[0]
+          $pane = [string]$target.pane_id
+          $agentSession = [string]$target.agent_session.value
+
+          $sw2 = Resolve-CurrentSwitch
+          if ($sw2.Receipt -cne $sw.Receipt -or $sw2.Generation -cne $sw.Generation) { throw 'ACTIVE Control changed before prompt boundary' }
+
+          @{ status='SENDING'; pane_id=$pane; agent_session=$agentSession; workflow_run_id=$env:GITHUB_RUN_ID; active_switch=$sw.Receipt; observed_at=(Get-Date).ToString('o') } |
+            ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+          $prompt = "Read GitHub directly. Rehydrate D22977/gpt-browser-bridge Issue #124, latest #43/#81/#88, and card GBB-HANDOFF-CONTINUITY-REPAIR-01-G11. This is Worker transport only. Before any tracked mutation publish/read-back exactly one GBB_HANDOFF_CONTINUITY_REPAIR_CONSUMED_STARTED_V1 on Issue #124 binding source_wake_comment_id: $wakeId, source_dispatch_receipt: $dispatchReceipt, control_generation: $($sw.Generation), herdr_pane: $pane, herdr_agent_session: $agentSession, and the then-current Control-authorized exact base/branch; then execute only the current bounded Worker scope. Do not act as Control or Reviewer; do not merge, release, run a live acceptance canary, create generation012, or retry any historical UNCERTAIN send. GitHub is authority."
+          $promptHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($prompt))).ToLowerInvariant()
+
+          try {
+            $promptRaw = & $herdr agent prompt $pane $prompt
+            if ($LASTEXITCODE -ne 0) { throw "herdr agent prompt exit=$LASTEXITCODE" }
+            $promptResult = $promptRaw | ConvertFrom-Json
+            if ([string]$promptResult.result.type -cne 'agent_prompted') { throw "unexpected result type=$($promptResult.result.type)" }
+            if ([string]$promptResult.result.agent.pane_id -cne $pane) { throw 'prompt pane mismatch' }
+            if ([string]$promptResult.result.agent.agent_session.value -cne $agentSession) { throw 'prompt session mismatch' }
+          } catch {
+            $uncertain = @(
+              'HERDR_G11_OUTBOUND_DELIVERY_V1',
+              'state: UNCERTAIN_SEND_NO_BLIND_RETRY',
+              "control_generation: $($sw.Generation)",
+              "active_switch_receipt: $($sw.Receipt)",
+              "source_wake_comment_id: $wakeId",
+              "source_dispatch_receipt: $dispatchReceipt",
+              "card_id: $cardId",
+              "target_pane: $pane",
+              "target_agent_session: $agentSession",
+              "prompt_sha256: $promptHash",
+              'physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY',
+              'second_prompt_sent: false',
+              'user_relay_count: 0',
+              "diagnostic: $($_.Exception.Message -replace '[\r\n]+',' ')",
+              "workflow_run_id: $env:GITHUB_RUN_ID",
+              'readback_required: true'
+            ) -join "`n"
+            [void](Publish124 $uncertain)
+            throw
+          }
+
+          @{ status='SENT'; pane_id=$pane; agent_session=$agentSession; workflow_run_id=$env:GITHUB_RUN_ID; active_switch=$sw.Receipt; sent_at=(Get-Date).ToString('o') } |
+            ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+          $delivery = @(
+            'HERDR_G11_OUTBOUND_DELIVERY_V1',
+            'state: SENT_WAIT_WORKER_CONSUMED_STARTED',
+            "control_generation: $($sw.Generation)",
+            "active_switch_receipt: $($sw.Receipt)",
+            "source_wake_comment_id: $wakeId",
+            "source_dispatch_receipt: $dispatchReceipt",
+            "card_id: $cardId",
+            "action: $requiredAction",
+            "target_pane: $pane",
+            "target_agent_session: $agentSession",
+            "prompt_sha256: $promptHash",
+            'physical_prompt_count: 1',
+            'second_prompt_sent: false',
+            'user_relay_count: 0',
+            "runner_name: $env:RUNNER_NAME",
+            "workflow_run_id: $env:GITHUB_RUN_ID",
+            'readback_required: true'
+          ) -join "`n"
+          $deliveryReceipt = Publish124 $delivery
+
+          $started = $null
+          $workerReturn = $null
+          for ($attempt = 0; $attempt -lt 48; $attempt++) {
+            Start-Sleep -Seconds 10
+            $comments = @(Get-AllComments 124)
+            $bound = @($comments | Where-Object { [string]$_.body -match "(?m)^source_wake_comment_id:\s*$([regex]::Escape($wakeId))\s*$" } | Sort-Object { [int64]$_.id })
+            $starts = @($bound | Where-Object { [string]$_.body -match '(?m)^GBB_HANDOFF_CONTINUITY_REPAIR_CONSUMED_STARTED_V1\s*$' })
+            if ($starts.Count -gt 1) { throw 'Multiple Worker CONSUMED_STARTED receipts for one wake' }
+            if ($starts.Count -eq 1) { $started = $starts[0]; break }
+            $returns = @($bound | Where-Object {
+              [string]$_.body -match '(?m)^(GBB_HANDOFF_CONTINUITY_REPAIR_RESULT_V1|LOCAL_CONTROL_RETURN_V1)\s*$' -and
+              [string]$_.body -match '(?m)^state:\s*(BLOCKED|CONTROL_REQUIRED|STALE)\s*$'
+            })
+            if ($returns.Count -gt 0) { $workerReturn = $returns[-1]; break }
+          }
+
+          if ($null -ne $started) {
+            $guard = @(
+              'HERDR_G11_OUTBOUND_GUARD_V1',
+              'state: PASS_WORKER_CONSUMED_STARTED',
+              "control_generation: $($sw.Generation)",
+              "active_switch_receipt: $($sw.Receipt)",
+              "source_wake_comment_id: $wakeId",
+              "source_delivery_receipt: $deliveryReceipt",
+              "worker_consumed_started_receipt: $($started.id)",
+              "target_pane: $pane",
+              "target_agent_session: $agentSession",
+              'physical_prompt_count: 1',
+              'user_relay_count: 0',
+              "workflow_run_id: $env:GITHUB_RUN_ID",
+              'readback_required: true'
+            ) -join "`n"
+            [void](Publish124 $guard)
+            exit 0
+          }
+
+          if ($null -ne $workerReturn) {
+            $guard = @(
+              'HERDR_G11_OUTBOUND_GUARD_V1',
+              'state: WORKER_RETURNED_NONSTART_TERMINAL',
+              "control_generation: $($sw.Generation)",
+              "source_wake_comment_id: $wakeId",
+              "source_delivery_receipt: $deliveryReceipt",
+              "worker_return_receipt: $($workerReturn.id)",
+              'physical_prompt_count: 1',
+              'user_relay_count: 0',
+              "workflow_run_id: $env:GITHUB_RUN_ID",
+              'readback_required: true'
+            ) -join "`n"
+            [void](Publish124 $guard)
+            throw "Worker returned receipt=$($workerReturn.id)"
+          }
+
+          $guard = @(
+            'HERDR_G11_OUTBOUND_GUARD_V1',
+            'state: BLOCKED_WORKER_START_TIMEOUT',
+            "control_generation: $($sw.Generation)",
+            "source_wake_comment_id: $wakeId",
+            "source_delivery_receipt: $deliveryReceipt",
+            "target_pane: $pane",
+            "target_agent_session: $agentSession",
+            'physical_prompt_count: 1',
+            'user_relay_count: 0',
+            "workflow_run_id: $env:GITHUB_RUN_ID",
+            'readback_required: true'
+          ) -join "`n"
+          [void](Publish124 $guard)
+          throw 'Worker CONSUMED_STARTED timeout'
