@@ -32,7 +32,7 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $repo='D22977/gpt-browser-bridge';$issue=88
-          $authority='5556464256';$cardReceipt='5556156612';$cardId='GBB-READY-RETURN-CLOSURE-01';$amend='5556459675';$schema='5556468052';$presendFix='5556492820';$expectedSwitch='5555495204';$baseBranch='review-base/gbb-gh-01'
+          $authority='5556464256';$cardReceipt='5556156612';$cardId='GBB-READY-RETURN-CLOSURE-01';$amend='5556459675';$schema='5556468052';$presendFix='5556492820';$expectedSwitch='5555495204';$expectedConversationId='6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';$expectedConversationUrl='https://chatgpt.com/c/6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';$baseBranch='review-base/gbb-gh-01'
           $herdr='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
           $stateRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-ready-return-worker-guard-v2\state';$statePath=Join-Path $stateRoot 'GBB-READY-RETURN-CLOSURE-01-20260906.json';New-Item -ItemType Directory -Force -Path $stateRoot|Out-Null
           $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g10-g11-ready-return-worker-guard-v2';Accept='application/vnd.github+json'}
@@ -45,53 +45,162 @@ jobs:
             return [string]$r.id
           }
 
+          $nodeScanPath=Join-Path $env:RUNNER_TEMP "g10-g11-ready-return-worker-guard-comment-scan-$env:GITHUB_RUN_ID.mjs"
+          $nodeScan=@'
+          const mode = process.env.GBB_COMMENT_SCAN_MODE;
+          const value = process.env.GBB_COMMENT_SCAN_VALUE ?? '';
+          const token = process.env.GBB_GH_TOKEN;
+          const root = 'https://api.github.com/repos/D22977/gpt-browser-bridge';
+          if (!token) throw new Error('GH_TOKEN missing');
+          async function getJson(url) {
+            const response = await fetch(url, { headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'user-agent': 'g10-g11-ready-return-worker-guard-v2-node-scan' } });
+            const text = await response.text();
+            let body;
+            try { body = JSON.parse(text); } catch { throw new Error(`GitHub JSON parse failed status=${response.status}`); }
+            if (!response.ok) throw new Error(`GitHub request failed status=${response.status}`);
+            return body;
+          }
+          function normalize(comment) {
+            if (!comment || Array.isArray(comment.id) || !/^\d+$/.test(String(comment.id ?? ''))) throw new Error('comment id is not a scalar decimal');
+            if (typeof comment.body !== 'string' || typeof comment.created_at !== 'string' || typeof comment.issue_url !== 'string') throw new Error(`comment ${comment.id} shape malformed`);
+            return { id: String(comment.id), body: comment.body, created_at: comment.created_at, issue_url: comment.issue_url };
+          }
+          if (mode === 'single') {
+            process.stdout.write(JSON.stringify(normalize(await getJson(`${root}/issues/comments/${encodeURIComponent(value)}`))));
+          } else if (mode === 'recent') {
+            for (let page = 1; ; page += 1) {
+              const batch = await getJson(`${root}/issues/88/comments?since=${encodeURIComponent(value)}&per_page=100&page=${page}`);
+              if (!Array.isArray(batch)) throw new Error('GitHub comment list is not an array');
+              for (const comment of batch) process.stdout.write(`${JSON.stringify(normalize(comment))}\n`);
+              if (batch.length < 100) break;
+            }
+          } else {
+            throw new Error(`unsupported comment scan mode: ${mode}`);
+          }
+          '@
+          Set-Content -LiteralPath $nodeScanPath -Value $nodeScan -Encoding utf8
+          function Invoke-NodeCommentScan([string]$mode,[string]$value){
+            $env:GBB_GH_TOKEN=$env:GH_TOKEN;$env:GBB_COMMENT_SCAN_MODE=$mode;$env:GBB_COMMENT_SCAN_VALUE=$value
+            $raw=& node $nodeScanPath 2>&1|Out-String;if($LASTEXITCODE-ne0){throw "Node GitHub comment scan failed: $raw"};return $raw.Trim()
+          }
+
           function Get-Comment([string]$id){
-            $c=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$id" -Headers $headers -Method Get -TimeoutSec 30
-            if([string]$c.issue_url-notmatch'/issues/88$'){throw "comment $id is not on Issue #88"}
+            $raw=Invoke-NodeCommentScan 'single' $id
+            try{$c=$raw|ConvertFrom-Json}catch{throw "comment $id JSON readback malformed"}
+            if($null-eq$c-or[string]$c.issue_url-notmatch'/issues/88$'){throw "comment $id is not on Issue #88"}
             return $c
           }
 
           function Get-Recent88([string]$since){
-            $all=[System.Collections.Generic.List[object]]::new();$page=1
-            while($true){
-              $encoded=[uri]::EscapeDataString($since)
-              $batch=@(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=$encoded&per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
-              foreach($comment in $batch){[void]$all.Add($comment)}
-              if($batch.Count-lt100){break}
-              $page++
+            $all=[System.Collections.Generic.List[object]]::new();$raw=Invoke-NodeCommentScan 'recent' $since
+            foreach($line in ($raw-split"`r?`n")){
+              if([string]::IsNullOrWhiteSpace($line)){continue}
+              try{$comment=$line|ConvertFrom-Json}catch{throw 'Node GitHub comment scan emitted malformed JSON'}
+              if($null-eq$comment){throw 'Node GitHub comment scan emitted null comment'}
+              [void]$all.Add($comment)
             }
             return $all.ToArray()
           }
 
+          function Get-CommentId([object]$comment){
+            $property=$comment.PSObject.Properties['id'];if($null-eq$property){throw 'comment id property missing'}
+            $raw=$property.Value;if($null-eq$raw-or$raw-is[System.Array]){throw 'comment id is not a scalar'}
+            $text=[string]$raw;if($text-notmatch'^\d+$'){throw "comment id is not decimal: $text"}
+            return [System.Int64]::Parse($text,[System.Globalization.CultureInfo]::InvariantCulture)
+          }
+
+          function Get-ProtocolFirstLine([object]$comment){
+            $first=[string]((([string]$comment.body)-split"`r?`n",2)[0]);return $first.Trim()
+          }
+
+          function Has-Protocol([object]$comment,[string]$marker){return ((Get-ProtocolFirstLine $comment)-ceq$marker)}
+
           function Parse-Switch([object]$comment){
             $body=[string]$comment.body
-            if($body-notmatch'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$'-or$body-notmatch'(?m)^state:\s*SWITCH_COMMITTED\s*$'){throw "committed switch malformed id=$($comment.id)"}
+            if(-not(Has-Protocol $comment 'CONTROL_GENERATION_SWITCH_V1')-or$body-notmatch'(?m)^state:\s*SWITCH_COMMITTED\s*$'){throw "committed switch malformed id=$(Get-CommentId $comment)"}
             $generation=[regex]::Match($body,'(?m)^new_generation:\s*(\d{3})\s*$');$conversationId=[regex]::Match($body,'(?m)^new_conversation_id:\s*([0-9a-f-]+)\s*$');$conversationUrl=[regex]::Match($body,'(?m)^new_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
             $statusA=[regex]::Match($body,'(?m)^new_status:\s*([A-Z_]+)\s*$');$statusB=[regex]::Match($body,'(?m)^new_generation_status:\s*([A-Z_]+)\s*$')
-            if(-not($generation.Success-and$conversationId.Success-and$conversationUrl.Success)){throw "committed switch fields malformed id=$($comment.id)"}
-            if(-not$statusA.Success-and-not$statusB.Success){throw "committed switch status missing id=$($comment.id)"}
-            if($statusA.Success-and$statusB.Success-and$statusA.Groups[1].Value-cne$statusB.Groups[1].Value){throw "committed switch status conflict id=$($comment.id)"}
-            $status=if($statusA.Success){$statusA.Groups[1].Value}else{$statusB.Groups[1].Value};if($status-cne'ACTIVE'){throw "committed switch is not ACTIVE id=$($comment.id)"}
-            if($null-eq$comment.created_at){throw "committed switch created_at missing id=$($comment.id)"}
-            return [pscustomobject]@{Receipt=[string]$comment.id;Generation=$generation.Groups[1].Value;ConversationId=$conversationId.Groups[1].Value;ConversationUrl=$conversationUrl.Groups[1].Value;Since=([DateTimeOffset]$comment.created_at).ToString('o')}
+            if(-not($generation.Success-and$conversationId.Success-and$conversationUrl.Success)){throw "committed switch fields malformed id=$(Get-CommentId $comment)"}
+            if(-not$statusA.Success-and-not$statusB.Success){throw "committed switch status missing id=$(Get-CommentId $comment)"}
+            if($statusA.Success-and$statusB.Success-and$statusA.Groups[1].Value-cne$statusB.Groups[1].Value){throw "committed switch status conflict id=$(Get-CommentId $comment)"}
+            $status=if($statusA.Success){$statusA.Groups[1].Value}else{$statusB.Groups[1].Value};if($status-cne'ACTIVE'){throw "committed switch is not ACTIVE id=$(Get-CommentId $comment)"}
+            if($null-eq$comment.created_at){throw "committed switch created_at missing id=$(Get-CommentId $comment)"}
+            return [pscustomobject]@{Receipt=([string](Get-CommentId $comment));Generation=$generation.Groups[1].Value;ConversationId=$conversationId.Groups[1].Value;ConversationUrl=$conversationUrl.Groups[1].Value;Since=([DateTimeOffset]$comment.created_at).ToString('o')}
           }
 
           function Get-CurrentSwitch{
             $anchor=Get-Comment $expectedSwitch;$anchorSwitch=Parse-Switch $anchor;$recent=@(Get-Recent88 $anchorSwitch.Since)
-            $committed=@($recent|Where-Object{[string]$_.body-match'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$'-and[string]$_.body-match'(?m)^state:\s*SWITCH_COMMITTED\s*$'}|Sort-Object{[int64]$_.id})
-            $latest=$anchor;foreach($candidate in $committed){if([int64]$candidate.id-gt[int64]$latest.id){$latest=$candidate}}
+            $latest=$anchor;$latestId=Get-CommentId $latest
+            $switchEvidence=@($recent|Where-Object{Has-Protocol $_ 'CONTROL_GENERATION_SWITCH_V1'})
+            foreach($candidate in $switchEvidence){$candidateId=Get-CommentId $candidate;if($candidateId-gt$latestId){$null=Parse-Switch $candidate;$latest=$candidate;$latestId=$candidateId}}
             return Parse-Switch $latest
           }
 
           function Verify-Authority{
             foreach($cid in @($authority,$cardReceipt,$amend,$schema,$presendFix,$expectedSwitch)){$null=Get-Comment $cid}
-            $sw=Get-CurrentSwitch;if($sw.Receipt-cne$expectedSwitch-or$sw.Generation-cne'010'){throw "current Control superseded switch=$($sw.Receipt) generation=$($sw.Generation)"};return $sw
+            $sw=Get-CurrentSwitch;if($sw.Receipt-cne$expectedSwitch-or$sw.Generation-cne'010'-or$sw.ConversationId-cne$expectedConversationId-or$sw.ConversationUrl-cne$expectedConversationUrl){throw "current Control superseded switch=$($sw.Receipt) generation=$($sw.Generation) conversation=$($sw.ConversationId)"};return $sw
           }
 
           function Fail-Presend([string]$gate,[string]$detail=''){
             $safe=($detail-replace'[\r\n]+',' ');if($safe.Length-gt500){$safe=$safe.Substring(0,500)}
             $id=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_DELIVERY_V1','state: BLOCKED_PRESEND',"source_dispatch_card: $cardReceipt","source_transport_authority: $authority","first_failed_gate: $gate","diagnostic: $safe",'physical_prompt_count: 0','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
             throw "BLOCKED_PRESEND receipt=$id"
+          }
+
+          function Read-ExactDoorbellCanary([object]$comment,[string]$sourceTerminal,[string]$sourceCard,[string]$candidateHead){
+            if(-not(Has-Protocol $comment 'CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1')){return $null}
+            $body=[string]$comment.body
+            if($body-notmatch("(?m)^source_terminal_receipt:\s*$([regex]::Escape($sourceTerminal))\s*$")-or$body-notmatch("(?m)^source_card_id:\s*$([regex]::Escape($sourceCard))\s*$")-or$body-notmatch("(?m)^candidate_head:\s*$([regex]::Escape($candidateHead))\s*$")){return $null}
+            $state=[regex]::Match($body,'(?m)^state:\s*(DELIVERED|NO_OP_DUPLICATE|CONTROL_REQUIRED_NO_SEND|UNCERTAIN_SEND_NO_BLIND_RETRY)\s*$')
+            if(-not$state.Success){throw "matching downstream canary state malformed id=$(Get-CommentId $comment)"}
+            foreach($field in @('active_switch_receipt','target_control_generation','target_control_conversation_id','target_control_conversation_url','physical_send_count','second_physical_send','user_relay_count','workflow_run_id')){if($body-notmatch("(?m)^${field}:\s*\S.*$")){throw "matching downstream canary field missing: $field"}}
+            $receipt=[string](Get-CommentId $comment);$readback=Get-Comment $receipt;if([string]$readback.body-cne$body){throw "downstream canary readback mismatch id=$receipt"}
+            return [pscustomobject]@{Receipt=$receipt;State=$state.Groups[1].Value;Body=$body}
+          }
+
+          function Wait-ForDoorbellCanary([string]$since,[string]$sourceTerminal,[string]$sourceCard,[string]$candidateHead){
+            for($i=0;$i-lt60;$i++){
+              $recent=@(Get-Recent88 $since);$found=[System.Collections.Generic.List[object]]::new()
+              foreach($comment in $recent){$record=Read-ExactDoorbellCanary $comment $sourceTerminal $sourceCard $candidateHead;if($null-ne$record){[void]$found.Add($record)}}
+              if($found.Count-gt1){throw 'conflicting downstream canary terminals for one logical return'}
+              if($found.Count-eq1){return $found[0]}
+              Start-Sleep -Seconds 10
+            }
+            throw 'DOWNSTREAM_CANARY_TIMEOUT_AFTER_WORKFLOW_DISPATCH'
+          }
+
+          # Invoke exactly one bounded direct fallback Control doorbell once; never recurse to workflow_dispatch.
+          function Invoke-AuthorizedDirectControlFallback([object]$switch,[string]$sourceTerminal,[string]$sourceCard,[string]$candidateHead,[string]$downstreamReceipt){
+            $fallbackRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-ready-return-worker-guard-v2\fallback';$fallbackKey="$repo|$sourceCard|$sourceTerminal|$candidateHead|direct-fallback";$fallbackHash=([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($fallbackKey)))).ToLowerInvariant();$fallbackStatePath=Join-Path $fallbackRoot "$fallbackHash.json";New-Item -ItemType Directory -Force -Path $fallbackRoot|Out-Null
+            if(Test-Path -LiteralPath $fallbackStatePath){try{$old=Get-Content -LiteralPath $fallbackStatePath -Raw|ConvertFrom-Json}catch{throw 'CONTROL_REQUIRED: corrupt direct fallback state'};if([string]$old.status-in@('PRECHECKING','SENDING','UNCERTAIN')){throw 'CONTROL_REQUIRED: direct fallback already attempted or send boundary uncertain; no blind retry'};if([string]$old.status-eq'SENT'){return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='0';SecondPhysicalSend='false';Reason='direct fallback already sent; publication/reconciliation only'}}}
+            $freshSwitch=Verify-Authority;if($freshSwitch.Receipt-cne$switch.Receipt-or$freshSwitch.Generation-cne$switch.Generation-or$freshSwitch.ConversationId-cne$switch.ConversationId-or$freshSwitch.ConversationUrl-cne$switch.ConversationUrl){throw 'CONTROL_REQUIRED: direct fallback current Control binding changed'};$switch=$freshSwitch
+            $repoRoot='D:\AIWORK\GPT_BROWSER_BRIDGE';$senderRel='src/gpt_send.mjs';$senderPath=Join-Path $repoRoot $senderRel;$expectedSenderBlob='6b7a523f98a9655ba2ca28f42696b80da365c92b';$playwright='C:\Users\Lupun\AppData\Roaming\npm\node_modules\@playwright\cli\node_modules\.bin\playwright.cmd';$senderSession='HERDR-DOORBELL-DB01-G1-20260816';$db01Root='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell';$db01Profile='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell\db01-profile';$runtimeRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-ready-return-doorbell-v2'
+            @{status='PRECHECKING';logical_key=$fallbackKey;source_terminal_receipt=$sourceTerminal;source_card_id=$sourceCard;candidate_head=$candidateHead;active_switch_receipt=$switch.Receipt;target_generation=$switch.Generation;target_conversation_id=$switch.ConversationId;target_conversation_url=$switch.ConversationUrl;downstream_canary_receipt=$downstreamReceipt;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $fallbackStatePath -Encoding utf8
+            if(-not(Test-Path -LiteralPath $senderPath)){return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='0';SecondPhysicalSend='false';Reason='FALLBACK_LOCAL_SENDER_MISSING'}}
+            $actualBlob=(& git -C $repoRoot hash-object -- $senderRel).Trim();if($actualBlob-cne$expectedSenderBlob){return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='0';SecondPhysicalSend='false';Reason="FALLBACK_LOCAL_SENDER_BLOB_MISMATCH_$actualBlob"}}
+            if(-not(Test-Path -LiteralPath $playwright)){return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='0';SecondPhysicalSend='false';Reason='FALLBACK_PLAYWRIGHT_CLI_MISSING'}}
+            if(-not(Test-Path -LiteralPath $db01Root -PathType Container)-or-not(Test-Path -LiteralPath $db01Profile -PathType Container)){return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='0';SecondPhysicalSend='false';Reason='FALLBACK_DB01_RUNTIME_MISSING'}}
+            Push-Location $db01Root
+            try{
+              $sessions=(& $playwright cli list 2>&1|Out-String);if($LASTEXITCODE-ne0){return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='0';SecondPhysicalSend='false';Reason='FALLBACK_DB01_SESSION_LIST_FAILED'}}
+              $tabs=(& $playwright cli "-s=$senderSession" tab-list 2>&1|Out-String)
+              if($LASTEXITCODE-eq1-and$sessions-notmatch[regex]::Escape($senderSession)){$null=& $playwright cli "-s=$senderSession" open --persistent "--profile=$db01Profile" --headed 2>&1;if($LASTEXITCODE-ne0){return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='0';SecondPhysicalSend='false';Reason='FALLBACK_DB01_RESTART_FAILED'}}}elseif($LASTEXITCODE-ne0){return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='0';SecondPhysicalSend='false';Reason='FALLBACK_DB01_SESSION_AMBIGUOUS'}}
+              $tabs=(& $playwright cli "-s=$senderSession" tab-list 2>&1|Out-String);if($LASTEXITCODE-ne0-or$tabs-notmatch[regex]::Escape($switch.ConversationId)){$null=& $playwright cli "-s=$senderSession" goto $switch.ConversationUrl 2>&1;if($LASTEXITCODE-ne0){return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='0';SecondPhysicalSend='false';Reason='FALLBACK_EXACT_CONTROL_NAVIGATION_FAILED'}}}
+              $tabs2=(& $playwright cli "-s=$senderSession" tab-list 2>&1|Out-String);if($LASTEXITCODE-ne0-or$tabs2-notmatch[regex]::Escape($switch.ConversationId)){return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='0';SecondPhysicalSend='false';Reason='FALLBACK_EXACT_CONTROL_TAB_NOT_FOUND'}}
+            }finally{Pop-Location}
+            $prompt="Read GitHub directly. Rehydrate D22977/gpt-browser-bridge #43/#81/#88 and recover the current ACTIVE Control after downstream canary $downstreamReceipt for source terminal $sourceTerminal, card $sourceCard, candidate head $candidateHead. This is one bounded direct fallback Control doorbell only; do not create/send generation011, review, merge, release, or infer a successor. GitHub is durable authority."
+            $promptHash=[Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($prompt))).ToLowerInvariant();@{status='SENDING';logical_key=$fallbackKey;source_terminal_receipt=$sourceTerminal;source_card_id=$sourceCard;candidate_head=$candidateHead;active_switch_receipt=$switch.Receipt;target_generation=$switch.Generation;target_conversation_id=$switch.ConversationId;target_conversation_url=$switch.ConversationUrl;prompt_sha256=$promptHash;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $fallbackStatePath -Encoding utf8
+          $fallbackScript=@'
+          import { pathToFileURL } from 'node:url';
+          const mod = await import(pathToFileURL(process.env.GBB_FALLBACK_SENDER_PATH).href);
+          await mod.readBaseline(process.env.GBB_FALLBACK_TARGET_URL,{session:process.env.GBB_FALLBACK_SESSION,allowBackgroundTab:true});
+          const result=await mod.sendJob({prompt:process.env.GBB_FALLBACK_PROMPT,attempt:1,conversationUrl:process.env.GBB_FALLBACK_TARGET_URL,runtimeRoot:process.env.GBB_FALLBACK_RUNTIME_ROOT,session:process.env.GBB_FALLBACK_SESSION,allowBackgroundTab:true});
+          console.log(JSON.stringify({job_id:result.job.job_id,prompt_hash:result.job.prompt_hash}));
+          '@
+            $fallbackScriptPath=Join-Path $env:RUNNER_TEMP "g10-g11-direct-fallback-$fallbackHash-$env:GITHUB_RUN_ID.mjs";Set-Content -LiteralPath $fallbackScriptPath -Value $fallbackScript -Encoding utf8;$env:GBB_FALLBACK_SENDER_PATH=$senderPath;$env:GBB_FALLBACK_SESSION=$senderSession;$env:GBB_FALLBACK_RUNTIME_ROOT=$runtimeRoot;$env:GBB_FALLBACK_TARGET_URL=$switch.ConversationUrl;$env:GBB_FALLBACK_PROMPT=$prompt
+            try{$out=(& node $fallbackScriptPath 2>&1|Out-String).Trim();if($LASTEXITCODE-ne0){throw $out};$json=($out-split"`n"|Where-Object{$_.Trim().StartsWith('{')}|Select-Object -Last 1);if(-not$json){throw 'fallback sender JSON missing'};$sent=$json|ConvertFrom-Json}catch{$stored=@{status='UNCERTAIN';logical_key=$fallbackKey;workflow_run_id=$env:GITHUB_RUN_ID;reason=$_.Exception.Message};$stored|ConvertTo-Json|Set-Content -LiteralPath $fallbackStatePath -Encoding utf8;Remove-Item -LiteralPath $fallbackScriptPath -Force -ErrorAction SilentlyContinue;return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='UNKNOWN_AFTER_SEND_BOUNDARY';SecondPhysicalSend='false';Reason='FALLBACK_UNCERTAIN_SEND_NO_BLIND_RETRY'}}finally{Remove-Item -LiteralPath $fallbackScriptPath -Force -ErrorAction SilentlyContinue}
+            @{status='SENT';logical_key=$fallbackKey;workflow_run_id=$env:GITHUB_RUN_ID;sender_job_id=[string]$sent.job_id;sender_prompt_hash=[string]$sent.prompt_hash;sent_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $fallbackStatePath -Encoding utf8
+            return [pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='1';SecondPhysicalSend='false';Reason="DIRECT_FALLBACK_DELIVERED sender_job_id=$($sent.job_id)"}
           }
 
           $event=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json;$wake=[string]$event.comment.body
@@ -106,7 +215,7 @@ jobs:
             if([string]$st.status-eq'SENT'){$pane=[string]$st.pane_id;$session=[string]$st.agent_session;$promptHash=[string]$st.prompt_sha256;$deliveryReceipt=[string]$st.delivery_receipt;$alreadySent=$true}
           }
 
-          $recent=@(Get-Recent88 $sw.Since);$existingWorkerTerminal=@($recent|Where-Object{[string]$_.body-match'(?m)^GBB_READY_RETURN_CLOSURE_READY_V1\s*$'-and[string]$_.body-match'(?m)^card_id:\s*GBB-READY-RETURN-CLOSURE-01\s*$'}|Sort-Object{[int64]$_.id})
+          $recent=@(Get-Recent88 $sw.Since);$existingWorkerTerminal=@($recent|Where-Object{(Has-Protocol $_ 'GBB_READY_RETURN_CLOSURE_READY_V1')-and[string]$_.body-match'(?m)^card_id:\s*GBB-READY-RETURN-CLOSURE-01\s*$'}|Sort-Object{Get-CommentId $_})
           if(-not$alreadySent-and$existingWorkerTerminal.Count-eq0){
             if(-not(Test-Path -LiteralPath $herdr)){Fail-Presend 'HERDR_CLI_MISSING' $herdr}
             $raw=& $herdr agent list 2>&1|Out-String;if($LASTEXITCODE-ne0){Fail-Presend 'HERDR_AGENT_LIST_FAILED' $raw};try{$list=$raw|ConvertFrom-Json}catch{Fail-Presend 'HERDR_AGENT_LIST_NOT_JSON' $raw}
@@ -125,10 +234,10 @@ jobs:
 
           $sourceWorkerTerminal='NONE';$normalizedState=$null;$guardEventKey=$null;$reason='';$workerBranch='NONE';$candidateHead='NONE';$idleCount=0
           for($i=0;$i-lt600;$i++){
-            $sw=Get-CurrentSwitch;$recent=@(Get-Recent88 $sw.Since);$matches=@($recent|Where-Object{[string]$_.body-match'(?m)^GBB_READY_RETURN_CLOSURE_READY_V1\s*$'-and[string]$_.body-match'(?m)^card_id:\s*GBB-READY-RETURN-CLOSURE-01\s*$'}|Sort-Object{[int64]$_.id})
+            $sw=Get-CurrentSwitch;$recent=@(Get-Recent88 $sw.Since);$matches=@($recent|Where-Object{(Has-Protocol $_ 'GBB_READY_RETURN_CLOSURE_READY_V1')-and[string]$_.body-match'(?m)^card_id:\s*GBB-READY-RETURN-CLOSURE-01\s*$'}|Sort-Object{Get-CommentId $_})
             if($matches.Count-gt1){$normalizedState='CONTROL_REQUIRED';$reason='MULTIPLE_WORKER_TERMINALS';$guardEventKey='MULTIPLE_WORKER_TERMINALS';break}
             if($matches.Count-eq1){
-              $sourceWorkerTerminal=[string]$matches[0].id;$tb=[string]$matches[0].body;$tm=[regex]::Match($tb,'(?m)^state:\s*(READY_FOR_FRESH_REVIEW|BLOCKED|CONTROL_REQUIRED)\s*$')
+              $sourceWorkerTerminal=[string](Get-CommentId $matches[0]);$tb=[string]$matches[0].body;$tm=[regex]::Match($tb,'(?m)^state:\s*(READY_FOR_FRESH_REVIEW|BLOCKED|CONTROL_REQUIRED)\s*$')
               if(-not$tm.Success){$normalizedState='CONTROL_REQUIRED';$reason='MALFORMED_WORKER_TERMINAL_STATE'}else{$normalizedState=$tm.Groups[1].Value}
               $bm=[regex]::Match($tb,'(?m)^worker_branch:\s*(\S+)\s*$');$hm=[regex]::Match($tb,'(?m)^candidate_head:\s*(\S+)\s*$');if($bm.Success){$workerBranch=$bm.Groups[1].Value};if($hm.Success){$candidateHead=$hm.Groups[1].Value}
               $guardEventKey="WORKER_TERMINAL_$sourceWorkerTerminal";break
@@ -142,18 +251,37 @@ jobs:
           }
           if([string]::IsNullOrWhiteSpace($normalizedState)){$normalizedState='CONTROL_REQUIRED';$reason='GUARD_LIVENESS_BUDGET_EXHAUSTED';$guardEventKey="LIVENESS_$deliveryReceipt"}
 
-          $recent=@(Get-Recent88 $sw.Since);$priorNorm=@($recent|Where-Object{[string]$_.body-match'(?m)^CONTROL_G10_G11_READY_RETURN_GUARD_V2_TERMINAL_V1\s*$'-and[string]$_.body-match("(?m)^guard_event_key:\s*$([regex]::Escape($guardEventKey))\s*$")}|Sort-Object{[int64]$_.id})
+          $recent=@(Get-Recent88 $sw.Since);$priorNorm=@($recent|Where-Object{(Has-Protocol $_ 'CONTROL_G10_G11_READY_RETURN_GUARD_V2_TERMINAL_V1')-and[string]$_.body-match("(?m)^guard_event_key:\s*$([regex]::Escape($guardEventKey))\s*$")}|Sort-Object{Get-CommentId $_})
           if($priorNorm.Count-gt1){throw 'conflicting duplicate normalized terminals'}
-          if($priorNorm.Count-eq1){$normalizedReceipt=[string]$priorNorm[0].id}else{$normalizedReceipt=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_TERMINAL_V1',"state: $normalizedState","card_id: $cardId","source_dispatch_card: $cardReceipt","source_worker_terminal_receipt: $sourceWorkerTerminal","guard_event_key: $guardEventKey","reason: $reason","worker_branch: $workerBranch","candidate_head: $candidateHead","target_pane: $pane","target_agent_session: $session",'user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")}
+          if($priorNorm.Count-eq1){$normalizedReceipt=[string](Get-CommentId $priorNorm[0])}else{$normalizedReceipt=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_TERMINAL_V1',"state: $normalizedState","card_id: $cardId","source_dispatch_card: $cardReceipt","source_worker_terminal_receipt: $sourceWorkerTerminal","guard_event_key: $guardEventKey","reason: $reason","worker_branch: $workerBranch","candidate_head: $candidateHead","target_pane: $pane","target_agent_session: $session",'user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")}
 
           try{$sw2=Verify-Authority}catch{$id=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_RESULT_V1','state: CONTROL_REQUIRED_NO_RETURN_REQUEST',"source_normalized_terminal_receipt: $normalizedReceipt",'reason: CURRENT_SWITCH_PARSE_FAILED','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "Cannot create return request receipt=$id"}
           $recent=@(Get-Recent88 $sw2.Since);$idem="$cardId`:$normalizedReceipt`:$candidateHead"
-          $priorReq=@($recent|Where-Object{[string]$_.body-match'(?m)^CONTROL_READY_RETURN_REQUEST_V2\s*$'-and[string]$_.body-match("(?m)^idempotency_key:\s*$([regex]::Escape($idem))\s*$")});if($priorReq.Count-gt1){throw 'conflicting duplicate return requests'}
-          if($priorReq.Count-eq1){$request=[string]$priorReq[0].id}else{$request=Publish(@('CONTROL_READY_RETURN_REQUEST_V2',"source_transport_authority: $authority","source_card_id: $cardId","source_terminal_receipt: $normalizedReceipt","candidate_head: $candidateHead","target_control_generation: $($sw2.Generation)","target_control_conversation_id: $($sw2.ConversationId)","target_control_conversation_url: $($sw2.ConversationUrl)","idempotency_key: $idem",'user_relay_count: 0','readback_required: true')-join"`n")}
+          $priorReq=@($recent|Where-Object{(Has-Protocol $_ 'CONTROL_READY_RETURN_REQUEST_V2')-and[string]$_.body-match("(?m)^idempotency_key:\s*$([regex]::Escape($idem))\s*$")});if($priorReq.Count-gt1){throw 'conflicting duplicate return requests'}
+          if($priorReq.Count-eq1){$request=[string](Get-CommentId $priorReq[0])}else{$request=Publish(@('CONTROL_READY_RETURN_REQUEST_V2',"source_transport_authority: $authority","source_card_id: $cardId","source_terminal_receipt: $normalizedReceipt","candidate_head: $candidateHead","target_control_generation: $($sw2.Generation)","target_control_conversation_id: $($sw2.ConversationId)","target_control_conversation_url: $($sw2.ConversationUrl)","idempotency_key: $idem",'user_relay_count: 0','readback_required: true')-join"`n")}
 
-          $priorDispatch=@($recent|Where-Object{[string]$_.body-match'(?m)^CONTROL_G10_G11_UNATTENDED_RETURN_WORKFLOW_DISPATCH_V1\s*$'-and[string]$_.body-match("(?m)^idempotency_key:\s*$([regex]::Escape($idem))\s*$")});if($priorDispatch.Count-gt1){throw 'conflicting duplicate workflow dispatch receipts'}
-          if($priorDispatch.Count-eq1){Write-Output "workflow dispatch already recorded request=$request receipt=$($priorDispatch[0].id)";exit 0}
-          $payload=@{ref=$baseBranch;inputs=@{source_terminal_receipt=$normalizedReceipt;source_card_id=$cardId;candidate_head=$candidateHead;idempotency_key=$idem}}|ConvertTo-Json -Depth 5 -Compress
-          Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/actions/workflows/g10-g11-ready-return-control-doorbell-v2.yml/dispatches" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30|Out-Null
-          $dispatch=Publish(@('CONTROL_G10_G11_UNATTENDED_RETURN_WORKFLOW_DISPATCH_V1','state: DISPATCHED',"source_return_request: $request","source_terminal_receipt: $normalizedReceipt","source_card_id: $cardId","candidate_head: $candidateHead","workflow_file: .github/workflows/g10-g11-ready-return-control-doorbell-v2.yml","workflow_ref: $baseBranch","idempotency_key: $idem",'physical_send_count: 0','second_physical_send: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
-          Write-Output "workflow dispatch receipt=$dispatch"
+          $priorDispatch=@($recent|Where-Object{(Has-Protocol $_ 'CONTROL_G10_G11_UNATTENDED_RETURN_WORKFLOW_DISPATCH_V1')-and[string]$_.body-match("(?m)^idempotency_key:\s*$([regex]::Escape($idem))\s*$")});if($priorDispatch.Count-gt1){throw 'conflicting duplicate workflow dispatch receipts'}
+          if($priorDispatch.Count-eq1){$dispatch=[string](Get-CommentId $priorDispatch[0])}else{
+            $payload=@{ref=$baseBranch;inputs=@{source_terminal_receipt=$normalizedReceipt;source_card_id=$cardId;candidate_head=$candidateHead;idempotency_key=$idem}}|ConvertTo-Json -Depth 5 -Compress
+            Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/actions/workflows/g10-g11-ready-return-control-doorbell-v2.yml/dispatches" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30|Out-Null
+            $dispatch=Publish(@('CONTROL_G10_G11_UNATTENDED_RETURN_WORKFLOW_DISPATCH_V1','state: DISPATCHED',"source_return_request: $request","source_terminal_receipt: $normalizedReceipt","source_card_id: $cardId","candidate_head: $candidateHead","workflow_file: .github/workflows/g10-g11-ready-return-control-doorbell-v2.yml","workflow_ref: $baseBranch","idempotency_key: $idem",'physical_send_count: 0','second_physical_send: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
+          }
+
+          # HTTP 204/workflow dispatch acceptance is not terminal success. Keep
+          # WAIT_CHILD_TERMINAL_GUARD ownership until the exact canary is read back.
+          $downstream=$null
+          try{$downstream=Wait-ForDoorbellCanary $sw2.Since $normalizedReceipt $cardId $candidateHead}catch{
+            $safe=($_.Exception.Message-replace'[\r\n]+',' ');if($safe.Length-gt500){$safe=$safe.Substring(0,500)}
+            $timeoutReceipt=Publish(@('CONTROL_G10_G11_UNATTENDED_RETURN_WORKFLOW_RESULT_V1','state: CONTROL_REQUIRED',"source_workflow_dispatch_receipt: $dispatch","source_terminal_receipt: $normalizedReceipt","source_card_id: $cardId","candidate_head: $candidateHead","guard_phase: WAIT_CHILD_TERMINAL_GUARD","reason: $safe",'fallback_invoked: false','physical_send_count: UNKNOWN','second_physical_send: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
+            throw "DOWNSTREAM_CANARY_NOT_TERMINAL receipt=$timeoutReceipt"
+          }
+          if($downstream.State-eq'CONTROL_REQUIRED_NO_SEND'){
+            $normalizedControl=Publish(@('CONTROL_G10_G11_UNATTENDED_RETURN_WORKFLOW_RESULT_V1','state: CONTROL_REQUIRED',"source_workflow_dispatch_receipt: $dispatch","source_downstream_canary_receipt: $($downstream.Receipt)","source_terminal_receipt: $normalizedReceipt","source_card_id: $cardId","candidate_head: $candidateHead","guard_phase: WAIT_CHILD_TERMINAL_GUARD","reason: DOWNSTREAM_CONTROL_REQUIRED_NO_SEND_BEFORE_PHYSICAL_SEND",'fallback_authorized: true','candidate_pass: false','physical_send_count: 0','second_physical_send: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
+            try{$fallback=Invoke-AuthorizedDirectControlFallback $sw2 $normalizedReceipt $cardId $candidateHead $downstream.Receipt}catch{$detail=($_.Exception.Message-replace'[\r\n]+',' ');if($detail.Length-gt500){$detail=$detail.Substring(0,500)};$fallback=[pscustomobject]@{State='CONTROL_REQUIRED';PhysicalSendCount='UNKNOWN_AFTER_SEND_BOUNDARY';SecondPhysicalSend='false';Reason="FALLBACK_NOT_RETRIED: $detail"}}
+            if([string]$fallback.PhysicalSendCount-eq'1'){$fallbackCountLine='fallback_physical_send_count: 1'}else{$fallbackCountLine="fallback_physical_send_count: $($fallback.PhysicalSendCount)"}
+            $fallbackReceipt=Publish(@('CONTROL_G10_G11_UNATTENDED_RETURN_FALLBACK_V1','state: CONTROL_REQUIRED','decision: RECOVERY_ONLY_NOT_CANDIDATE_PASS',"source_normalized_control_required_receipt: $normalizedControl","source_downstream_canary_receipt: $($downstream.Receipt)","source_terminal_receipt: $normalizedReceipt","source_card_id: $cardId","candidate_head: $candidateHead",'direct fallback Control doorbell: bounded and single-attempt',"fallback_result: $($fallback.Reason)",$fallbackCountLine,'second_physical_send: false','candidate_pass: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
+            Write-Output "CONTROL_REQUIRED fallback_receipt=$fallbackReceipt";exit 0
+          }
+          $terminalDecision=if($downstream.State-eq'DELIVERED'){'DOWNSTREAM_DELIVERED_NOT_ACCEPTED_BY_WORKER'}else{'DOWNSTREAM_NO_OP_DUPLICATE_NOT_ACCEPTED_BY_WORKER'}
+          $terminalReceipt=Publish(@('CONTROL_G10_G11_UNATTENDED_RETURN_WORKFLOW_RESULT_V1','state: DOWNSTREAM_CANARY_TERMINAL',"decision: $terminalDecision","source_workflow_dispatch_receipt: $dispatch","source_downstream_canary_receipt: $($downstream.Receipt)","source_terminal_receipt: $normalizedReceipt","source_card_id: $cardId","candidate_head: $candidateHead",'guard_phase: WAIT_CHILD_TERMINAL_GUARD','fallback_invoked: false','candidate_pass: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
+          Write-Output "DOWNSTREAM_CANARY_TERMINAL receipt=$terminalReceipt"

@@ -898,3 +898,74 @@ test("doorbell schema exposes every required durable canary field and never perm
   assert.match(doorbell, /Publish-Canary 'CONTROL_REQUIRED_NO_SEND' '0' 'false'/);
   assert.match(doorbell, /Publish-Canary 'NO_OP_DUPLICATE' '0' 'false'/);
 });
+
+// ---------------------------------------------------------------------------
+// GBB-UNATTENDED-RETURN-E2E-REPAIR-02: harden the switch selector and keep
+// the deterministic guard alive across the workflow_dispatch boundary.
+// ---------------------------------------------------------------------------
+
+test("switch selection uses explicit scalar comment ids and recognizes the protocol on the first line", async () => {
+  const { doorbell, guard } = await readTransportWorkflows();
+  for (const workflow of [doorbell, guard]) {
+    assert.match(workflow, /function Get-CommentId\s*\(/);
+    assert.match(workflow, /function Get-ProtocolFirstLine\s*\(/);
+    assert.match(workflow, /Get-ProtocolFirstLine\s+\$comment/);
+    assert.doesNotMatch(workflow, /Sort-Object\{\[int64\]\$?\.?_?\.id\}/);
+    assert.doesNotMatch(workflow, /\[int64\]\$candidate\.id-gt\[int64\]\$latest\.id/);
+    assert.match(workflow, /Get-CommentId\s+\$candidate/);
+    assert.match(workflow, /5555495204/);
+    assert.match(workflow, /6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562/);
+    assert.match(workflow, /JSON\.parse/);
+    assert.match(workflow, /Invoke-NodeCommentScan/);
+    assert.doesNotMatch(workflow, /Invoke-RestMethod[^\n]*issues\/88\/comments/);
+  }
+});
+
+test("guard waits for the exact downstream canary after dispatch and classifies its terminal", async () => {
+  const { guard } = await readTransportWorkflows();
+  assert.match(guard, /function Wait-ForDoorbellCanary\s*\(/);
+  assert.match(guard, /CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1/);
+  assert.match(guard, /WAIT_CHILD_TERMINAL_GUARD/);
+  const dispatch = guard.indexOf("/actions/workflows/g10-g11-ready-return-control-doorbell-v2.yml/dispatches");
+  const dispatchReceipt = guard.lastIndexOf("CONTROL_G10_G11_UNATTENDED_RETURN_WORKFLOW_DISPATCH_V1");
+  const wait = guard.lastIndexOf("Wait-ForDoorbellCanary");
+  assert.ok(dispatch >= 0 && dispatchReceipt > dispatch, "dispatch must have a durable receipt");
+  assert.ok(wait > dispatchReceipt, "guard must wait after dispatch/read-back");
+  assert.match(guard, /DELIVERED|NO_OP_DUPLICATE/);
+  assert.match(guard, /CONTROL_REQUIRED_NO_SEND/);
+  assert.match(guard, /UNCERTAIN_SEND_NO_BLIND_RETRY/);
+  assert.match(guard, /HTTP 204|dispatch acceptance|dispatch.*terminal/i);
+});
+
+test("pre-send CONTROL_REQUIRED_NO_SEND normalizes to CONTROL_REQUIRED and uses one bounded direct fallback", async () => {
+  const { guard } = await readTransportWorkflows();
+  assert.match(guard, /function Invoke-AuthorizedDirectControlFallback\s*\(/);
+  assert.match(guard, /CONTROL_REQUIRED_NO_SEND/);
+  assert.match(guard, /state: CONTROL_REQUIRED/);
+  assert.match(guard, /direct fallback Control doorbell/);
+  assert.match(guard, /fallback_physical_send_count: 1/);
+  assert.match(guard, /fallback.*once|once.*fallback/i);
+  assert.doesNotMatch(guard, /g10-g11-ready-return-worker-guard-v2\.yml\/dispatches/);
+});
+
+test("logical terminal reconciliation distinguishes duplicate, publication-only, and uncertain send states", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  assert.match(doorbell, /logicalKey/);
+  assert.match(doorbell, /repository.*source.*terminal.*candidate|\$repo\|\$sourceCard\|\$terminal\|\$candidateHead/si);
+  assert.match(doorbell, /NO_OP_DUPLICATE/);
+  assert.match(doorbell, /publication_only_recovery/);
+  assert.match(doorbell, /SENDING/);
+  assert.match(doorbell, /UNCERTAIN/);
+  assert.match(doorbell, /NO_BLIND_RETRY/);
+  assert.match(doorbell, /Publish-Canary 'UNCERTAIN_SEND_NO_BLIND_RETRY' 'UNKNOWN_AFTER_SEND_BOUNDARY'/);
+});
+
+test("the downstream canary matcher binds source terminal, card, and candidate head", async () => {
+  const { guard } = await readTransportWorkflows();
+  assert.match(guard, /source_terminal_receipt/);
+  assert.match(guard, /source_card_id/);
+  assert.match(guard, /candidate_head/);
+  assert.match(guard, /Wait-ForDoorbellCanary[\s\S]*source_terminal_receipt/);
+  assert.match(guard, /Wait-ForDoorbellCanary[\s\S]*source_card_id/);
+  assert.match(guard, /Wait-ForDoorbellCanary[\s\S]*candidate_head/);
+});
