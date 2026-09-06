@@ -1,0 +1,98 @@
+name: G10 G11 Herdr Target Inventory Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g10-g11-herdr-target-inventory-20260906-01
+  cancel-in-progress: false
+
+jobs:
+  inventory:
+    if: >-
+      github.event.issue.number == 88 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'CONTROL_G10_G11_HERDR_TARGET_INVENTORY_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Publish fresh mechanical Herdr inventory only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D22977/gpt-browser-bridge'
+          $issue = 88
+          $authority = '5555832594'
+          $blocker = '5555824057'
+          $switch = '5555495204'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent'='g10-g11-herdr-target-inventory'; Accept='application/vnd.github+json' }
+          function Publish([string]$text) {
+            $payload = @{ body=$text } | ConvertTo-Json -Compress
+            $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$rb.body -cne $text) { throw 'readback mismatch' }
+            return [string]$r.id
+          }
+          function Safe([object]$v) {
+            $s = [string]$v
+            $s = $s -replace '[\r\n]+',' ' -replace '[\x00-\x1f]',' '
+            if ($s.Length -gt 240) { $s = $s.Substring(0,240) }
+            return $s
+          }
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $body = [string]$event.comment.body
+          if ($body -notmatch '(?m)^CONTROL_G10_G11_HERDR_TARGET_INVENTORY_V1\s*$') { throw 'bad protocol' }
+          if ($body -notmatch '(?m)^source_authority:\s*5555832594\s*$') { throw 'bad authority' }
+          if ($body -notmatch '(?m)^source_blocker:\s*5555824057\s*$') { throw 'bad blocker' }
+          if ($body -notmatch '(?m)^source_current_switch:\s*5555495204\s*$') { throw 'bad switch' }
+          foreach ($cid in @($authority,$blocker,$switch)) {
+            $c = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$cid" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$c.issue_url -notmatch '/issues/88$') { throw "authority mismatch $cid" }
+          }
+          $all = [System.Collections.Generic.List[object]]::new()
+          function AddFlat([object]$v) { if ($null -eq $v) { return }; if ($v -is [System.Array]) { foreach ($x in $v) { AddFlat $x }; return }; [void]$all.Add($v) }
+          for ($p=1; $p -le 40; $p++) { $before=$all.Count; AddFlat (Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30); if (($all.Count-$before) -lt 100) { break } }
+          $newer = @($all | Where-Object { $_.PSObject.Properties.Name -contains 'id' -and [int64]$_.id -gt [int64]$switch -and [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' })
+          if ($newer.Count -gt 0) { throw 'stale newer switch' }
+          if (-not (Test-Path -LiteralPath $herdr)) { throw 'Herdr CLI missing' }
+          $raw = (& $herdr agent list 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw 'herdr agent list failed' }
+          $list = $raw | ConvertFrom-Json
+          $targets = @($list.result.agents | Where-Object { [string]$_.agent -eq 'codex' -and $_.pane_id -and $_.agent_session.value })
+          $lines = [System.Collections.Generic.List[string]]::new()
+          [void]$lines.Add('CONTROL_G10_G11_HERDR_TARGET_INVENTORY_RESULT_V1')
+          [void]$lines.Add('state: PASS_READ_ONLY')
+          [void]$lines.Add("source_authority: $authority")
+          [void]$lines.Add("source_blocker: $blocker")
+          [void]$lines.Add("source_current_switch: $switch")
+          [void]$lines.Add("codex_target_count: $($targets.Count)")
+          for ($i=0; $i -lt $targets.Count; $i++) {
+            $n=$i+1; $t=$targets[$i]
+            [void]$lines.Add("target_${n}_pane_id: $(Safe $t.pane_id)")
+            [void]$lines.Add("target_${n}_agent_session: $(Safe $t.agent_session.value)")
+            [void]$lines.Add("target_${n}_agent_status: $(Safe $t.agent_status)")
+            [void]$lines.Add("target_${n}_name: $(Safe $t.name)")
+            [void]$lines.Add("target_${n}_cwd: $(Safe $t.cwd)")
+            [void]$lines.Add("target_${n}_focused: $(Safe $t.focused)")
+            [void]$lines.Add("target_${n}_terminal_id: $(Safe $t.terminal_id)")
+          }
+          [void]$lines.Add('agent_prompt_performed: false')
+          [void]$lines.Add('agent_read_performed: false')
+          [void]$lines.Add('browser_action_performed: false')
+          [void]$lines.Add('raw_terminal_output_published: false')
+          [void]$lines.Add('user_relay_count: 0')
+          [void]$lines.Add("workflow_run_id: $env:GITHUB_RUN_ID")
+          [void]$lines.Add('readback_required: true')
+          $rid=Publish ($lines -join "`n")
+          Write-Output "inventory receipt=$rid count=$($targets.Count)"
