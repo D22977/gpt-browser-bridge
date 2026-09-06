@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   issues: write
+  actions: write
 
 concurrency:
   group: g10-g11-ready-return-worker-guard-v2
@@ -25,66 +26,134 @@ jobs:
       run:
         shell: pwsh -NoProfile -File {0}
     steps:
-      - name: Deliver Worker exactly once and retain terminal guard
+      - name: Deliver Worker exactly once and return through workflow_dispatch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference='Stop'
           $repo='D22977/gpt-browser-bridge';$issue=88
-          $authority='5556178977';$cardReceipt='5556156612';$cardId='GBB-READY-RETURN-CLOSURE-01';$expectedSwitch='5555495204';$workerBase='0be95a2e58b150df043a0e4eb07765475d284834';$baseBranch='review-base/gbb-gh-01'
-          $tempPaths=@('.github/workflows/g10-g11-ready-return-worker-guard-v2.yml','.github/workflows/g10-g11-ready-return-control-doorbell-v2.yml')
+          $authority='5556464256';$cardReceipt='5556156612';$cardId='GBB-READY-RETURN-CLOSURE-01';$amend='5556459675';$schema='5556468052';$presendFix='5556492820';$expectedSwitch='5555495204';$baseBranch='review-base/gbb-gh-01'
           $herdr='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
           $stateRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-ready-return-worker-guard-v2\state';$statePath=Join-Path $stateRoot 'GBB-READY-RETURN-CLOSURE-01-20260906.json';New-Item -ItemType Directory -Force -Path $stateRoot|Out-Null
           $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g10-g11-ready-return-worker-guard-v2';Accept='application/vnd.github+json'}
 
-          function Publish([string]$text){$payload=@{body=$text}|ConvertTo-Json -Compress;$r=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30;$rb=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30;if([string]$rb.body-cne$text){throw 'readback mismatch'};return [string]$r.id}
-          function Get-All88{$all=[System.Collections.Generic.List[object]]::new();function Add-Flat([object]$v){if($null-eq$v){return};if($v-is[System.Array]){foreach($x in $v){Add-Flat $x};return};[void]$all.Add($v)};for($p=1;$p-le40;$p++){$before=$all.Count;Add-Flat(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30);if(($all.Count-$before)-lt100){break}};return $all.ToArray()}
-          function Get-CurrentSwitch{$all=@(Get-All88);$switches=@($all|Where-Object{[string]$_.body-match'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$'-and[string]$_.body-match'(?m)^state:\s*SWITCH_COMMITTED\s*$'}|Sort-Object{[int64]$_.id});if($switches.Count-eq0){throw 'No committed switch'};$latest=$switches[-1];$b=[string]$latest.body;$g=[regex]::Match($b,'(?m)^new_generation:\s*(\d{3})\s*$');$id=[regex]::Match($b,'(?m)^new_conversation_id:\s*([0-9a-f-]+)\s*$');$url=[regex]::Match($b,'(?m)^new_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$');$s1=[regex]::Match($b,'(?m)^new_status:\s*([A-Z_]+)\s*$');$s2=[regex]::Match($b,'(?m)^new_generation_status:\s*([A-Z_]+)\s*$');if(-not($g.Success-and$id.Success-and$url.Success)){throw "Latest switch malformed id=$($latest.id)"};if(-not$s1.Success-and-not$s2.Success){throw "Latest switch missing status id=$($latest.id)"};if($s1.Success-and$s2.Success-and$s1.Groups[1].Value-cne$s2.Groups[1].Value){throw "Latest switch conflict id=$($latest.id)"};$status=if($s1.Success){$s1.Groups[1].Value}else{$s2.Groups[1].Value};if($status-cne'ACTIVE'){throw "Latest switch not ACTIVE id=$($latest.id)"};return [pscustomobject]@{Receipt=[string]$latest.id;Generation=$g.Groups[1].Value;ConversationId=$id.Groups[1].Value;ConversationUrl=$url.Groups[1].Value}}
-          function Verify-Transport-And-Authority{
-            foreach($cid in @($authority,$cardReceipt,$expectedSwitch)){$c=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$cid" -Headers $headers -Method Get -TimeoutSec 30;if([string]$c.issue_url-notmatch'/issues/88$'){throw "authority issue mismatch $cid"}}
-            $base=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/commits/$workerBase" -Headers $headers -Method Get -TimeoutSec 30;if([string]$base.sha-cne$workerBase){throw 'worker base unavailable'}
-            $encoded=[uri]::EscapeDataString($baseBranch);$branch=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/branches/$encoded" -Headers $headers -Method Get -TimeoutSec 30;$head=[string]$branch.commit.sha
-            $cmp=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/compare/$workerBase...$head" -Headers $headers -Method Get -TimeoutSec 30
-            $bad=@($cmp.files|Where-Object{[string]$_.filename-notin$tempPaths});if($bad.Count-gt0){throw "non-transport default diff: $((@($bad|ForEach-Object{$_.filename})-join','))"}
-            $sw=Get-CurrentSwitch;if($sw.Receipt-cne$expectedSwitch-or$sw.Generation-cne'010'){throw "current Control superseded switch=$($sw.Receipt) gen=$($sw.Generation)"};return $sw
+          function Publish([string]$text){
+            $payload=@{body=$text}|ConvertTo-Json -Compress
+            $r=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $rb=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if([string]$rb.body-cne$text){throw 'readback mismatch'}
+            return [string]$r.id
           }
-          function Fail-Presend([string]$gate,[string]$detail=''){$safe=($detail-replace'[\r\n]+',' ');if($safe.Length-gt500){$safe=$safe.Substring(0,500)};$id=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_DELIVERY_V1','state: BLOCKED_PRESEND',"source_dispatch_card: $cardReceipt","source_transport_authority: $authority","first_failed_gate: $gate","diagnostic: $safe",'physical_prompt_count: 0','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "BLOCKED_PRESEND receipt=$id"}
 
-          $event=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json;$body=[string]$event.comment.body
-          if($body-notmatch'(?m)^CONTROL_G10_G11_READY_RETURN_GUARD_WAKE_V2\s*$'){throw 'bad wake protocol'}
-          if($body-notmatch'(?m)^source_dispatch_card:\s*5556156612\s*$'-or$body-notmatch'(?m)^source_transport_authority:\s*5556178977\s*$'-or$body-notmatch'(?m)^source_current_switch:\s*5555495204\s*$'){throw 'wake binding mismatch'}
-          try{$sw=Verify-Transport-And-Authority}catch{Fail-Presend 'AUTHORITY_OR_TRANSPORT_DIFF_PRECHECK' $_.Exception.Message}
+          function Get-Comment([string]$id){
+            $c=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$id" -Headers $headers -Method Get -TimeoutSec 30
+            if([string]$c.issue_url-notmatch'/issues/88$'){throw "comment $id is not on Issue #88"}
+            return $c
+          }
+
+          function Get-Recent88([string]$since){
+            $all=[System.Collections.Generic.List[object]]::new();$page=1
+            while($true){
+              $encoded=[uri]::EscapeDataString($since)
+              $batch=@(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=$encoded&per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+              foreach($comment in $batch){[void]$all.Add($comment)}
+              if($batch.Count-lt100){break}
+              $page++
+            }
+            return $all.ToArray()
+          }
+
+          function Parse-Switch([object]$comment){
+            $body=[string]$comment.body
+            if($body-notmatch'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$'-or$body-notmatch'(?m)^state:\s*SWITCH_COMMITTED\s*$'){throw "committed switch malformed id=$($comment.id)"}
+            $generation=[regex]::Match($body,'(?m)^new_generation:\s*(\d{3})\s*$');$conversationId=[regex]::Match($body,'(?m)^new_conversation_id:\s*([0-9a-f-]+)\s*$');$conversationUrl=[regex]::Match($body,'(?m)^new_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
+            $statusA=[regex]::Match($body,'(?m)^new_status:\s*([A-Z_]+)\s*$');$statusB=[regex]::Match($body,'(?m)^new_generation_status:\s*([A-Z_]+)\s*$')
+            if(-not($generation.Success-and$conversationId.Success-and$conversationUrl.Success)){throw "committed switch fields malformed id=$($comment.id)"}
+            if(-not$statusA.Success-and-not$statusB.Success){throw "committed switch status missing id=$($comment.id)"}
+            if($statusA.Success-and$statusB.Success-and$statusA.Groups[1].Value-cne$statusB.Groups[1].Value){throw "committed switch status conflict id=$($comment.id)"}
+            $status=if($statusA.Success){$statusA.Groups[1].Value}else{$statusB.Groups[1].Value};if($status-cne'ACTIVE'){throw "committed switch is not ACTIVE id=$($comment.id)"}
+            if($null-eq$comment.created_at){throw "committed switch created_at missing id=$($comment.id)"}
+            return [pscustomobject]@{Receipt=[string]$comment.id;Generation=$generation.Groups[1].Value;ConversationId=$conversationId.Groups[1].Value;ConversationUrl=$conversationUrl.Groups[1].Value;Since=([DateTimeOffset]$comment.created_at).ToString('o')}
+          }
+
+          function Get-CurrentSwitch{
+            $anchor=Get-Comment $expectedSwitch;$anchorSwitch=Parse-Switch $anchor;$recent=@(Get-Recent88 $anchorSwitch.Since)
+            $committed=@($recent|Where-Object{[string]$_.body-match'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$'-and[string]$_.body-match'(?m)^state:\s*SWITCH_COMMITTED\s*$'}|Sort-Object{[int64]$_.id})
+            $latest=$anchor;foreach($candidate in $committed){if([int64]$candidate.id-gt[int64]$latest.id){$latest=$candidate}}
+            return Parse-Switch $latest
+          }
+
+          function Verify-Authority{
+            foreach($cid in @($authority,$cardReceipt,$amend,$schema,$presendFix,$expectedSwitch)){$null=Get-Comment $cid}
+            $sw=Get-CurrentSwitch;if($sw.Receipt-cne$expectedSwitch-or$sw.Generation-cne'010'){throw "current Control superseded switch=$($sw.Receipt) generation=$($sw.Generation)"};return $sw
+          }
+
+          function Fail-Presend([string]$gate,[string]$detail=''){
+            $safe=($detail-replace'[\r\n]+',' ');if($safe.Length-gt500){$safe=$safe.Substring(0,500)}
+            $id=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_DELIVERY_V1','state: BLOCKED_PRESEND',"source_dispatch_card: $cardReceipt","source_transport_authority: $authority","first_failed_gate: $gate","diagnostic: $safe",'physical_prompt_count: 0','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
+            throw "BLOCKED_PRESEND receipt=$id"
+          }
+
+          $event=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json;$wake=[string]$event.comment.body
+          if($wake-notmatch'(?m)^CONTROL_G10_G11_READY_RETURN_GUARD_WAKE_V2\s*$'){throw 'bad wake protocol'}
+          if($wake-notmatch'(?m)^source_dispatch_card:\s*5556156612\s*$'-or$wake-notmatch'(?m)^source_transport_authority:\s*5556178977\s*$'-or$wake-notmatch'(?m)^source_current_switch:\s*5555495204\s*$'){throw 'wake binding mismatch'}
+          try{$sw=Verify-Authority}catch{Fail-Presend 'AUTHORITY_OR_CURRENT_SWITCH_PRECHECK' $_.Exception.Message}
 
           $pane=$null;$session=$null;$promptHash=$null;$deliveryReceipt=$null;$alreadySent=$false
-          if(Test-Path -LiteralPath $statePath){$st=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json;if([string]$st.status-eq'SENDING'){$id=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_DELIVERY_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_dispatch_card: $cardReceipt",'physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN existing SENDING receipt=$id"};if([string]$st.status-eq'SENT'){$pane=[string]$st.pane_id;$session=[string]$st.agent_session;$promptHash=[string]$st.prompt_sha256;$deliveryReceipt=[string]$st.delivery_receipt;$alreadySent=$true}}
+          if(Test-Path -LiteralPath $statePath){
+            try{$st=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json}catch{Fail-Presend 'CORRUPT_LOCAL_WORKER_STATE'}
+            if([string]$st.status-eq'SENDING'){throw 'UNCERTAIN_SEND_NO_BLIND_RETRY: worker prompt boundary already crossed'}
+            if([string]$st.status-eq'SENT'){$pane=[string]$st.pane_id;$session=[string]$st.agent_session;$promptHash=[string]$st.prompt_sha256;$deliveryReceipt=[string]$st.delivery_receipt;$alreadySent=$true}
+          }
 
-          $all=@(Get-All88);$existingWorkerTerminal=@($all|Where-Object{[string]$_.body-match'(?m)^GBB_READY_RETURN_CLOSURE_READY_V1\s*$'-and[string]$_.body-match'(?m)^card_id:\s*GBB-READY-RETURN-CLOSURE-01\s*$'}|Sort-Object{[int64]$_.id})
+          $recent=@(Get-Recent88 $sw.Since);$existingWorkerTerminal=@($recent|Where-Object{[string]$_.body-match'(?m)^GBB_READY_RETURN_CLOSURE_READY_V1\s*$'-and[string]$_.body-match'(?m)^card_id:\s*GBB-READY-RETURN-CLOSURE-01\s*$'}|Sort-Object{[int64]$_.id})
           if(-not$alreadySent-and$existingWorkerTerminal.Count-eq0){
-            if(-not(Test-Path -LiteralPath $herdr)){Fail-Presend 'HERDR_CLI_MISSING' $herdr};$raw=& $herdr agent list 2>&1|Out-String;if($LASTEXITCODE-ne0){Fail-Presend 'HERDR_AGENT_LIST_FAILED' $raw};try{$list=$raw|ConvertFrom-Json}catch{Fail-Presend 'HERDR_AGENT_LIST_NOT_JSON' $raw}
+            if(-not(Test-Path -LiteralPath $herdr)){Fail-Presend 'HERDR_CLI_MISSING' $herdr}
+            $raw=& $herdr agent list 2>&1|Out-String;if($LASTEXITCODE-ne0){Fail-Presend 'HERDR_AGENT_LIST_FAILED' $raw};try{$list=$raw|ConvertFrom-Json}catch{Fail-Presend 'HERDR_AGENT_LIST_NOT_JSON' $raw}
             $eligible=@($list.result.agents|Where-Object{[string]$_.agent-eq'codex'-and[string]$_.agent_status-in@('idle','done')-and[string]::IsNullOrWhiteSpace([string]$_.name)-and[string]$_.cwd-ceq'C:\WINDOWS\system32'})
-            if($eligible.Count-ne1){Fail-Presend 'GENERIC_WORKER_COUNT_NOT_ONE' "eligible_count=$($eligible.Count)"};$pane=[string]$eligible[0].pane_id;$session=[string]$eligible[0].agent_session.value;if([string]::IsNullOrWhiteSpace($pane)-or[string]::IsNullOrWhiteSpace($session)){Fail-Presend 'GENERIC_WORKER_BINDING_MISSING' ''}
-            try{$null=Verify-Transport-And-Authority}catch{Fail-Presend 'FINAL_PRESEND_AUTHORITY_OR_TRANSPORT_DIFF' $_.Exception.Message}
-            $prompt='Read GitHub directly. Execute only D22977/gpt-browser-bridge Issue #88 dispatch receipt 5556156612 / card GBB-READY-RETURN-CLOSURE-01 as WORKER. GitHub is durable authority. Perform only the bounded allowed-path repair and remote publication/read-back required by the card. Do not create/send generation011, do not act as Reviewer or Control, and stop after publishing/read-back GBB_READY_RETURN_CLOSURE_READY_V1.';$promptHash=[Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($prompt))).ToLowerInvariant();@{status='SENDING';pane_id=$pane;agent_session=$session;prompt_sha256=$promptHash;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
-            $out=& $herdr agent prompt $pane $prompt 2>&1|Out-String;if($LASTEXITCODE-ne0){$id=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_DELIVERY_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_dispatch_card: $cardReceipt","target_pane: $pane","target_agent_session: $session","prompt_sha256: $promptHash",'physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN receipt=$id"};try{$r=$out|ConvertFrom-Json}catch{$id=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_DELIVERY_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_dispatch_card: $cardReceipt",'first_failed_gate: POST_PROMPT_RESPONSE_NOT_JSON','physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN receipt=$id"};if([string]$r.result.type-ne'agent_prompted'-or[string]$r.result.agent.pane_id-cne$pane-or[string]$r.result.agent.agent_session.value-cne$session){$id=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_DELIVERY_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_dispatch_card: $cardReceipt",'first_failed_gate: POST_PROMPT_BINDING_MISMATCH','physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN receipt=$id"}
-            $deliveryReceipt=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_DELIVERY_V1','state: DELIVERED','decision: PASS_TRANSPORT_ONLY',"source_dispatch_card: $cardReceipt","source_transport_authority: $authority","source_current_switch: $expectedSwitch","target_pane: $pane","target_agent_session: $session","prompt_sha256: $promptHash",'physical_prompt_count: 1','second_physical_prompt: false','post_dispatch_terminal_guard: ACTIVE','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");@{status='SENT';pane_id=$pane;agent_session=$session;prompt_sha256=$promptHash;delivery_receipt=$deliveryReceipt;workflow_run_id=$env:GITHUB_RUN_ID;sent_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8;Write-Output "DELIVERED receipt=$deliveryReceipt; WAIT_CHILD_TERMINAL_GUARD active"
-          }elseif($alreadySent){Write-Output "Reattached guard to SENT Worker pane=$pane session=$session"}else{Write-Output 'Existing Worker terminal found; no Worker prompt.'}
+            if($eligible.Count-ne1){Fail-Presend 'GENERIC_WORKER_COUNT_NOT_ONE' "eligible_count=$($eligible.Count)"}
+            $pane=[string]$eligible[0].pane_id;$session=[string]$eligible[0].agent_session.value;if([string]::IsNullOrWhiteSpace($pane)-or[string]::IsNullOrWhiteSpace($session)){Fail-Presend 'GENERIC_WORKER_BINDING_MISSING'}
+            try{$null=Verify-Authority}catch{Fail-Presend 'FINAL_PRESEND_AUTHORITY_OR_CURRENT_SWITCH' $_.Exception.Message}
+            $prompt='Read GitHub directly. Execute only D22977/gpt-browser-bridge Issue #88 dispatch receipt 5556156612 / card GBB-READY-RETURN-CLOSURE-01 as WORKER. GitHub is durable authority. Perform only the bounded allowed-path repair and remote publication/read-back required by the card. Do not create/send generation011, do not act as Reviewer or Control, and stop after publishing/read-back GBB_READY_RETURN_CLOSURE_READY_V1.'
+            $promptHash=[Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($prompt))).ToLowerInvariant();@{status='SENDING';pane_id=$pane;agent_session=$session;prompt_sha256=$promptHash;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+            $out=& $herdr agent prompt $pane $prompt 2>&1|Out-String;if($LASTEXITCODE-ne0){throw 'UNCERTAIN_SEND_NO_BLIND_RETRY: prompt command crossed send boundary'}
+            try{$r=$out|ConvertFrom-Json}catch{throw 'UNCERTAIN_SEND_NO_BLIND_RETRY: prompt response not JSON'}
+            if([string]$r.result.type-ne'agent_prompted'-or[string]$r.result.agent.pane_id-cne$pane-or[string]$r.result.agent.agent_session.value-cne$session){throw 'UNCERTAIN_SEND_NO_BLIND_RETRY: prompt binding mismatch'}
+            $deliveryReceipt=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_DELIVERY_V1','state: DELIVERED','decision: PASS_TRANSPORT_ONLY',"source_dispatch_card: $cardReceipt","source_transport_authority: $authority","source_current_switch: $expectedSwitch","target_pane: $pane","target_agent_session: $session","prompt_sha256: $promptHash",'physical_prompt_count: 1','second_physical_prompt: false','post_dispatch_terminal_guard: ACTIVE','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
+            @{status='SENT';pane_id=$pane;agent_session=$session;prompt_sha256=$promptHash;delivery_receipt=$deliveryReceipt;workflow_run_id=$env:GITHUB_RUN_ID;sent_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+          }
 
-          $sourceWorkerTerminal='NONE';$normalizedState=$null;$guardEventKey=$null;$reason='';$idleCount=0
+          $sourceWorkerTerminal='NONE';$normalizedState=$null;$guardEventKey=$null;$reason='';$workerBranch='NONE';$candidateHead='NONE';$idleCount=0
           for($i=0;$i-lt600;$i++){
-            $all=@(Get-All88);$matches=@($all|Where-Object{[string]$_.body-match'(?m)^GBB_READY_RETURN_CLOSURE_READY_V1\s*$'-and[string]$_.body-match'(?m)^card_id:\s*GBB-READY-RETURN-CLOSURE-01\s*$'}|Sort-Object{[int64]$_.id})
+            $sw=Get-CurrentSwitch;$recent=@(Get-Recent88 $sw.Since);$matches=@($recent|Where-Object{[string]$_.body-match'(?m)^GBB_READY_RETURN_CLOSURE_READY_V1\s*$'-and[string]$_.body-match'(?m)^card_id:\s*GBB-READY-RETURN-CLOSURE-01\s*$'}|Sort-Object{[int64]$_.id})
             if($matches.Count-gt1){$normalizedState='CONTROL_REQUIRED';$reason='MULTIPLE_WORKER_TERMINALS';$guardEventKey='MULTIPLE_WORKER_TERMINALS';break}
-            if($matches.Count-eq1){$sourceWorkerTerminal=[string]$matches[0].id;$m=[regex]::Match([string]$matches[0].body,'(?m)^state:\s*(READY_FOR_FRESH_REVIEW|BLOCKED|CONTROL_REQUIRED)\s*$');if(-not$m.Success){$normalizedState='CONTROL_REQUIRED';$reason='MALFORMED_WORKER_TERMINAL_STATE';$guardEventKey="WORKER_TERMINAL_$sourceWorkerTerminal"}else{$normalizedState=$m.Groups[1].Value;$guardEventKey="WORKER_TERMINAL_$sourceWorkerTerminal"};break}
-            if(-not[string]::IsNullOrWhiteSpace($pane)-and-not[string]::IsNullOrWhiteSpace($session)){$raw2=& $herdr agent list 2>&1|Out-String;if($LASTEXITCODE-ne0){$normalizedState='CONTROL_REQUIRED';$reason='HERDR_GUARD_AGENT_LIST_FAILED';$guardEventKey="GUARD_AGENT_LIST_FAILED_$deliveryReceipt";break};try{$l2=$raw2|ConvertFrom-Json}catch{$normalizedState='CONTROL_REQUIRED';$reason='HERDR_GUARD_AGENT_LIST_NOT_JSON';$guardEventKey="GUARD_AGENT_LIST_NOT_JSON_$deliveryReceipt";break};$exact=@($l2.result.agents|Where-Object{[string]$_.pane_id-ceq$pane-and[string]$_.agent_session.value-ceq$session});if($exact.Count-ne1){$normalizedState='CONTROL_REQUIRED';$reason='EXACT_BOUND_SESSION_MISSING';$guardEventKey="ABNORMAL_MISSING_$deliveryReceipt";break};$status=[string]$exact[0].agent_status;if($status-in@('idle','done')){$idleCount++}else{$idleCount=0};if($idleCount-ge2){$normalizedState='CONTROL_REQUIRED';$reason='TERMINAL_MISSING_AFTER_BOUND_SESSION_IDLE_OR_DONE';$guardEventKey="ABNORMAL_IDLE_$deliveryReceipt";break}}
+            if($matches.Count-eq1){
+              $sourceWorkerTerminal=[string]$matches[0].id;$tb=[string]$matches[0].body;$tm=[regex]::Match($tb,'(?m)^state:\s*(READY_FOR_FRESH_REVIEW|BLOCKED|CONTROL_REQUIRED)\s*$')
+              if(-not$tm.Success){$normalizedState='CONTROL_REQUIRED';$reason='MALFORMED_WORKER_TERMINAL_STATE'}else{$normalizedState=$tm.Groups[1].Value}
+              $bm=[regex]::Match($tb,'(?m)^worker_branch:\s*(\S+)\s*$');$hm=[regex]::Match($tb,'(?m)^candidate_head:\s*(\S+)\s*$');if($bm.Success){$workerBranch=$bm.Groups[1].Value};if($hm.Success){$candidateHead=$hm.Groups[1].Value}
+              $guardEventKey="WORKER_TERMINAL_$sourceWorkerTerminal";break
+            }
+            if(-not[string]::IsNullOrWhiteSpace($pane)-and-not[string]::IsNullOrWhiteSpace($session)){
+              try{$raw2=& $herdr agent list 2>&1|Out-String;if($LASTEXITCODE-ne0){throw 'agent list failed'};$l2=$raw2|ConvertFrom-Json}catch{$normalizedState='CONTROL_REQUIRED';$reason='HERDR_GUARD_AGENT_LIST_FAILED';$guardEventKey="GUARD_AGENT_LIST_FAILED_$deliveryReceipt";break}
+              $exact=@($l2.result.agents|Where-Object{[string]$_.pane_id-ceq$pane-and[string]$_.agent_session.value-ceq$session});if($exact.Count-ne1){$normalizedState='CONTROL_REQUIRED';$reason='EXACT_BOUND_SESSION_MISSING';$guardEventKey="ABNORMAL_MISSING_$deliveryReceipt";break}
+              $status=[string]$exact[0].agent_status;if($status-in@('idle','done')){$idleCount++}else{$idleCount=0};if($idleCount-ge2){$normalizedState='CONTROL_REQUIRED';$reason='TERMINAL_MISSING_AFTER_BOUND_SESSION_IDLE_OR_DONE';$guardEventKey="ABNORMAL_IDLE_$deliveryReceipt";break}
+            }
             Start-Sleep -Seconds 30
           }
           if([string]::IsNullOrWhiteSpace($normalizedState)){$normalizedState='CONTROL_REQUIRED';$reason='GUARD_LIVENESS_BUDGET_EXHAUSTED';$guardEventKey="LIVENESS_$deliveryReceipt"}
 
-          $all=@(Get-All88);$priorNorm=@($all|Where-Object{[string]$_.body-match'(?m)^CONTROL_G10_G11_READY_RETURN_GUARD_V2_TERMINAL_V1\s*$'-and[string]$_.body-match"(?m)^guard_event_key:\s*$([regex]::Escape($guardEventKey))\s*$"}|Sort-Object{[int64]$_.id});if($priorNorm.Count-gt1){throw 'Conflicting duplicate normalized terminals'}
-          if($priorNorm.Count-eq1){$normalizedReceipt=[string]$priorNorm[0].id}else{$normalizedReceipt=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_TERMINAL_V1',"state: $normalizedState","card_id: $cardId","source_dispatch_card: $cardReceipt","source_worker_terminal_receipt: $sourceWorkerTerminal","guard_event_key: $guardEventKey","reason: $reason","target_pane: $pane","target_agent_session: $session",'user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")}
+          $recent=@(Get-Recent88 $sw.Since);$priorNorm=@($recent|Where-Object{[string]$_.body-match'(?m)^CONTROL_G10_G11_READY_RETURN_GUARD_V2_TERMINAL_V1\s*$'-and[string]$_.body-match("(?m)^guard_event_key:\s*$([regex]::Escape($guardEventKey))\s*$")}|Sort-Object{[int64]$_.id})
+          if($priorNorm.Count-gt1){throw 'conflicting duplicate normalized terminals'}
+          if($priorNorm.Count-eq1){$normalizedReceipt=[string]$priorNorm[0].id}else{$normalizedReceipt=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_TERMINAL_V1',"state: $normalizedState","card_id: $cardId","source_dispatch_card: $cardReceipt","source_worker_terminal_receipt: $sourceWorkerTerminal","guard_event_key: $guardEventKey","reason: $reason","worker_branch: $workerBranch","candidate_head: $candidateHead","target_pane: $pane","target_agent_session: $session",'user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")}
 
-          try{$sw2=Get-CurrentSwitch}catch{$id=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_RESULT_V1','state: CONTROL_REQUIRED_NO_RETURN_REQUEST',"source_normalized_terminal_receipt: $normalizedReceipt",'reason: CURRENT_SWITCH_PARSE_FAILED','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "Cannot create return request receipt=$id"}
-          if($sw2.Receipt-cne$expectedSwitch-or$sw2.Generation-cne'010'){$id=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_RESULT_V1','state: CONTROL_REQUIRED_NO_RETURN_REQUEST',"source_normalized_terminal_receipt: $normalizedReceipt","reason: CONTROL_BINDING_SUPERSEDED_$($sw2.Receipt)_$($sw2.Generation)",'user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "Control superseded receipt=$id"}
+          try{$sw2=Verify-Authority}catch{$id=Publish(@('CONTROL_G10_G11_READY_RETURN_GUARD_V2_RESULT_V1','state: CONTROL_REQUIRED_NO_RETURN_REQUEST',"source_normalized_terminal_receipt: $normalizedReceipt",'reason: CURRENT_SWITCH_PARSE_FAILED','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "Cannot create return request receipt=$id"}
+          $recent=@(Get-Recent88 $sw2.Since);$idem="$cardId`:$normalizedReceipt`:$candidateHead"
+          $priorReq=@($recent|Where-Object{[string]$_.body-match'(?m)^CONTROL_READY_RETURN_REQUEST_V2\s*$'-and[string]$_.body-match("(?m)^idempotency_key:\s*$([regex]::Escape($idem))\s*$")});if($priorReq.Count-gt1){throw 'conflicting duplicate return requests'}
+          if($priorReq.Count-eq1){$request=[string]$priorReq[0].id}else{$request=Publish(@('CONTROL_READY_RETURN_REQUEST_V2',"source_transport_authority: $authority","source_card_id: $cardId","source_terminal_receipt: $normalizedReceipt","candidate_head: $candidateHead","target_control_generation: $($sw2.Generation)","target_control_conversation_id: $($sw2.ConversationId)","target_control_conversation_url: $($sw2.ConversationUrl)","idempotency_key: $idem",'user_relay_count: 0','readback_required: true')-join"`n")}
 
-          $all=@(Get-All88);$priorReq=@($all|Where-Object{[string]$_.body-match'(?m)^CONTROL_READY_RETURN_REQUEST_V2\s*$'-and[string]$_.body-match"(?m)^source_terminal_receipt:\s*$([regex]::Escape($normalizedReceipt))\s*$"});if($priorReq.Count-gt1){throw 'Conflicting duplicate return requests'}
-          if($priorReq.Count-eq1){Write-Output "Return request already exists id=$($priorReq[0].id); no duplicate";exit 0}
-          $request=Publish(@('CONTROL_READY_RETURN_REQUEST_V2',"source_transport_authority: $authority","source_card_id: $cardId","source_terminal_receipt: $normalizedReceipt","target_control_generation: $($sw2.Generation)","target_control_conversation_id: $($sw2.ConversationId)","target_control_conversation_url: $($sw2.ConversationUrl)","idempotency_key: $cardId`:$normalizedReceipt",'user_relay_count: 0','readback_required: true')-join"`n");Write-Output "Return request published receipt=$request"
+          $priorDispatch=@($recent|Where-Object{[string]$_.body-match'(?m)^CONTROL_G10_G11_UNATTENDED_RETURN_WORKFLOW_DISPATCH_V1\s*$'-and[string]$_.body-match("(?m)^idempotency_key:\s*$([regex]::Escape($idem))\s*$")});if($priorDispatch.Count-gt1){throw 'conflicting duplicate workflow dispatch receipts'}
+          if($priorDispatch.Count-eq1){Write-Output "workflow dispatch already recorded request=$request receipt=$($priorDispatch[0].id)";exit 0}
+          $payload=@{ref=$baseBranch;inputs=@{source_terminal_receipt=$normalizedReceipt;source_card_id=$cardId;candidate_head=$candidateHead;idempotency_key=$idem}}|ConvertTo-Json -Depth 5 -Compress
+          Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/actions/workflows/g10-g11-ready-return-control-doorbell-v2.yml/dispatches" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30|Out-Null
+          $dispatch=Publish(@('CONTROL_G10_G11_UNATTENDED_RETURN_WORKFLOW_DISPATCH_V1','state: DISPATCHED',"source_return_request: $request","source_terminal_receipt: $normalizedReceipt","source_card_id: $cardId","candidate_head: $candidateHead","workflow_file: .github/workflows/g10-g11-ready-return-control-doorbell-v2.yml","workflow_ref: $baseBranch","idempotency_key: $idem",'physical_send_count: 0','second_physical_send: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
+          Write-Output "workflow dispatch receipt=$dispatch"

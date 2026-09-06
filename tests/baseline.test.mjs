@@ -808,3 +808,93 @@ test("sendJob still rejects a hidden page by default even when attachments are s
   assert.equal(exec.counts.fill, undefined);
   assert.equal(exec.counts.click, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// GBB-UNATTENDED-RETURN-TRANSPORT-01: the return doorbell is activated by an
+// explicit supported workflow_dispatch, not by a GITHUB_TOKEN-created
+// issue_comment event. These tests exercise the workflow contract from the
+// checked-out files so the transport boundary cannot regress silently.
+// ---------------------------------------------------------------------------
+
+const WORKFLOW_DIR = path.join(__dirname, "..", ".github", "workflows");
+const DOORBELL_WORKFLOW = path.join(WORKFLOW_DIR, "g10-g11-ready-return-control-doorbell-v2.yml");
+const GUARD_WORKFLOW = path.join(WORKFLOW_DIR, "g10-g11-ready-return-worker-guard-v2.yml");
+
+async function readTransportWorkflows() {
+  return {
+    doorbell: await readFile(DOORBELL_WORKFLOW, "utf8"),
+    guard: await readFile(GUARD_WORKFLOW, "utf8"),
+  };
+}
+
+test("unattended return doorbell declares exactly the schema's workflow_dispatch string inputs", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  assert.match(doorbell, /^on:\s*\n\s+workflow_dispatch:\s*$/m);
+  assert.doesNotMatch(doorbell, /^\s+issue_comment:\s*$/m);
+  for (const input of ["source_terminal_receipt", "source_card_id", "candidate_head", "idempotency_key"]) {
+    assert.match(doorbell, new RegExp(`^\\s{6}${input}:\\s*$`, "m"));
+    assert.match(doorbell, new RegExp(`^\\s{8}required:\\s*true\\s*$`, "m"));
+    assert.match(doorbell, new RegExp(`^\\s{8}type:\\s*string\\s*$`, "m"));
+  }
+  assert.doesNotMatch(doorbell, /github\.event\.comment/);
+});
+
+test("guard reads back the durable return request before dispatching the exact doorbell workflow", async () => {
+  const { guard } = await readTransportWorkflows();
+  assert.match(guard, /actions:\s*write/);
+  assert.match(guard, /ready-return-control-doorbell-v2\.yml\/dispatches/);
+  const requestPublish = guard.indexOf("$request=Publish(");
+  const dispatch = guard.indexOf("/actions/workflows/g10-g11-ready-return-control-doorbell-v2.yml/dispatches");
+  assert.ok(requestPublish >= 0, "guard must durably publish/read back CONTROL_READY_RETURN_REQUEST_V2");
+  assert.ok(dispatch > requestPublish, "workflow_dispatch must occur after request publication/read-back");
+  assert.match(guard, /source_terminal_receipt/);
+  assert.match(guard, /source_card_id/);
+  assert.match(guard, /candidate_head/);
+  assert.match(guard, /idempotency_key/);
+});
+
+test("both transport workflows use the exact expected-switch created_at as an unbounded recent-window lower bound", async () => {
+  const { doorbell, guard } = await readTransportWorkflows();
+  for (const workflow of [doorbell, guard]) {
+    assert.match(workflow, /expectedSwitch/);
+    assert.match(workflow, /created_at/);
+    assert.match(workflow, /since=/);
+    assert.doesNotMatch(workflow, /for\(\$p=1;\$p-le\d+/);
+    assert.doesNotMatch(workflow, /for\(\$n=1;\$n-le\d+/);
+  }
+});
+
+test("doorbell idempotency binds repository, source card, terminal receipt, and candidate head", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  assert.match(doorbell, /sourceCard/);
+  assert.match(doorbell, /terminal/);
+  assert.match(doorbell, /candidateHead/);
+  assert.match(doorbell, /idempotencyKey|logicalKey/);
+  assert.match(doorbell, /NO_OP_DUPLICATE/);
+  assert.match(doorbell, /SENDING/);
+  assert.match(doorbell, /UNCERTAIN_SEND_NO_BLIND_RETRY/);
+  assert.match(doorbell, /publication.only|publication_only_recovery/);
+});
+
+test("doorbell schema exposes every required durable canary field and never permits a second physical send", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  for (const field of [
+    "state",
+    "source_terminal_receipt",
+    "source_card_id",
+    "candidate_head",
+    "active_switch_receipt",
+    "target_control_generation",
+    "target_control_conversation_id",
+    "physical_send_count",
+    "second_physical_send",
+    "user_relay_count",
+    "workflow_run_id",
+  ]) {
+    assert.match(doorbell, new RegExp(field));
+  }
+  assert.match(doorbell, /CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1/);
+  assert.match(doorbell, /CONTROL_REQUIRED_NO_SEND/);
+  assert.match(doorbell, /Publish-Canary 'CONTROL_REQUIRED_NO_SEND' '0' 'false'/);
+  assert.match(doorbell, /Publish-Canary 'NO_OP_DUPLICATE' '0' 'false'/);
+});

@@ -1,23 +1,36 @@
 name: G10 G11 Ready Return Control Doorbell V2
 
 on:
-  issue_comment:
-    types: [created]
+  workflow_dispatch:
+    inputs:
+      source_terminal_receipt:
+        description: Durable terminal comment receipt that requests the return.
+        required: true
+        type: string
+      source_card_id:
+        description: Exact source card identifier.
+        required: true
+        type: string
+      candidate_head:
+        description: Exact candidate head, or NONE for a non-candidate terminal.
+        required: true
+        type: string
+      idempotency_key:
+        description: Deterministic repository/card/terminal/head key.
+        required: true
+        type: string
 
 permissions:
   contents: read
   issues: write
 
 concurrency:
-  group: g10-g11-ready-return-doorbell-${{ github.event.issue.number }}
+  group: g10-g11-ready-return-doorbell-${{ inputs.idempotency_key }}
   cancel-in-progress: false
 
 jobs:
   return-doorbell:
-    if: >-
-      github.event.issue.number == 88 &&
-      github.event.comment.user.login == 'github-actions[bot]' &&
-      startsWith(github.event.comment.body, 'CONTROL_READY_RETURN_REQUEST_V2')
+    if: inputs.source_terminal_receipt != '' && inputs.source_card_id != '' && inputs.candidate_head != '' && inputs.idempotency_key != ''
     runs-on: [self-hosted, Windows, GBB-REVIEWER]
     timeout-minutes: 12
     defaults:
@@ -27,14 +40,25 @@ jobs:
       - name: Deliver exact current Control doorbell once
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_TERMINAL_RECEIPT: ${{ inputs.source_terminal_receipt }}
+          SOURCE_CARD_ID: ${{ inputs.source_card_id }}
+          CANDIDATE_HEAD: ${{ inputs.candidate_head }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
         run: |
           $ErrorActionPreference='Stop'
           $repo='D22977/gpt-browser-bridge'; $issue=88
-          $authority='5556178977'; $cardReceipt='5556156612'; $cardId='GBB-READY-RETURN-CLOSURE-01'
-          $expectedSwitch='5555495204'; $expectedSenderBlob='6b7a523f98a9655ba2ca28f42696b80da365c92b'
+          $expectedSwitch='5555495204'; $expectedGeneration='010'
+          $expectedSenderBlob='6b7a523f98a9655ba2ca28f42696b80da365c92b'
+          $allowedSourceCards=@('GBB-UNATTENDED-RETURN-TRANSPORT-01','GBB-READY-RETURN-CLOSURE-01')
           $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g10-g11-ready-return-doorbell-v2';Accept='application/vnd.github+json'}
           $stateRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-ready-return-doorbell-v2\state'
           New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+
+          $terminal=[string]$env:SOURCE_TERMINAL_RECEIPT
+          $sourceCard=[string]$env:SOURCE_CARD_ID
+          $candidateHead=[string]$env:CANDIDATE_HEAD
+          $idempotencyKey=[string]$env:IDEMPOTENCY_KEY
+          $activeSwitch=$null
 
           function Publish([string]$text){
             $payload=@{body=$text}|ConvertTo-Json -Compress
@@ -43,85 +67,163 @@ jobs:
             if([string]$rb.body-cne$text){throw 'readback mismatch'}
             return [string]$r.id
           }
-          function Get-All88{
-            $all=[System.Collections.Generic.List[object]]::new()
-            function Add-Flat([object]$v){if($null-eq$v){return};if($v-is[System.Array]){foreach($x in $v){Add-Flat $x};return};[void]$all.Add($v)}
-            for($p=1;$p-le40;$p++){$before=$all.Count;Add-Flat(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30);if(($all.Count-$before)-lt100){break}}
+
+          function Get-Comment([string]$id){
+            $c=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$id" -Headers $headers -Method Get -TimeoutSec 30
+            if([string]$c.issue_url-notmatch'/issues/88$'){throw "comment $id is not on Issue #88"}
+            return $c
+          }
+
+          function Get-Recent88([string]$since){
+            $all=[System.Collections.Generic.List[object]]::new();$page=1
+            while($true){
+              $encoded=[uri]::EscapeDataString($since)
+              $batch=@(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=$encoded&per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+              foreach($comment in $batch){[void]$all.Add($comment)}
+              if($batch.Count-lt100){break}
+              $page++
+            }
             return $all.ToArray()
           }
-          function Get-CurrentSwitch{
-            $all=@(Get-All88)
-            $switches=@($all|Where-Object{[string]$_.body-match'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$'-and[string]$_.body-match'(?m)^state:\s*SWITCH_COMMITTED\s*$'}|Sort-Object{[int64]$_.id})
-            if($switches.Count-eq0){throw 'No committed switch'}
-            $latest=$switches[-1];$b=[string]$latest.body
-            $g=[regex]::Match($b,'(?m)^new_generation:\s*(\d{3})\s*$');$id=[regex]::Match($b,'(?m)^new_conversation_id:\s*([0-9a-f-]+)\s*$');$url=[regex]::Match($b,'(?m)^new_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
-            $s1=[regex]::Match($b,'(?m)^new_status:\s*([A-Z_]+)\s*$');$s2=[regex]::Match($b,'(?m)^new_generation_status:\s*([A-Z_]+)\s*$')
-            if(-not($g.Success-and$id.Success-and$url.Success)){throw "Latest switch malformed id=$($latest.id)"}
-            if(-not$s1.Success-and-not$s2.Success){throw "Latest switch missing status id=$($latest.id)"}
-            if($s1.Success-and$s2.Success-and$s1.Groups[1].Value-cne$s2.Groups[1].Value){throw "Latest switch status conflict id=$($latest.id)"}
-            $status=if($s1.Success){$s1.Groups[1].Value}else{$s2.Groups[1].Value};if($status-cne'ACTIVE'){throw "Latest switch not ACTIVE id=$($latest.id)"}
-            return [pscustomobject]@{Receipt=[string]$latest.id;Generation=$g.Groups[1].Value;ConversationId=$id.Groups[1].Value;ConversationUrl=$url.Groups[1].Value}
+
+          function Parse-Switch([object]$comment){
+            $body=[string]$comment.body
+            if($body-notmatch'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$'-or$body-notmatch'(?m)^state:\s*SWITCH_COMMITTED\s*$'){throw "committed switch header malformed id=$($comment.id)"}
+            $generation=[regex]::Match($body,'(?m)^new_generation:\s*(\d{3})\s*$')
+            $conversationId=[regex]::Match($body,'(?m)^new_conversation_id:\s*([0-9a-f-]+)\s*$')
+            $conversationUrl=[regex]::Match($body,'(?m)^new_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
+            $statusA=[regex]::Match($body,'(?m)^new_status:\s*([A-Z_]+)\s*$')
+            $statusB=[regex]::Match($body,'(?m)^new_generation_status:\s*([A-Z_]+)\s*$')
+            if(-not($generation.Success-and$conversationId.Success-and$conversationUrl.Success)){throw "committed switch fields malformed id=$($comment.id)"}
+            if(-not$statusA.Success-and-not$statusB.Success){throw "committed switch status missing id=$($comment.id)"}
+            if($statusA.Success-and$statusB.Success-and$statusA.Groups[1].Value-cne$statusB.Groups[1].Value){throw "committed switch status conflict id=$($comment.id)"}
+            $status=if($statusA.Success){$statusA.Groups[1].Value}else{$statusB.Groups[1].Value}
+            if($status-cne'ACTIVE'){throw "committed switch is not ACTIVE id=$($comment.id)"}
+            if($null-eq$comment.created_at){throw "committed switch created_at missing id=$($comment.id)"}
+            return [pscustomobject]@{Receipt=[string]$comment.id;Generation=$generation.Groups[1].Value;ConversationId=$conversationId.Groups[1].Value;ConversationUrl=$conversationUrl.Groups[1].Value;Since=([DateTimeOffset]$comment.created_at).ToString('o')}
           }
-          function Need([string]$body,[string]$pattern,[string]$name){$m=[regex]::Match($body,$pattern);if(-not$m.Success){throw "Malformed request field $name"};return $m.Groups[1].Value}
-          function Fail-NoSend([string]$reason,[string]$terminal,[string]$detail=''){
-            $safe=($detail-replace'[\r\n]+',' ');if($safe.Length-gt500){$safe=$safe.Substring(0,500)}
-            $id=Publish(@('CONTROL_G10_G11_READY_RETURN_DOORBELL_V2','state: CONTROL_REQUIRED_NO_SEND',"source_terminal_receipt: $terminal","reason: $reason","diagnostic: $safe",'physical_send_count: 0','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n")
+
+          function Get-CurrentSwitch{
+            $anchor=Get-Comment $expectedSwitch
+            $anchorSwitch=Parse-Switch $anchor
+            $recent=@(Get-Recent88 $anchorSwitch.Since)
+            $committed=@($recent|Where-Object{[string]$_.body-match'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$'-and[string]$_.body-match'(?m)^state:\s*SWITCH_COMMITTED\s*$'}|Sort-Object{[int64]$_.id})
+            $latest=$anchor
+            foreach($candidate in $committed){if([int64]$candidate.id-gt[int64]$latest.id){$latest=$candidate}}
+            return Parse-Switch $latest
+          }
+
+          function Need([string]$body,[string]$pattern,[string]$name){
+            $match=[regex]::Match($body,$pattern);if(-not$match.Success){throw "missing $name"};return $match.Groups[1].Value
+          }
+
+          function Publish-Canary([string]$state,[string]$physicalSendCount,[string]$secondPhysicalSend,[string]$activeSwitchReceipt,[string]$targetGeneration,[string]$targetConversationId,[string]$targetConversationUrl,[string]$extra=''){
+            $lines=[System.Collections.Generic.List[string]]::new()
+            [void]$lines.Add('CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1')
+            [void]$lines.Add("state: $state")
+            [void]$lines.Add("source_terminal_receipt: $terminal")
+            [void]$lines.Add("source_card_id: $sourceCard")
+            [void]$lines.Add("candidate_head: $candidateHead")
+            [void]$lines.Add("active_switch_receipt: $activeSwitchReceipt")
+            [void]$lines.Add("target_control_generation: $targetGeneration")
+            [void]$lines.Add("target_control_conversation_id: $targetConversationId")
+            [void]$lines.Add("target_control_conversation_url: $targetConversationUrl")
+            [void]$lines.Add("physical_send_count: $physicalSendCount")
+            [void]$lines.Add("second_physical_send: $secondPhysicalSend")
+            [void]$lines.Add('user_relay_count: 0')
+            [void]$lines.Add("workflow_run_id: $env:GITHUB_RUN_ID")
+            if(-not[string]::IsNullOrWhiteSpace($extra)){[void]$lines.Add($extra)}
+            [void]$lines.Add('readback_required: true')
+            return Publish ($lines -join "`n")
+          }
+
+          function Fail-NoSend([string]$reason){
+            $switchReceipt='NONE';$generation='NONE';$conversationId='NONE';$conversationUrl='NONE'
+            if($null-ne$activeSwitch){$switchReceipt=$activeSwitch.Receipt;$generation=$activeSwitch.Generation;$conversationId=$activeSwitch.ConversationId;$conversationUrl=$activeSwitch.ConversationUrl}
+            $safe=($reason-replace'[\r\n]+',' ');if($safe.Length-gt500){$safe=$safe.Substring(0,500)}
+            $id=Publish-Canary 'CONTROL_REQUIRED_NO_SEND' '0' 'false' $switchReceipt $generation $conversationId $conversationUrl "reason: $safe"
             throw "CONTROL_REQUIRED_NO_SEND receipt=$id"
           }
 
-          $event=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json;$body=[string]$event.comment.body
-          if($event.comment.user.login-cne'github-actions[bot]'){throw 'Wrong request actor'}
-          if($body-notmatch'(?m)^CONTROL_READY_RETURN_REQUEST_V2\s*$'){throw 'Bad request protocol'}
-          $sourceCard=Need $body '(?m)^source_card_id:\s*([A-Za-z0-9._:-]+)\s*$' 'source_card_id'
-          $terminal=Need $body '(?m)^source_terminal_receipt:\s*(\d+)\s*$' 'source_terminal_receipt'
-          $targetGen=Need $body '(?m)^target_control_generation:\s*(\d{3})\s*$' 'target_control_generation'
-          $targetId=Need $body '(?m)^target_control_conversation_id:\s*([0-9a-f-]+)\s*$' 'target_control_conversation_id'
-          $targetUrl=Need $body '(?m)^target_control_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$' 'target_control_conversation_url'
-          $idem=Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
-          if($sourceCard-cne$cardId){throw 'Wrong source card'}
-          if($body-notmatch'(?m)^source_transport_authority:\s*5556178977\s*$'){throw 'Wrong transport authority'}
-          if($idem-cne("GBB-READY-RETURN-CLOSURE-01:$terminal")){throw 'Wrong logical idempotency key'}
+          if([string]::IsNullOrWhiteSpace($terminal)-or$terminal-notmatch'^\d+$'){Fail-NoSend 'INVALID_SOURCE_TERMINAL_RECEIPT'}
+          if($sourceCard-notin$allowedSourceCards){Fail-NoSend 'INVALID_SOURCE_CARD'}
+          if($candidateHead-ne'NONE'-and$candidateHead-notmatch'^[0-9a-f]{40}$'){Fail-NoSend 'INVALID_CANDIDATE_HEAD'}
+          $expectedIdempotency="$sourceCard`:$terminal`:$candidateHead"
+          if($idempotencyKey-cne$expectedIdempotency){Fail-NoSend 'IDEMPOTENCY_KEY_MISMATCH'}
 
-          foreach($cid in @($authority,$cardReceipt,$terminal)){$c=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$cid" -Headers $headers -Method Get -TimeoutSec 30;if([string]$c.issue_url-notmatch'/issues/88$'){throw "Issue mismatch $cid"}}
-          $tc=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$terminal" -Headers $headers -Method Get -TimeoutSec 30
-          if([string]$tc.body-notmatch'(?m)^CONTROL_G10_G11_READY_RETURN_GUARD_V2_TERMINAL_V1\s*$'-or[string]$tc.body-notmatch'(?m)^card_id:\s*GBB-READY-RETURN-CLOSURE-01\s*$'){throw 'Unrecognized normalized terminal'}
+          try{$terminalComment=Get-Comment $terminal}catch{Fail-NoSend "SOURCE_TERMINAL_READ_FAILED: $($_.Exception.Message)"}
+          $terminalBody=[string]$terminalComment.body
+          $isTransportTerminal=$terminalBody-match'(?m)^GBB_UNATTENDED_RETURN_TRANSPORT_READY_V1\s*$'
+          $isClosureTerminal=$terminalBody-match'(?m)^CONTROL_G10_G11_READY_RETURN_GUARD_V2_TERMINAL_V1\s*$'
+          if(-not($isTransportTerminal-or$isClosureTerminal)){Fail-NoSend 'UNRECOGNIZED_SOURCE_TERMINAL'}
+          $terminalCard=[regex]::Match($terminalBody,'(?m)^card_id:\s*([A-Za-z0-9._:-]+)\s*$')
+          if(-not$terminalCard.Success-or$terminalCard.Groups[1].Value-cne$sourceCard){Fail-NoSend 'SOURCE_TERMINAL_CARD_MISMATCH'}
+          $terminalState=[regex]::Match($terminalBody,'(?m)^state:\s*(READY_FOR_CONTROL_CANARY|BLOCKED|CONTROL_REQUIRED)\s*$')
+          if(-not$terminalState.Success){Fail-NoSend 'SOURCE_TERMINAL_STATE_MALFORMED'}
+          $terminalHead=[regex]::Match($terminalBody,'(?m)^candidate_head:\s*(\S+)\s*$')
+          if($terminalHead.Success-and$terminalHead.Groups[1].Value-cne$candidateHead){Fail-NoSend 'SOURCE_TERMINAL_HEAD_MISMATCH'}
+          if(-not$terminalHead.Success-and$candidateHead-ne'NONE'){Fail-NoSend 'SOURCE_TERMINAL_HEAD_MISSING'}
+          $terminalMechanism=[regex]::Match($terminalBody,'(?m)^selected_return_mechanism:\s*([A-Z_]+)\s*$')
+          if($terminalState.Groups[1].Value-eq'READY_FOR_CONTROL_CANARY' -and(-not$terminalMechanism.Success-or$terminalMechanism.Groups[1].Value-cne'WORKFLOW_DISPATCH')){Fail-NoSend 'SOURCE_TERMINAL_MECHANISM_MISMATCH'}
+          if($terminalState.Groups[1].Value-ne'READY_FOR_CONTROL_CANARY'){Fail-NoSend "SOURCE_TERMINAL_$($terminalState.Groups[1].Value)"}
 
-          try{$sw=Get-CurrentSwitch}catch{Fail-NoSend 'CURRENT_SWITCH_PARSE_FAILED' $terminal $_.Exception.Message}
-          if($sw.Receipt-cne$expectedSwitch-or$sw.Generation-cne'010'){Fail-NoSend 'CONTROL_BINDING_SUPERSEDED' $terminal "switch=$($sw.Receipt) gen=$($sw.Generation)"}
-          if($targetGen-cne$sw.Generation-or$targetId-cne$sw.ConversationId-or$targetUrl-cne$sw.ConversationUrl){Fail-NoSend 'REQUEST_TARGET_MISMATCH' $terminal ''}
+          try{$activeSwitch=Get-CurrentSwitch}catch{Fail-NoSend "CURRENT_SWITCH_PARSE_FAILED: $($_.Exception.Message)"}
+          if($activeSwitch.Receipt-cne$expectedSwitch-or$activeSwitch.Generation-cne$expectedGeneration){Fail-NoSend "CONTROL_BINDING_SUPERSEDED switch=$($activeSwitch.Receipt) generation=$($activeSwitch.Generation)"}
 
-          $all=@(Get-All88)
-          $prior=@($all|Where-Object{[string]$_.body-match'(?m)^CONTROL_G10_G11_READY_RETURN_DOORBELL_V2\s*$'-and[string]$_.body-match'(?m)^state:\s*(DELIVERED|DELIVERED_RECOVERED)\s*$'-and[string]$_.body-match"(?m)^source_terminal_receipt:\s*$([regex]::Escape($terminal))\s*$"})
-          if($prior.Count-gt1){throw 'Conflicting duplicate delivered returns'}
-          if($prior.Count-eq1){$id=Publish(@('CONTROL_G10_G11_READY_RETURN_DOORBELL_V2','state: NO_OP_DUPLICATE',"source_terminal_receipt: $terminal",'second_physical_send: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");Write-Output "NO_OP duplicate receipt=$id";exit 0}
+          $logicalKey="$repo|$sourceCard|$terminal|$candidateHead"
+          $keyHash=([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($logicalKey)))).ToLowerInvariant()
+          $statePath=Join-Path $stateRoot "$keyHash.json"
+          $recent=@(Get-Recent88 $activeSwitch.Since)
+          $prior=@($recent|Where-Object{
+            $b=[string]$_.body
+            $b-match'(?m)^CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1\s*$' -and
+            $b-match'(?m)^state:\s*DELIVERED\s*$' -and
+            $b-match("(?m)^source_terminal_receipt:\s*$([regex]::Escape($terminal))\s*$") -and
+            $b-match("(?m)^source_card_id:\s*$([regex]::Escape($sourceCard))\s*$") -and
+            $b-match("(?m)^candidate_head:\s*$([regex]::Escape($candidateHead))\s*$")
+          })
+          if($prior.Count-gt1){Fail-NoSend 'CONFLICTING_DELIVERED_CANARY_RECEIPTS'}
+          if($prior.Count-eq1){$id=Publish-Canary 'NO_OP_DUPLICATE' '0' 'false' $activeSwitch.Receipt $activeSwitch.Generation $activeSwitch.ConversationId $activeSwitch.ConversationUrl 'duplicate_of_existing_delivery: true';Write-Output "NO_OP_DUPLICATE receipt=$id";exit 0}
 
-          $statePath=Join-Path $stateRoot "$terminal.json"
           if(Test-Path -LiteralPath $statePath){
-            $st=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json
-            if([string]$st.status-eq'SENDING'){$id=Publish(@('CONTROL_G10_G11_READY_RETURN_DOORBELL_V2','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_terminal_receipt: $terminal",'physical_send_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN existing SENDING receipt=$id"}
-            if([string]$st.status-eq'SENT'){$id=Publish(@('CONTROL_G10_G11_READY_RETURN_DOORBELL_V2','state: DELIVERED_RECOVERED',"source_terminal_receipt: $terminal","active_switch_receipt: $($st.active_switch_receipt)","target_control_generation: $($st.target_generation)","target_control_conversation_id: $($st.target_conversation_id)","target_control_conversation_url: $($st.target_conversation_url)","sender_job_id: $($st.sender_job_id)","sender_prompt_hash: $($st.sender_prompt_hash)",'physical_send_count: 0','second_physical_send: false','publication_only_recovery: true','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");Write-Output "Recovered durable receipt=$id";exit 0}
+            try{$stored=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json}catch{Fail-NoSend 'CORRUPT_LOCAL_SEND_STATE'}
+            switch([string]$stored.status){
+              'SENDING' {$id=Publish-Canary 'UNCERTAIN_SEND_NO_BLIND_RETRY' 'UNKNOWN_AFTER_SEND_BOUNDARY' 'false' $activeSwitch.Receipt $activeSwitch.Generation $activeSwitch.ConversationId $activeSwitch.ConversationUrl 'reason: existing SENDING state';throw "UNCERTAIN_SEND_NO_BLIND_RETRY receipt=$id"}
+              'UNCERTAIN' {$id=Publish-Canary 'UNCERTAIN_SEND_NO_BLIND_RETRY' 'UNKNOWN_AFTER_SEND_BOUNDARY' 'false' $activeSwitch.Receipt $activeSwitch.Generation $activeSwitch.ConversationId $activeSwitch.ConversationUrl 'reason: existing UNCERTAIN state';throw "UNCERTAIN_SEND_NO_BLIND_RETRY receipt=$id"}
+              'SENT' {
+                if([string]::IsNullOrWhiteSpace([string]$stored.delivery_receipt)){
+                  $id=Publish-Canary 'DELIVERED' '0' 'false' $activeSwitch.Receipt $activeSwitch.Generation $activeSwitch.ConversationId $activeSwitch.ConversationUrl 'publication_only_recovery: true'
+                  $stored.delivery_receipt=$id;$stored.receipt_published=$true;$stored|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+                  Write-Output "DELIVERED publication-only receipt=$id";exit 0
+                }
+                $id=Publish-Canary 'NO_OP_DUPLICATE' '0' 'false' $activeSwitch.Receipt $activeSwitch.Generation $activeSwitch.ConversationId $activeSwitch.ConversationUrl 'duplicate_of_existing_delivery: true';Write-Output "NO_OP_DUPLICATE receipt=$id";exit 0
+              }
+              default {Fail-NoSend "UNKNOWN_LOCAL_SEND_STATE_$($stored.status)"}
+            }
           }
 
           $repoRoot='D:\AIWORK\GPT_BROWSER_BRIDGE';$senderRel='src/gpt_send.mjs';$senderPath=Join-Path $repoRoot $senderRel
-          if(-not(Test-Path -LiteralPath $senderPath)){Fail-NoSend 'LOCAL_SENDER_MISSING' $terminal $senderPath}
-          $actualBlob=(& git -C $repoRoot hash-object -- $senderRel).Trim();if($actualBlob-cne$expectedSenderBlob){Fail-NoSend 'LOCAL_SENDER_BLOB_MISMATCH' $terminal $actualBlob}
+          if(-not(Test-Path -LiteralPath $senderPath)){Fail-NoSend 'LOCAL_SENDER_MISSING'}
+          $actualBlob=(& git -C $repoRoot hash-object -- $senderRel).Trim();if($actualBlob-cne$expectedSenderBlob){Fail-NoSend "LOCAL_SENDER_BLOB_MISMATCH_$actualBlob"}
           $playwright='C:\Users\Lupun\AppData\Roaming\npm\node_modules\@playwright\cli\node_modules\.bin\playwright.cmd';$senderSession='HERDR-DOORBELL-DB01-G1-20260816';$db01Root='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell';$db01Profile='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell\db01-profile';$runtimeRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-ready-return-doorbell-v2'
-          if(-not(Test-Path -LiteralPath $playwright)){Fail-NoSend 'PLAYWRIGHT_CLI_MISSING' $terminal $playwright};if(-not(Test-Path -LiteralPath $db01Root -PathType Container)){Fail-NoSend 'DB01_RUNTIME_ROOT_MISSING' $terminal $db01Root};if(-not(Test-Path -LiteralPath $db01Profile -PathType Container)){Fail-NoSend 'DB01_PROFILE_MISSING' $terminal $db01Profile}
+          if(-not(Test-Path -LiteralPath $playwright)){Fail-NoSend 'PLAYWRIGHT_CLI_MISSING'}
+          if(-not(Test-Path -LiteralPath $db01Root -PathType Container)){Fail-NoSend 'DB01_RUNTIME_ROOT_MISSING'}
+          if(-not(Test-Path -LiteralPath $db01Profile -PathType Container)){Fail-NoSend 'DB01_PROFILE_MISSING'}
           Push-Location $db01Root
           try{
-            $sessions=(& $playwright cli list 2>&1|Out-String);if($LASTEXITCODE-ne0){Fail-NoSend 'DB01_SESSION_LIST_FAILED' $terminal $sessions}
+            $sessions=(& $playwright cli list 2>&1|Out-String);if($LASTEXITCODE-ne0){Fail-NoSend 'DB01_SESSION_LIST_FAILED'}
             $tabs=(& $playwright cli "-s=$senderSession" tab-list 2>&1|Out-String)
-            if($LASTEXITCODE-eq1-and$sessions-notmatch[regex]::Escape($senderSession)){$open=(& $playwright cli "-s=$senderSession" open --persistent "--profile=$db01Profile" --headed 2>&1|Out-String);if($LASTEXITCODE-ne0){Fail-NoSend 'DB01_RESTART_FAILED' $terminal $open}}
-            elseif($LASTEXITCODE-ne0){Fail-NoSend 'DB01_SESSION_AMBIGUOUS' $terminal $tabs}
-            $tabs=(& $playwright cli "-s=$senderSession" tab-list 2>&1|Out-String);if($LASTEXITCODE-ne0){Fail-NoSend 'DB01_TAB_LIST_FAILED' $terminal $tabs}
-            if($tabs-notmatch[regex]::Escape($sw.ConversationId)){$go=(& $playwright cli "-s=$senderSession" goto $sw.ConversationUrl 2>&1|Out-String);if($LASTEXITCODE-ne0){Fail-NoSend 'DB01_EXACT_NAVIGATION_FAILED' $terminal $go}}
-            $tabs2=(& $playwright cli "-s=$senderSession" tab-list 2>&1|Out-String);if($LASTEXITCODE-ne0-or$tabs2-notmatch[regex]::Escape($sw.ConversationId)){Fail-NoSend 'DB01_EXACT_CONTROL_TAB_NOT_FOUND' $terminal $tabs2}
+            if($LASTEXITCODE-eq1-and$sessions-notmatch[regex]::Escape($senderSession)){$open=(& $playwright cli "-s=$senderSession" open --persistent "--profile=$db01Profile" --headed 2>&1|Out-String);if($LASTEXITCODE-ne0){Fail-NoSend 'DB01_RESTART_FAILED'}}
+            elseif($LASTEXITCODE-ne0){Fail-NoSend 'DB01_SESSION_AMBIGUOUS'}
+            $tabs=(& $playwright cli "-s=$senderSession" tab-list 2>&1|Out-String);if($LASTEXITCODE-ne0){Fail-NoSend 'DB01_TAB_LIST_FAILED'}
+            if($tabs-notmatch[regex]::Escape($activeSwitch.ConversationId)){$go=(& $playwright cli "-s=$senderSession" goto $activeSwitch.ConversationUrl 2>&1|Out-String);if($LASTEXITCODE-ne0){Fail-NoSend 'DB01_EXACT_NAVIGATION_FAILED'}}
+            $tabs2=(& $playwright cli "-s=$senderSession" tab-list 2>&1|Out-String);if($LASTEXITCODE-ne0-or$tabs2-notmatch[regex]::Escape($activeSwitch.ConversationId)){Fail-NoSend 'DB01_EXACT_CONTROL_TAB_NOT_FOUND'}
           }finally{Pop-Location}
 
-          try{$sw2=Get-CurrentSwitch}catch{Fail-NoSend 'FINAL_SWITCH_PARSE_FAILED' $terminal $_.Exception.Message}
-          if($sw2.Receipt-cne$sw.Receipt-or$sw2.Generation-cne$sw.Generation-or$sw2.ConversationId-cne$sw.ConversationId-or$sw2.ConversationUrl-cne$sw.ConversationUrl){Fail-NoSend 'CONTROL_BINDING_CHANGED_AT_SEND_BOUNDARY' $terminal ''}
+          try{$finalSwitch=Get-CurrentSwitch}catch{Fail-NoSend "FINAL_SWITCH_PARSE_FAILED: $($_.Exception.Message)"}
+          if($finalSwitch.Receipt-cne$activeSwitch.Receipt-or$finalSwitch.Generation-cne$activeSwitch.Generation-or$finalSwitch.ConversationId-cne$activeSwitch.ConversationId-or$finalSwitch.ConversationUrl-cne$activeSwitch.ConversationUrl){Fail-NoSend 'CONTROL_BINDING_CHANGED_AT_SEND_BOUNDARY'}
 
-          $env:GBB_SENDER_PATH=$senderPath;$env:GBB_SENDER_SESSION=$senderSession;$env:GBB_RUNTIME_ROOT=$runtimeRoot;$env:GBB_TARGET_URL=$sw.ConversationUrl;$env:GBB_PROMPT="Read GitHub directly. Rehydrate D22977/gpt-browser-bridge #43/#81/#88 and handle terminal receipt $terminal for card GBB-READY-RETURN-CLOSURE-01 as the current ACTIVE Control only. GitHub is durable authority."
+          $env:GBB_SENDER_PATH=$senderPath;$env:GBB_SENDER_SESSION=$senderSession;$env:GBB_RUNTIME_ROOT=$runtimeRoot;$env:GBB_TARGET_URL=$finalSwitch.ConversationUrl;$env:GBB_PROMPT="Read GitHub directly. Rehydrate D22977/gpt-browser-bridge #43/#81/#88 and handle terminal receipt $terminal for card $sourceCard as the current ACTIVE Control only. GitHub is durable authority."
           $script=@'
           import { pathToFileURL } from 'node:url';
           const mod = await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
@@ -129,12 +231,15 @@ jobs:
           const result=await mod.sendJob({prompt:process.env.GBB_PROMPT,attempt:1,conversationUrl:process.env.GBB_TARGET_URL,runtimeRoot:process.env.GBB_RUNTIME_ROOT,session:process.env.GBB_SENDER_SESSION,allowBackgroundTab:true});
           console.log(JSON.stringify({job_id:result.job.job_id,prompt_hash:result.job.prompt_hash}));
           '@
-          $scriptPath=Join-Path $env:RUNNER_TEMP "ready-return-doorbell-$terminal-$env:GITHUB_RUN_ID.mjs";Set-Content -LiteralPath $scriptPath -Value $script -Encoding utf8
-          @{status='SENDING';source_terminal_receipt=$terminal;active_switch_receipt=$sw.Receipt;target_generation=$sw.Generation;target_conversation_id=$sw.ConversationId;target_conversation_url=$sw.ConversationUrl;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+          $scriptPath=Join-Path $env:RUNNER_TEMP "ready-return-doorbell-$keyHash-$env:GITHUB_RUN_ID.mjs";Set-Content -LiteralPath $scriptPath -Value $script -Encoding utf8
+          @{status='SENDING';logical_key=$logicalKey;source_card_id=$sourceCard;source_terminal_receipt=$terminal;candidate_head=$candidateHead;active_switch_receipt=$finalSwitch.Receipt;target_generation=$finalSwitch.Generation;target_conversation_id=$finalSwitch.ConversationId;target_conversation_url=$finalSwitch.ConversationUrl;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
           try{
             $out=(& node $scriptPath 2>&1|Out-String).Trim();if($LASTEXITCODE-ne0){throw $out};$json=($out-split"`n"|Where-Object{$_.Trim().StartsWith('{')}|Select-Object -Last 1);if(-not$json){throw 'No sender JSON'};$sent=$json|ConvertFrom-Json
           }catch{
-            $detail=($_.Exception.Message-replace'[\r\n]+',' ');if($detail.Length-gt500){$detail=$detail.Substring(0,500)};$id=Publish(@('CONTROL_G10_G11_READY_RETURN_DOORBELL_V2','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_terminal_receipt: $terminal","diagnostic: $detail",'physical_send_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN receipt=$id"
+            $detail=($_.Exception.Message-replace'[\r\n]+',' ');if($detail.Length-gt500){$detail=$detail.Substring(0,500)}
+            $id=Publish-Canary 'UNCERTAIN_SEND_NO_BLIND_RETRY' 'UNKNOWN_AFTER_SEND_BOUNDARY' 'false' $finalSwitch.Receipt $finalSwitch.Generation $finalSwitch.ConversationId $finalSwitch.ConversationUrl "diagnostic: $detail";throw "UNCERTAIN_SEND_NO_BLIND_RETRY receipt=$id"
           }finally{Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue}
-          $st=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json;$st.status='SENT';$st.sent_at=(Get-Date).ToString('o');$st.sender_job_id=[string]$sent.job_id;$st.sender_prompt_hash=[string]$sent.prompt_hash;$st|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
-          $id=Publish(@('CONTROL_G10_G11_READY_RETURN_DOORBELL_V2','state: DELIVERED','decision: PASS_TRANSPORT_ONLY',"source_terminal_receipt: $terminal","active_switch_receipt: $($sw.Receipt)","target_control_generation: $($sw.Generation)","target_control_conversation_id: $($sw.ConversationId)","target_control_conversation_url: $($sw.ConversationUrl)","sender_module_blob: $expectedSenderBlob","sender_job_id: $($sent.job_id)","sender_prompt_hash: $($sent.prompt_hash)",'physical_send_count: 1','second_physical_send: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");Write-Output "DELIVERED receipt=$id"
+          $stored=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json;$stored.status='SENT';$stored.sent_at=(Get-Date).ToString('o');$stored.sender_job_id=[string]$sent.job_id;$stored.sender_prompt_hash=[string]$sent.prompt_hash;$stored|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+          $delivery=Publish-Canary 'DELIVERED' '1' 'false' $finalSwitch.Receipt $finalSwitch.Generation $finalSwitch.ConversationId $finalSwitch.ConversationUrl "sender_job_id: $($sent.job_id)`nsender_prompt_hash: $($sent.prompt_hash)"
+          $stored.delivery_receipt=$delivery;$stored.receipt_published=$true;$stored|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+          Write-Output "DELIVERED receipt=$delivery"
