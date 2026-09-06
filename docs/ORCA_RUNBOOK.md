@@ -1,5 +1,12 @@
 # GPT Browser Bridge ORCA Runbook
 
+Historical ORCA lane reference. Current cross-role entry is [AGENTS.md](../AGENTS.md)
+and [HANDOFF_CONTRACT.md](HANDOFF_CONTRACT.md). Herdr operators use
+[HERDR_RUNBOOK.md](HERDR_RUNBOOK.md); Web Control uses
+[WEB_CONTROL_RUNBOOK.md](WEB_CONTROL_RUNBOOK.md). Read current GitHub authority
+before these local commands. Fixed paths, titles and old success evidence do not
+establish current liveness or authorize a new terminal/send.
+
 This runbook is for the operator and Control Tower. The Supervisor is a
 deterministic recovery process: it may repair terminal routing, but it never
 decides `通過` / `退修`, edits source, or resends a ChatGPT prompt.
@@ -193,5 +200,8 @@ durable state and checkpoints, not on keep-awake.
 Stop and set a concrete `NEEDS_HUMAN` reason for authentication walls,
 CAPTCHA, unknown Git dirt, missing checkpoint/worktree, insufficient
 permission, three failed terminal restarts, or 20 minutes of ORCA outage.
+This is the historical local runtime hold: do not clear it or continue that failed
+lane. Return evidence to Control, which checks authorized alternatives and whether
+the actual blocker needs a human; the label alone does not make the owner a courier.
 Never use `git reset --hard`, `git clean`, `git stash`, automatic login,
 automatic Continue, or ChatGPT prompt resend as recovery.

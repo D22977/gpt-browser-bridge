@@ -1,5 +1,14 @@
 # GPT Browser Bridge 專案父工單
 
+> **歷史設計與執行紀錄；目前交接從 [AGENTS.md](../AGENTS.md) 開始。**
+> 現行共用規則見 [HANDOFF_CONTRACT.md](../docs/HANDOFF_CONTRACT.md)，
+> Web Control 見 [WEB_CONTROL_RUNBOOK.md](../docs/WEB_CONTROL_RUNBOOK.md)，
+> Herdr 見 [HERDR_RUNBOOK.md](../docs/HERDR_RUNBOOK.md)。
+> 當前 GitHub 工單與未被取代的 Control receipts 決定權威、scope、exact base、
+> Reviewer 身分／格式與重試額度。下文保留早期 ORCA 架構、固定路徑、卡序和驗收紀錄；
+> 不是 current-start，也不授權重跑舊卡。§20 舊啟動 prompt 不再作為現行 Web／Herdr 入口。
+> 未被目前權威修改的安全、角色分離與技術限制仍適用；本註記不授權 merge 或 runtime 切換。
+
 ## 0. 工單摘要
 
 * **專案名稱**：GPT Browser Bridge
@@ -627,7 +636,8 @@ D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\
 
 # 10. Project State
 
-`project_state.json` 是專案進度唯一真相。
+早期 ORCA lane 以 `project_state.json` 維護本機狀態機。現行專案語意進度以
+GitHub durable authority 為準；本機檔案保留執行／恢復與物理嘗試證據，不能反向覆蓋 GitHub。
 
 最小範例：
 
@@ -1258,7 +1268,7 @@ Q128 fresh-context T2 review pack
 
 ### G3-STATE-INVARIANT-METRICS（狀態機唯一真相）
 
-- 目標：對應清單 7/8/9/10/11：project_state.json 唯一真相（投影不得反向更新）；Shadow Mode hash invariant；transition validator dry-run 不寫入 state；run_events.jsonl／run_metrics.json 由程式產生；Morning Summary 在 COMPLETE／HALT／TIMEOUT／BLOCKED 共用出口更新。
+- 歷史目標：對應清單 7/8/9/10/11：當時的本機狀態機以 project_state.json 為準（投影不得反向更新）；Shadow Mode hash invariant；transition validator dry-run 不寫入 state；run_events.jsonl／run_metrics.json 由程式產生；Morning Summary 在 COMPLETE／HALT／TIMEOUT／BLOCKED 共用出口更新。現行語意權威依本文件開頭的 GitHub 規則。
 - 完成定義：
   - 狀態機測試套件（dry-run 前後 state hash 比對、shadow run 前後 hash、各出口 summary 產生時間戳）。
   - 產生器實作或既有 harness 補足；內容與實際執行一致。
@@ -1470,6 +1480,10 @@ blocked_reason=<明確原因>
 ---
 
 # 20. Control Tower 的啟動 Prompt
+
+以下保留原始建置 prompt 供歷史查核。現行啟動使用
+[Web Control 入口](../docs/WEB_CONTROL_RUNBOOK.md)；本機 transport 使用
+[Herdr 入口](../docs/HERDR_RUNBOOK.md)，不執行下方舊卡初始化步驟。
 
 將以下內容與本父工單一起交給本機 Control Tower：
 
