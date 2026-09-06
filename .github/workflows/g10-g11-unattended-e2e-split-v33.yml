@@ -1,0 +1,132 @@
+name: G10 G11 Unattended E2E Split V33
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: g10-g11-unattended-e2e-split-v33
+  cancel-in-progress: false
+
+jobs:
+  preflight-release:
+    if: >-
+      github.event.issue.number == 88 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_WAKE_V33')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: node {0}
+    steps:
+      - name: Verify authority and release stale V32 runner topology
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import fs from 'node:fs';
+          const repo='D22977/gpt-browser-bridge', issue=88;
+          const cardReceipt='5557596700', adjudication='5557592834';
+          const expectedSwitch='5555495204', expectedGeneration='010', expectedConversation='6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';
+          const staleParent='34014236280', staleChild='34015083736', staleHead='16798cf61bfe7c75eafcdaea261971838f31cc3f';
+          const token=process.env.GH_TOKEN, sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function api(route,init={}){const r=await fetch(`https://api.github.com/repos/${repo}${route}`,{...init,headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json','User-Agent':'g10-g11-v33',...(init.headers||{})}});const t=await r.text();if(!r.ok)throw new Error(`GitHub ${r.status} ${route}: ${t}`);if(!t)return null;try{return JSON.parse(t)}catch{return t}}
+          const first=b=>String(b||'').split(/\r?\n/,1)[0].trim();
+          const line=(b,k)=>{const m=String(b||'').match(new RegExp(`^${k}:\\s*(.*?)\\s*$`,'m'));return m?m[1]:null};
+          async function comment(id){const c=await api(`/issues/comments/${id}`);if(!Number.isSafeInteger(c.id)||!String(c.issue_url).endsWith('/issues/88'))throw new Error(`comment ${id} malformed`);return c}
+          async function recent(since){const out=[];for(let p=1;p<=50;p++){const xs=await api(`/issues/88/comments?since=${encodeURIComponent(since)}&per_page=100&page=${p}`);if(!Array.isArray(xs))throw new Error('comments not array');for(const c of xs){if(!Number.isSafeInteger(c.id)||typeof c.body!=='string')throw new Error('comment shape invalid');out.push(c)}if(xs.length<100)break}return out}
+          async function verify(){for(const id of [cardReceipt,adjudication,expectedSwitch])await comment(id);const a=await comment(expectedSwitch);if(first(a.body)!=='CONTROL_GENERATION_SWITCH_V1'||line(a.body,'state')!=='SWITCH_COMMITTED'||line(a.body,'new_generation')!==expectedGeneration||line(a.body,'new_conversation_id')!==expectedConversation||line(a.body,'new_status')!=='ACTIVE')throw new Error('current switch mismatch');for(const c of await recent(a.created_at)){if(String(c.id)===expectedSwitch||first(c.body)!=='CONTROL_GENERATION_SWITCH_V1')continue;if(BigInt(c.id)>BigInt(expectedSwitch))throw new Error(`newer switch evidence ${c.id}`)}return a}
+          async function publish(body){const x=await api(`/issues/${issue}/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body})});const rb=await comment(String(x.id));if(rb.body!==body)throw new Error('receipt readback mismatch');return String(x.id)}
+          const event=JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH,'utf8')), wake=String(event?.comment?.body||'');
+          if(first(wake)!=='CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_WAKE_V33'||line(wake,'source_repair_card')!==cardReceipt||line(wake,'source_adjudication')!==adjudication||line(wake,'source_current_switch')!==expectedSwitch)throw new Error('wake binding mismatch');
+          await verify();
+          const parent=await api(`/actions/runs/${staleParent}`), child=await api(`/actions/runs/${staleChild}`);
+          if(parent.name!=='G10 G11 Unattended E2E Repair Bootstrap V32')throw new Error('stale parent identity mismatch');
+          if(child.name!=='G10 G11 Ready Return Control Doorbell V2'||child.head_sha!==staleHead)throw new Error('stale child identity mismatch');
+          for(const run of [parent,child]){if(run.status!=='completed'){try{await api(`/actions/runs/${run.id}/cancel`,{method:'POST'})}catch(e){const now=await api(`/actions/runs/${run.id}`);if(now.status!=='completed')throw e}}}
+          for(let n=0;n<80;n++){const p=await api(`/actions/runs/${staleParent}`), c=await api(`/actions/runs/${staleChild}`);if(p.status==='completed'&&c.status==='completed')break;if(n===79)throw new Error('stale run cancellation timeout');await sleep(5000)}
+          await verify();
+          await publish(['CONTROL_G10_G11_UNATTENDED_E2E_V33_PREFLIGHT_RELEASE_V1','state: PASS',`source_repair_card: ${cardReceipt}`,`source_adjudication: ${adjudication}`,`source_current_switch: ${expectedSwitch}`,`stale_parent_run: ${staleParent}`,`stale_child_run: ${staleChild}`,'stale_candidate_acceptance: FORBIDDEN','physical_worker_prompt_count_for_repair03: 0','user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].join('\n'));
+
+  worker-repair:
+    needs: preflight-release
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 90
+    outputs:
+      terminal_id: ${{ steps.worker.outputs.terminal_id }}
+      candidate_head: ${{ steps.worker.outputs.candidate_head }}
+      worker_branch: ${{ steps.worker.outputs.worker_branch }}
+    defaults:
+      run:
+        shell: node {0}
+    steps:
+      - id: worker
+        name: Deliver one bounded repair Worker and stop after READY
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import fs from 'node:fs';import path from 'node:path';import crypto from 'node:crypto';import {spawnSync} from 'node:child_process';
+          const repo='D22977/gpt-browser-bridge', issue=88, cardReceipt='5557596700', cardId='GBB-UNATTENDED-RETURN-E2E-REPAIR-03';
+          const base='16798cf61bfe7c75eafcdaea261971838f31cc3f', branch='worker/g10-g11-unattended-return-e2e-repair-03';
+          const expectedSwitch='5555495204', expectedGeneration='010', expectedConversation='6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';
+          const herdr='C:\\Users\\Lupun\\AppData\\Local\\Programs\\Herdr\\bin\\herdr.exe', token=process.env.GH_TOKEN, sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const stateDir='D:\\AIWORK_RUNTIME\\GPT_BROWSER_BRIDGE\\g10-g11-unattended-e2e-v33', stateFile=path.join(stateDir,'repair03-send.json');fs.mkdirSync(stateDir,{recursive:true});
+          async function api(route,init={}){const r=await fetch(`https://api.github.com/repos/${repo}${route}`,{...init,headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json','User-Agent':'g10-g11-v33-worker',...(init.headers||{})}});const t=await r.text();if(!r.ok)throw new Error(`GitHub ${r.status} ${route}: ${t}`);if(!t)return null;try{return JSON.parse(t)}catch{return t}}
+          const first=b=>String(b||'').split(/\r?\n/,1)[0].trim();const line=(b,k)=>{const m=String(b||'').match(new RegExp(`^${k}:\\s*(.*?)\\s*$`,'m'));return m?m[1]:null};
+          async function comment(id){const c=await api(`/issues/comments/${id}`);if(!Number.isSafeInteger(c.id)||!String(c.issue_url).endsWith('/issues/88'))throw new Error(`comment ${id} malformed`);return c}
+          async function recent(since){const out=[];for(let p=1;p<=50;p++){const xs=await api(`/issues/88/comments?since=${encodeURIComponent(since)}&per_page=100&page=${p}`);if(!Array.isArray(xs))throw new Error('comments not array');for(const c of xs){if(!Number.isSafeInteger(c.id)||typeof c.body!=='string')throw new Error('comment shape invalid');out.push(c)}if(xs.length<100)break}return out}
+          async function verify(){const a=await comment(expectedSwitch);if(first(a.body)!=='CONTROL_GENERATION_SWITCH_V1'||line(a.body,'state')!=='SWITCH_COMMITTED'||line(a.body,'new_generation')!==expectedGeneration||line(a.body,'new_conversation_id')!==expectedConversation||line(a.body,'new_status')!=='ACTIVE')throw new Error('current switch mismatch');for(const c of await recent(a.created_at)){if(String(c.id)===expectedSwitch||first(c.body)!=='CONTROL_GENERATION_SWITCH_V1')continue;if(BigInt(c.id)>BigInt(expectedSwitch))throw new Error(`newer switch evidence ${c.id}`)}return a}
+          async function publish(body){const x=await api(`/issues/${issue}/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body})});const rb=await comment(String(x.id));if(rb.body!==body)throw new Error('receipt readback mismatch');return String(x.id)}
+          function herdrJson(args){const r=spawnSync(herdr,args,{encoding:'utf8',windowsHide:true,maxBuffer:8*1024*1024});if(r.error||r.status!==0)throw new Error(`Herdr failed: ${r.error?.message||r.stderr||r.stdout}`);return JSON.parse(String(r.stdout||'').trim())}
+          function genericWorkers(list){const a=Array.isArray(list?.result?.agents)?list.result.agents:[];return a.filter(x=>x&&x.agent==='codex'&&['idle','done'].includes(String(x.agent_status))&&!String(x.name||'').trim()&&String(x.cwd)==='C:\\WINDOWS\\system32')}
+          function exactAgent(list,pane,session){const a=Array.isArray(list?.result?.agents)?list.result.agents:[];return a.filter(x=>x&&String(x.pane_id)===pane&&String(x?.agent_session?.value)===session)}
+          await comment(cardReceipt);const anchor=await verify();
+          if(fs.existsSync(stateFile)){const s=JSON.parse(fs.readFileSync(stateFile,'utf8'));if(s.status==='SENDING')throw new Error('UNCERTAIN_SEND_NO_BLIND_RETRY');if(s.status==='SENT')throw new Error('NO_OP_DUPLICATE_WORKER_SEND')}
+          const inv=herdrJson(['agent','list']), eligible=genericWorkers(inv);if(eligible.length!==1)throw new Error(`GENERIC_WORKER_COUNT_${eligible.length}`);const pane=String(eligible[0].pane_id||''),session=String(eligible[0]?.agent_session?.value||'');if(!pane||!session)throw new Error('worker binding missing');await verify();
+          const prompt='Read GitHub directly. Execute only D22977/gpt-browser-bridge Issue #88 card 5557596700 / GBB-UNATTENDED-RETURN-E2E-REPAIR-03 as WORKER. Base exact 16798cf61bfe7c75eafcdaea261971838f31cc3f. Modify only the two allowed paths, push worker/g10-g11-unattended-return-e2e-repair-03, publish/read-back GBB_UNATTENDED_RETURN_E2E_REPAIR03_READY_V1, then stop. Do not act as Control/Reviewer and do not create/send generation011.';
+          const hash=crypto.createHash('sha256').update(prompt).digest('hex');fs.writeFileSync(stateFile,JSON.stringify({status:'SENDING',pane,session,prompt_hash:hash}));
+          let sent;try{sent=herdrJson(['agent','prompt',pane,prompt])}catch{throw new Error('UNCERTAIN_SEND_NO_BLIND_RETRY')}if(String(sent?.result?.type)!=='agent_prompted'||String(sent?.result?.agent?.pane_id)!==pane||String(sent?.result?.agent?.agent_session?.value)!==session)throw new Error('UNCERTAIN_SEND_NO_BLIND_RETRY');
+          const delivery=await publish(['CONTROL_G10_G11_UNATTENDED_E2E_REPAIR03_V33_DELIVERY_V1','state: DELIVERED',`source_repair_card: ${cardReceipt}`,`target_pane: ${pane}`,`target_agent_session: ${session}`,`prompt_sha256: ${hash}`,'physical_worker_prompt_count: 1','second_physical_prompt: false','post_dispatch_terminal_guard: ACTIVE','user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].join('\n'));fs.writeFileSync(stateFile,JSON.stringify({status:'SENT',delivery,pane,session}));
+          let terminal=null,idle=0;for(let n=0;n<320;n++){await verify();const ms=(await recent(anchor.created_at)).filter(c=>first(c.body)==='GBB_UNATTENDED_RETURN_E2E_REPAIR03_READY_V1'&&line(c.body,'card_id')===cardId);if(ms.length>1)throw new Error('multiple repair03 terminals');if(ms.length===1){terminal=ms[0];break}let now;try{now=herdrJson(['agent','list'])}catch{throw new Error('Herdr inventory unreadable during guard')}const ex=exactAgent(now,pane,session);if(ex.length!==1)throw new Error('bound Worker disappeared');idle=['idle','done'].includes(String(ex[0].agent_status))?idle+1:0;if(idle>=6)throw new Error('terminal missing after Worker idle/done');await sleep(15000)}
+          if(!terminal)throw new Error('repair03 terminal timeout');if(line(terminal.body,'state')!=='READY_FOR_CONTROL_CANARY')throw new Error(`repair03 terminal=${line(terminal.body,'state')}`);if(line(terminal.body,'candidate_parent')!==base)throw new Error('candidate parent mismatch');const head=line(terminal.body,'candidate_head'), wb=line(terminal.body,'worker_branch');if(!/^[0-9a-f]{40}$/.test(head||'')||wb!==branch||line(terminal.body,'selected_return_mechanism')!=='WORKFLOW_DISPATCH')throw new Error('READY binding invalid');
+          const ref=await api(`/git/ref/heads/${branch}`);if(String(ref?.object?.sha)!==head)throw new Error('remote branch/head mismatch');const commit=await api(`/commits/${head}`);if(String(commit?.parents?.[0]?.sha)!==base)throw new Error('remote parent mismatch');
+          await publish(['CONTROL_G10_G11_UNATTENDED_E2E_REPAIR03_V33_WORKER_STAGE_V1','state: READY_AND_LOCAL_RUNNER_RELEASE_PENDING',`source_terminal_receipt: ${terminal.id}`,`candidate_head: ${head}`,`worker_branch: ${branch}`,'physical_worker_prompt_count: 1','user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].join('\n'));
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,`terminal_id=${terminal.id}\ncandidate_head=${head}\nworker_branch=${branch}\n`);
+
+  doorbell-guard:
+    needs: worker-repair
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: node {0}
+    steps:
+      - name: Dispatch candidate after local runner release and guard terminal
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TERMINAL_ID: ${{ needs.worker-repair.outputs.terminal_id }}
+          CANDIDATE_HEAD: ${{ needs.worker-repair.outputs.candidate_head }}
+          WORKER_BRANCH: ${{ needs.worker-repair.outputs.worker_branch }}
+        run: |
+          const repo='D22977/gpt-browser-bridge', issue=88, cardReceipt='5557596700', cardId='GBB-UNATTENDED-RETURN-E2E-REPAIR-03';
+          const expectedSwitch='5555495204', expectedGeneration='010', expectedConversation='6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562', expectedUrl='https://chatgpt.com/c/6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';
+          const terminal=String(process.env.TERMINAL_ID||''), head=String(process.env.CANDIDATE_HEAD||''), branch=String(process.env.WORKER_BRANCH||''), token=process.env.GH_TOKEN, sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function api(route,init={}){const r=await fetch(`https://api.github.com/repos/${repo}${route}`,{...init,headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json','User-Agent':'g10-g11-v33-guard',...(init.headers||{})}});const t=await r.text();if(!r.ok)throw new Error(`GitHub ${r.status} ${route}: ${t}`);if(!t)return null;try{return JSON.parse(t)}catch{return t}}
+          const first=b=>String(b||'').split(/\r?\n/,1)[0].trim();const line=(b,k)=>{const m=String(b||'').match(new RegExp(`^${k}:\\s*(.*?)\\s*$`,'m'));return m?m[1]:null};
+          async function comment(id){const c=await api(`/issues/comments/${id}`);if(!Number.isSafeInteger(c.id)||!String(c.issue_url).endsWith('/issues/88'))throw new Error(`comment ${id} malformed`);return c}
+          async function recent(since){const out=[];for(let p=1;p<=50;p++){const xs=await api(`/issues/88/comments?since=${encodeURIComponent(since)}&per_page=100&page=${p}`);if(!Array.isArray(xs))throw new Error('comments not array');for(const c of xs){if(!Number.isSafeInteger(c.id)||typeof c.body!=='string')throw new Error('comment shape invalid');out.push(c)}if(xs.length<100)break}return out}
+          async function verify(){const a=await comment(expectedSwitch);if(first(a.body)!=='CONTROL_GENERATION_SWITCH_V1'||line(a.body,'state')!=='SWITCH_COMMITTED'||line(a.body,'new_generation')!==expectedGeneration||line(a.body,'new_conversation_id')!==expectedConversation||line(a.body,'new_status')!=='ACTIVE')throw new Error('current switch mismatch');for(const c of await recent(a.created_at)){if(String(c.id)===expectedSwitch||first(c.body)!=='CONTROL_GENERATION_SWITCH_V1')continue;if(BigInt(c.id)>BigInt(expectedSwitch))throw new Error(`newer switch evidence ${c.id}`)}return a}
+          async function publish(body){const x=await api(`/issues/${issue}/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body})});const rb=await comment(String(x.id));if(rb.body!==body)throw new Error('receipt readback mismatch');return String(x.id)}
+          if(!/^\d+$/.test(terminal)||!/^[0-9a-f]{40}$/.test(head)||branch!=='worker/g10-g11-unattended-return-e2e-repair-03')throw new Error('job output binding invalid');const anchor=await verify();const t=await comment(terminal);if(first(t.body)!=='GBB_UNATTENDED_RETURN_E2E_REPAIR03_READY_V1'||line(t.body,'state')!=='READY_FOR_CONTROL_CANARY'||line(t.body,'card_id')!==cardId||line(t.body,'candidate_head')!==head||line(t.body,'selected_return_mechanism')!=='WORKFLOW_DISPATCH')throw new Error('terminal binding mismatch');const ref=await api(`/git/ref/heads/${branch}`);if(String(ref?.object?.sha)!==head)throw new Error('remote head mismatch');
+          const idem=`${cardId}:${terminal}:${head}`;await api('/actions/workflows/g10-g11-ready-return-control-doorbell-v2.yml/dispatches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:branch,inputs:{source_terminal_receipt:terminal,source_card_id:cardId,candidate_head:head,idempotency_key:idem}})});
+          await publish(['CONTROL_G10_G11_UNATTENDED_E2E_REPAIR03_V33_CANARY_DISPATCH_V1','state: DISPATCHED',`source_terminal_receipt: ${terminal}`,`source_card_id: ${cardId}`,`candidate_head: ${head}`,`worker_branch: ${branch}`,'post_dispatch_terminal_guard: ACTIVE','local_worker_stage_completed_before_dispatch: true','user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].join('\n'));
+          let canary=null;for(let n=0;n<120;n++){await verify();const ms=(await recent(anchor.created_at)).filter(c=>first(c.body)==='CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1'&&line(c.body,'source_terminal_receipt')===terminal&&line(c.body,'source_card_id')===cardId&&line(c.body,'candidate_head')===head);if(ms.length>1)throw new Error('multiple downstream canaries');if(ms.length===1){canary=ms[0];break}await sleep(15000)}if(!canary){await publish(['CONTROL_G10_G11_UNATTENDED_E2E_RESULT_V1','state: CONTROL_REQUIRED',`source_repair_card: ${cardReceipt}`,`source_worker_terminal_receipt: ${terminal}`,`candidate_head: ${head}`,'downstream_canary_receipt: NONE','detail: downstream canary timeout under active GitHub-hosted guard','user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].join('\n'));throw new Error('downstream canary timeout')}
+          const state=line(canary.body,'state');if(state==='DELIVERED'&&line(canary.body,'active_switch_receipt')===expectedSwitch&&line(canary.body,'target_control_generation')===expectedGeneration&&line(canary.body,'target_control_conversation_id')===expectedConversation&&line(canary.body,'target_control_conversation_url')===expectedUrl&&line(canary.body,'physical_send_count')==='1'&&line(canary.body,'second_physical_send')==='false'&&line(canary.body,'user_relay_count')==='0'){
+            await publish(['CONTROL_G10_G11_UNATTENDED_E2E_RESULT_V1','state: PASS',`source_repair_card: ${cardReceipt}`,`source_worker_terminal_receipt: ${terminal}`,`candidate_head: ${head}`,`downstream_canary_receipt: ${canary.id}`,`active_switch_receipt: ${expectedSwitch}`,`target_control_generation: ${expectedGeneration}`,`target_control_conversation_id: ${expectedConversation}`,'physical_control_send_count: 1','second_physical_control_send: false','user_relay_count: 0','exact_control_wake: PASS','unattended_e2e: PASS',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].join('\n'));process.exit(0)}
+          await publish(['CONTROL_G10_G11_UNATTENDED_E2E_RESULT_V1','state: CONTROL_REQUIRED',`source_repair_card: ${cardReceipt}`,`source_worker_terminal_receipt: ${terminal}`,`candidate_head: ${head}`,`downstream_canary_receipt: ${canary.id}`,`detail: downstream state=${state||'MISSING'} did not satisfy PASS boundary`,'user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].join('\n'));throw new Error(`downstream canary not PASS: ${state}`);
