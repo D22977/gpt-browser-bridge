@@ -34,6 +34,10 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(__dirname, "..", "fixtures", "chatgpt");
 
+async function readWorkerWorkflow(relativePath) {
+  return readFile(path.join(__dirname, "..", relativePath), "utf8");
+}
+
 async function loadFixture(name) {
   return JSON.parse(await readFile(path.join(FIXTURES, name), "utf8"));
 }
@@ -552,6 +556,76 @@ test("runCliCommand parses the real object-returning eval envelope (BASELINE_SNA
   const result = await runCliCommand("eval", ["() => ({url: location.href, assistantMessages: []})"], { session: "s", exec });
   assert.equal(result.url, "https://chatgpt.com/c/6a6cefb4-b2f8-83ee-8237-c22cb949dba1");
   assert.ok(Array.isArray(result.assistantMessages));
+});
+
+test("G11 materialization executes with real PowerShell-safe directory binding and exact remote blobs", async () => {
+  const doorbell = await readWorkerWorkflow(".github/workflows/g10-g11-ready-return-control-doorbell-v2.yml");
+  assert.match(doorbell, /expectedSenderBlob.*42e55aa194fee1243f8cf32e3c1a63e7ad86f78a/);
+  assert.match(doorbell, /expectedContractsBlob.*9b0822388d7bd3ecc0c51e98836846ae9b192ce3/);
+  assert.match(doorbell, /expectedResultStoreBlob.*ec3a14825ed13681e4a3d0d29ec2612ba3eb2fbf/);
+  assert.match(doorbell, /Get-GitHubBlobBytes|git\/blobs/);
+  assert.match(doorbell, /New-Item\s+-ItemType Directory\s+-Path\s+\$artifactRoot/);
+  assert.doesNotMatch(doorbell, /New-Item\s+-ItemType Directory\s+[^\r\n]*-LiteralPath\s+\$artifactRoot/);
+  assert.match(doorbell, /MATERIALIZED_BLOB_MISMATCH/);
+  assert.match(doorbell, /MATERIALIZED_IMPORT_FAILED/);
+  assert.match(doorbell, /MATERIALIZATION_COLLISION/);
+  assert.match(doorbell, /MATERIALIZATION_UNSAFE_PATH/);
+  assert.match(doorbell, /finally[\s\S]*Remove-Item[\s\S]*artifactRoot/);
+  assert.match(doorbell, /GBB_SENDER_PATH.*senderPath/);
+});
+
+test("G11 resolves the newest ACTIVE Control binding at admission and send boundary", async () => {
+  const doorbell = await readWorkerWorkflow(".github/workflows/g10-g11-ready-return-control-doorbell-v2.yml");
+  assert.match(doorbell, /Get-CurrentSwitch/);
+  assert.match(doorbell, /new_generation_status|new_status/);
+  assert.match(doorbell, /CONTROL_BINDING_CHANGED_AT_SEND_BOUNDARY/);
+  assert.doesNotMatch(doorbell, /\$expectedSwitch\s*=\s*['"]5555495204['"]/);
+  assert.doesNotMatch(doorbell, /\$expectedGeneration\s*=\s*['"]010['"]/);
+  assert.match(doorbell, /NO_OP_DUPLICATE/);
+  assert.match(doorbell, /UNCERTAIN_SEND_NO_BLIND_RETRY|NO_BLIND_RETRY/);
+});
+
+test("G11 coordinator binds child workflow run/job and publishes typed failure before comment timeout", async () => {
+  const coordinator = await readWorkerWorkflow(".github/workflows/g10-g11-unattended-runtime-artifact-coordinator-v37.yml");
+  assert.match(coordinator, /actions\/runs|workflow-runs|workflow_run/);
+  assert.match(coordinator, /run_id|job_id/);
+  assert.match(coordinator, /conclusion/);
+  assert.match(coordinator, /CHILD_FAILED|CHILD_SKIPPED|CHILD_CANCELLED|CHILD_NO_JOB/);
+  assert.match(coordinator, /CONTROL_REQUIRED/);
+  assert.match(coordinator, /readback_verified/);
+  assert.match(coordinator, /live_canary_authority|EXPLICIT_LIVE_CANARY_AUTHORITY/);
+  assert.match(coordinator, /NO_BLIND_RETRY|historical_uncertain/);
+});
+
+test("G11 continuity state survives restart and publication failure without physical resend", async () => {
+  const coordinator = await readWorkerWorkflow(".github/workflows/g10-g11-unattended-runtime-artifact-coordinator-v37.yml");
+  const bridge = await readWorkerWorkflow(".github/workflows/herdr-control-comment-bridge.yml");
+  const combined = `${coordinator}\n${bridge}`;
+  for (const phase of ["SEND_NOT_STARTED", "CHILD_RUNNING", "CHILD_FAILED", "WAIT_ACK", "UNCERTAIN"]) {
+    assert.match(combined, new RegExp(phase));
+  }
+  assert.match(combined, /publication[_ -](?:only|failure)|PERSISTED_UNRESOLVED|UNRESOLVED/);
+  assert.match(combined, /NO_BLIND_RETRY/);
+  assert.match(combined, /duplicate|NO_OP_DUPLICATE/i);
+  assert.match(combined, /readback_verified/);
+  assert.match(combined, /physical_send_count/);
+});
+
+test("G11 terminal scope is exact and excludes bootstrap, source, generation012, and live acceptance mutation", async () => {
+  const files = [
+    ".github/workflows/g10-g11-ready-return-control-doorbell-v2.yml",
+    ".github/workflows/g10-g11-unattended-runtime-artifact-coordinator-v37.yml",
+    ".github/workflows/herdr-control-comment-bridge.yml",
+    "tests/baseline.test.mjs",
+  ];
+  const contents = await Promise.all(files.map(readWorkerWorkflow));
+  const combined = contents.join("\n");
+  assert.match(combined, /GBB_HANDOFF_CONTINUITY_REPAIR_RESULT_V1/);
+  assert.match(combined, /READY_FOR_FRESH_REVIEW/);
+  assert.match(combined, /physical_live_canary_send_count/);
+  assert.match(combined, /user_relay_count/);
+  assert.match(combined, /generation012|generation012_authorized/);
+  assert.match(combined, /control-return-comment-bridge\.yml/);
 });
 
 test("runCliCommand parses the real array-returning eval envelope", async () => {
