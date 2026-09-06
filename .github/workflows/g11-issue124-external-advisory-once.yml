@@ -9,6 +9,10 @@ permissions:
   issues: write
   pull-requests: read
 
+concurrency:
+  group: g11-issue124-external-advisory-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
 jobs:
   launch-advisory:
     if: >-
@@ -30,26 +34,182 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $ErrorActionPreference='Stop'
-          $repo='D22977/gpt-browser-bridge';$herdr='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
-          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g11-external-advisory';Accept='application/vnd.github+json'}
-          function Need([string]$b,[string]$p,[string]$n){$m=[regex]::Match($b,$p);if(-not$m.Success){throw"Malformed field: $n"};$m.Groups[1].Value}
-          function Publish([string]$text){$payload=@{body=$text}|ConvertTo-Json -Compress;$p=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/124/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30;$rb=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($p.id)" -Headers $headers -Method Get -TimeoutSec 30;if([string]$rb.body-cne$text){throw"readback mismatch $($p.id)"};return [string]$p.id}
-          $event=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json;$body=[string]$event.comment.body
-          $pr=Need $body '(?m)^advisory_pr:\s*(\d+)\s*$' 'advisory_pr';$head=Need $body '(?m)^advisory_pack_head:\s*([0-9a-f]{40})\s*$' 'advisory_pack_head';$idem=Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
-          if($pr-cne'130'-or$head-cne'0477e65945bd3ab0857d8ba5f3066ac80d553325'-or$idem-cne'GBB124-G11-EXT-ADVISORY-PR130-WAKE-V1'){throw'Advisory binding mismatch'}
-          if(-not(Test-Path -LiteralPath $herdr)){throw'Herdr CLI missing'}
-          $wake=[string]$event.comment.id;$root='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\external-advisory-once';New-Item -ItemType Directory -Force -Path $root|Out-Null;$state=Join-Path $root "$wake.json"
-          if(Test-Path -LiteralPath $state){$prior=Get-Content -LiteralPath $state -Raw|ConvertFrom-Json;if([string]$prior.status-eq'SENT'){[void](Publish (@('GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_V1','state: NO_OP_DUPLICATE',"source_wake_comment_id: $wake",'second_prompt_sent: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_verified: true')-join"`n");exit 0};if([string]$prior.status-eq'SENDING'){[void](Publish (@('GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_wake_comment_id: $wake",'second_prompt_sent: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_verified: true')-join"`n");throw'Existing SENDING'}}
-          $listRaw=&$herdr agent list;if($LASTEXITCODE-ne0){[void](Publish (@('GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_V1','state: BLOCKED_PRESEND','first_missing_capability: HERDR_AGENT_LIST',"source_wake_comment_id: $wake",'physical_prompt_count: 0','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_verified: true')-join"`n");throw'herdr list failed'}
-          $agents=@(($listRaw|ConvertFrom-Json).result.agents);$eligible=@($agents|Where-Object{$_.agent-eq'codex'-and$_.agent_status-in@('idle','done')-and$_.cwd-match'(?i)^C:\\WINDOWS\\system32$'-and([string]::IsNullOrWhiteSpace([string]$_.name)-or$_.name-notmatch'(?i)(review|mep|pr\d+)')-and$_.pane_id-and$_.agent_session.value})
-          if($eligible.Count-ne1){[void](Publish (@('GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_V1','state: BLOCKED_PRESEND',"first_missing_capability: GENERIC_CODEX_COORDINATOR_COUNT_$($eligible.Count)","source_wake_comment_id: $wake",'physical_prompt_count: 0','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_verified: true')-join"`n");throw"Coordinator count=$($eligible.Count)"}
-          $pane=[string]$eligible[0].pane_id;$session=[string]$eligible[0].agent_session.value;@{status='SENDING';pane_id=$pane;agent_session=$session;workflow_run_id=$env:GITHUB_RUN_ID}|ConvertTo-Json|Set-Content -LiteralPath $state -Encoding utf8
-          $pointer="Read GitHub directly. You are transport/orchestrator only, not reviewer. Rehydrate D22977/gpt-browser-bridge Issue #124 advisory authority 5562567305 and PR #130. Perform current ACCESS_CAPABILITY_CHECK for a NEW/fresh non-ChatGPT external Web AI reviewer; prefer Grok/xAI only if currently accessible. Do not create a ChatGPT formal Reviewer. If an admitted external route is live, open exactly one fresh external reviewer context and send only: 'Read D22977/gpt-browser-bridge PR #130 and Issue #124. You are a NEW/fresh external ADVISORY reviewer, not formal acceptance Reviewer. Publish/read back GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_RESULT_V1 as specified in the pack.' Then publish/read back GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_RESULT_V1 on #124 with state DELIVERED, reviewer identity/context binding, transport, write capability, user_relay_count 0. If no current route is live, publish the same protocol with state BLOCKED, first_missing_capability, reviewer_created false. Do not proxy-author advisory findings, do not mutate repo, do not blind retry."
-          $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($pointer))).ToLowerInvariant()
-          try{$raw=&$herdr agent prompt $pane $pointer;if($LASTEXITCODE-ne0){throw"herdr prompt exit=$LASTEXITCODE"};$r=$raw|ConvertFrom-Json;if([string]$r.result.type-cne'agent_prompted'-or[string]$r.result.agent.pane_id-cne$pane-or[string]$r.result.agent.agent_session.value-cne$session){throw'prompt identity mismatch'}}catch{[void](Publish (@('GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_wake_comment_id: $wake","target_pane: $pane","target_agent_session: $session","prompt_sha256: $hash",'physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','second_prompt_sent: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_verified: true')-join"`n");throw}
-          @{status='SENT';pane_id=$pane;agent_session=$session;workflow_run_id=$env:GITHUB_RUN_ID}|ConvertTo-Json|Set-Content -LiteralPath $state -Encoding utf8
-          $delivery=Publish (@('GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_COORDINATOR_DELIVERY_V1','state: SENT_WAIT_ADVISORY_LAUNCH_RESULT',"source_wake_comment_id: $wake","advisory_pr: $pr","advisory_pack_head: $head","target_pane: $pane","target_agent_session: $session","prompt_sha256: $hash",'physical_prompt_count: 1','second_prompt_sent: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_verified: true')-join"`n");"wake_id=$wake"|Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8;"delivery_receipt=$delivery"|Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D22977/gpt-browser-bridge'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $expectedPr = '130'
+          $expectedHead = '0477e65945bd3ab0857d8ba5f3066ac80d553325'
+          $expectedIdem = 'GBB124-G11-EXT-ADVISORY-PR130-WAKE-V2'
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            'User-Agent' = 'g11-external-advisory'
+            Accept = 'application/vnd.github+json'
+          }
+
+          function Need([string]$body, [string]$pattern, [string]$name) {
+            $m = [regex]::Match($body, $pattern)
+            if (-not $m.Success) { throw "Malformed field: $name" }
+            return $m.Groups[1].Value
+          }
+
+          function Publish124([string]$text) {
+            $payload = @{ body = $text } | ConvertTo-Json -Compress
+            $posted = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/124/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $readback = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$readback.body -cne $text) { throw "readback mismatch receipt=$($posted.id)" }
+            return [string]$posted.id
+          }
+
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $body = [string]$event.comment.body
+          $pr = Need $body '(?m)^advisory_pr:\s*(\d+)\s*$' 'advisory_pr'
+          $head = Need $body '(?m)^advisory_pack_head:\s*([0-9a-f]{40})\s*$' 'advisory_pack_head'
+          $idem = Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
+          if ($pr -cne $expectedPr -or $head -cne $expectedHead -or $idem -cne $expectedIdem) { throw 'Advisory binding mismatch' }
+          if (-not (Test-Path -LiteralPath $herdr)) { throw 'Herdr CLI missing' }
+          if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "Unexpected runner: $env:RUNNER_NAME" }
+          if (-not [Environment]::UserInteractive -or [System.Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'Runner not interactive' }
+
+          $wakeId = [string]$event.comment.id
+          $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\external-advisory-once'
+          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+          $statePath = Join-Path $stateRoot "$wakeId.json"
+
+          if (Test-Path -LiteralPath $statePath) {
+            $prior = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            if ([string]$prior.status -eq 'SENT') {
+              $noop = @(
+                'GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_V1'
+                'state: NO_OP_DUPLICATE'
+                "source_wake_comment_id: $wakeId"
+                'second_prompt_sent: false'
+                'user_relay_count: 0'
+                "workflow_run_id: $env:GITHUB_RUN_ID"
+                'readback_verified: true'
+              ) -join "`n"
+              [void](Publish124 $noop)
+              exit 0
+            }
+            if ([string]$prior.status -eq 'SENDING') {
+              $uncertain = @(
+                'GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_V1'
+                'state: UNCERTAIN_SEND_NO_BLIND_RETRY'
+                "source_wake_comment_id: $wakeId"
+                'second_prompt_sent: false'
+                'user_relay_count: 0'
+                "workflow_run_id: $env:GITHUB_RUN_ID"
+                'readback_verified: true'
+              ) -join "`n"
+              [void](Publish124 $uncertain)
+              throw 'Existing SENDING state'
+            }
+            throw "Unknown state=$($prior.status)"
+          }
+
+          $listRaw = & $herdr agent list
+          if ($LASTEXITCODE -ne 0) {
+            $blocked = @(
+              'GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_V1'
+              'state: BLOCKED_PRESEND'
+              'first_missing_capability: HERDR_AGENT_LIST'
+              "source_wake_comment_id: $wakeId"
+              'physical_prompt_count: 0'
+              'user_relay_count: 0'
+              "workflow_run_id: $env:GITHUB_RUN_ID"
+              'readback_verified: true'
+            ) -join "`n"
+            [void](Publish124 $blocked)
+            throw 'herdr agent list failed'
+          }
+
+          $agents = @(($listRaw | ConvertFrom-Json).result.agents)
+          $eligible = @($agents | Where-Object {
+            $_.agent -eq 'codex' -and
+            $_.agent_status -in @('idle','done') -and
+            $_.cwd -match '(?i)^C:\\WINDOWS\\system32$' -and
+            ([string]::IsNullOrWhiteSpace([string]$_.name) -or $_.name -notmatch '(?i)(review|mep|pr\d+)') -and
+            $_.pane_id -and $_.agent_session.value
+          })
+          if ($eligible.Count -ne 1) {
+            $blocked = @(
+              'GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_V1'
+              'state: BLOCKED_PRESEND'
+              "first_missing_capability: GENERIC_CODEX_COORDINATOR_COUNT_$($eligible.Count)"
+              "source_wake_comment_id: $wakeId"
+              'physical_prompt_count: 0'
+              'user_relay_count: 0'
+              "workflow_run_id: $env:GITHUB_RUN_ID"
+              'readback_verified: true'
+            ) -join "`n"
+            [void](Publish124 $blocked)
+            throw "Coordinator count=$($eligible.Count)"
+          }
+
+          $pane = [string]$eligible[0].pane_id
+          $session = [string]$eligible[0].agent_session.value
+          @{
+            status = 'SENDING'
+            pane_id = $pane
+            agent_session = $session
+            workflow_run_id = $env:GITHUB_RUN_ID
+            observed_at = (Get-Date).ToString('o')
+          } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+          $pointer = "Read GitHub directly. You are transport/orchestrator only, not reviewer. Rehydrate D22977/gpt-browser-bridge Issue #124 advisory authority 5562567305 and PR #130. Perform current ACCESS_CAPABILITY_CHECK for a NEW/fresh non-ChatGPT external Web AI reviewer; prefer Grok/xAI only if currently accessible. Do not create a ChatGPT formal Reviewer. If an admitted external route is live, open exactly one fresh external reviewer context and send only: 'Read D22977/gpt-browser-bridge PR #130 and Issue #124. You are a NEW/fresh external ADVISORY reviewer, not formal acceptance Reviewer. Publish/read back GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_RESULT_V1 as specified in the pack.' Then publish/read back GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_RESULT_V1 on #124 with state DELIVERED, reviewer identity/context binding, transport, write capability, user_relay_count 0. If no current route is live, publish the same protocol with state BLOCKED, first_missing_capability, reviewer_created false. Do not proxy-author advisory findings, do not mutate repo, do not blind retry. GitHub is authority."
+          $promptHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($pointer))).ToLowerInvariant()
+
+          try {
+            $raw = & $herdr agent prompt $pane $pointer
+            if ($LASTEXITCODE -ne 0) { throw "herdr prompt exit=$LASTEXITCODE" }
+            $response = $raw | ConvertFrom-Json
+            if ([string]$response.result.type -cne 'agent_prompted') { throw 'Unexpected prompt result type' }
+            if ([string]$response.result.agent.pane_id -cne $pane) { throw 'Prompt pane mismatch' }
+            if ([string]$response.result.agent.agent_session.value -cne $session) { throw 'Prompt session mismatch' }
+          } catch {
+            $uncertain = @(
+              'GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_V1'
+              'state: UNCERTAIN_SEND_NO_BLIND_RETRY'
+              "source_wake_comment_id: $wakeId"
+              "target_pane: $pane"
+              "target_agent_session: $session"
+              "prompt_sha256: $promptHash"
+              'physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY'
+              'second_prompt_sent: false'
+              'user_relay_count: 0'
+              "diagnostic: $($_.Exception.Message -replace '[\r\n]+',' ')"
+              "workflow_run_id: $env:GITHUB_RUN_ID"
+              'readback_verified: true'
+            ) -join "`n"
+            [void](Publish124 $uncertain)
+            throw
+          }
+
+          @{
+            status = 'SENT'
+            pane_id = $pane
+            agent_session = $session
+            workflow_run_id = $env:GITHUB_RUN_ID
+            sent_at = (Get-Date).ToString('o')
+          } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+          $delivery = @(
+            'GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_COORDINATOR_DELIVERY_V1'
+            'state: SENT_WAIT_ADVISORY_LAUNCH_RESULT'
+            "source_wake_comment_id: $wakeId"
+            "advisory_pr: $pr"
+            "advisory_pack_head: $head"
+            "target_pane: $pane"
+            "target_agent_session: $session"
+            "prompt_sha256: $promptHash"
+            'physical_prompt_count: 1'
+            'second_prompt_sent: false'
+            'user_relay_count: 0'
+            "workflow_run_id: $env:GITHUB_RUN_ID"
+            'readback_verified: true'
+          ) -join "`n"
+          $deliveryReceipt = Publish124 $delivery
+          "wake_id=$wakeId" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "delivery_receipt=$deliveryReceipt" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   guard-advisory:
     needs: launch-advisory
@@ -63,9 +223,70 @@ jobs:
           DELIVERY: ${{ needs.launch-advisory.outputs.delivery_receipt }}
         shell: pwsh
         run: |
-          $ErrorActionPreference='Stop';$repo='D22977/gpt-browser-bridge';$headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g11-advisory-guard';Accept='application/vnd.github+json'}
-          function Comments{$all=[System.Collections.Generic.List[object]]::new();for($p=1;$p-le100;$p++){ $xs=@(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/124/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30);foreach($x in$xs){if($null-ne$x){[void]$all.Add($x)}};if($xs.Count-lt100){break}};$all.ToArray()}
-          function Publish([string]$text){$payload=@{body=$text}|ConvertTo-Json -Compress;$x=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/124/comments" -Headers $headers -Method Post -Body $payload -ContentType'application/json' -TimeoutSec 30;$rb=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($x.id)" -Headers $headers -Method Get -TimeoutSec 30;if([string]$rb.body-cne$text){throw'guard readback mismatch'}}
-          $launch=$null;$result=$null;for($i=0;$i-lt60;$i++){Start-Sleep -Seconds 15;$cs=@(Comments);$ls=@($cs|Where-Object{[string]$_.body-match'(?m)^GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_RESULT_V1\s*$'-and[string]$_.body-match"(?m)^source_wake_comment_id:\s*$([regex]::Escape($env:WAKE_ID))\s*$"}|Sort-Object{[int64]$_.id});if($ls.Count-gt1){throw'Multiple advisory launch results'};if($ls.Count-eq1){$launch=$ls[0]};$rs=@($cs|Where-Object{[string]$_.body-match'(?m)^GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_RESULT_V1\s*$'}|Sort-Object{[int64]$_.id});if($rs.Count-gt0){$result=$rs[-1];break};if($null-ne$launch-and[string]$launch.body-match'(?m)^state:\s*(BLOCKED|READ_PASS_WRITE_BLOCKED)\s*$'){break}}
-          if($null-ne$result){$state='ADVISORY_RESULT_OBSERVED';$ref=[string]$result.id}elseif($null-ne$launch){$m=[regex]::Match([string]$launch.body,'(?m)^state:\s*([^\r\n]+)');$state="LAUNCH_$($m.Groups[1].Value.Trim())";$ref=[string]$launch.id}else{$state='BLOCKED_TIMEOUT_NO_LAUNCH_OR_RESULT';$ref='NONE'}
-          $terminal=@('GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_GUARD_V1',"state: $state","source_wake_comment_id: $env:WAKE_ID","source_delivery_receipt: $env:DELIVERY","observed_receipt: $ref",'user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_verified: true')-join"`n";Publish $terminal
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D22977/gpt-browser-bridge'
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            'User-Agent' = 'g11-advisory-guard'
+            Accept = 'application/vnd.github+json'
+          }
+
+          function GetComments {
+            $all = [System.Collections.Generic.List[object]]::new()
+            for ($page = 1; $page -le 100; $page++) {
+              $xs = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/124/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+              foreach ($x in $xs) { if ($null -ne $x) { [void]$all.Add($x) } }
+              if ($xs.Count -lt 100) { break }
+            }
+            return $all.ToArray()
+          }
+
+          function Publish124([string]$text) {
+            $payload = @{ body = $text } | ConvertTo-Json -Compress
+            $posted = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/124/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $readback = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$readback.body -cne $text) { throw "guard readback mismatch receipt=$($posted.id)" }
+          }
+
+          $launch = $null
+          $result = $null
+          for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            Start-Sleep -Seconds 15
+            $comments = @(GetComments)
+            $launches = @($comments | Where-Object {
+              [string]$_.body -match '(?m)^GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_LAUNCH_RESULT_V1\s*$' -and
+              [string]$_.body -match "(?m)^source_wake_comment_id:\s*$([regex]::Escape($env:WAKE_ID))\s*$"
+            } | Sort-Object { [int64]$_.id })
+            if ($launches.Count -gt 1) { throw 'Multiple advisory launch results' }
+            if ($launches.Count -eq 1) { $launch = $launches[0] }
+
+            $results = @($comments | Where-Object {
+              [string]$_.body -match '(?m)^GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_RESULT_V1\s*$'
+            } | Sort-Object { [int64]$_.id })
+            if ($results.Count -gt 0) { $result = $results[-1]; break }
+            if ($null -ne $launch -and [string]$launch.body -match '(?m)^state:\s*(BLOCKED|READ_PASS_WRITE_BLOCKED)\s*$') { break }
+          }
+
+          if ($null -ne $result) {
+            $state = 'ADVISORY_RESULT_OBSERVED'
+            $observedReceipt = [string]$result.id
+          } elseif ($null -ne $launch) {
+            $m = [regex]::Match([string]$launch.body, '(?m)^state:\s*([^\r\n]+)')
+            $state = "LAUNCH_$($m.Groups[1].Value.Trim())"
+            $observedReceipt = [string]$launch.id
+          } else {
+            $state = 'BLOCKED_TIMEOUT_NO_LAUNCH_OR_RESULT'
+            $observedReceipt = 'NONE'
+          }
+
+          $terminal = @(
+            'GBB_HANDOFF_CONTINUITY_EXTERNAL_ADVISORY_GUARD_V1'
+            "state: $state"
+            "source_wake_comment_id: $env:WAKE_ID"
+            "source_delivery_receipt: $env:DELIVERY"
+            "observed_receipt: $observedReceipt"
+            'user_relay_count: 0'
+            "workflow_run_id: $env:GITHUB_RUN_ID"
+            'readback_verified: true'
+          ) -join "`n"
+          Publish124 $terminal
