@@ -49,7 +49,7 @@ jobs:
           $repo='D22977/gpt-browser-bridge'; $issue=88
           $expectedSwitch='5555495204'; $expectedGeneration='010';$expectedConversationId='6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';$expectedConversationUrl='https://chatgpt.com/c/6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562'
           $expectedSenderBlob='42e55aa194fee1243f8cf32e3c1a63e7ad86f78a'
-          $allowedSourceCards=@('GBB-UNATTENDED-RETURN-TRANSPORT-01','GBB-READY-RETURN-CLOSURE-01','GBB-UNATTENDED-RETURN-E2E-REPAIR-03')
+          $allowedSourceCards=@('GBB-UNATTENDED-RETURN-TRANSPORT-01','GBB-READY-RETURN-CLOSURE-01','GBB-UNATTENDED-RETURN-E2E-REPAIR-03','GBB-UNATTENDED-COMPOSER-SENDER-REPAIR-04','GBB-UNATTENDED-DOORBELL-BINDING-REPAIR-05')
           $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g10-g11-ready-return-doorbell-v2';Accept='application/vnd.github+json'}
           $stateRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-ready-return-doorbell-v2\state'
           New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
@@ -212,7 +212,9 @@ jobs:
           $isTransportTerminal=Has-Protocol $terminalComment 'GBB_UNATTENDED_RETURN_TRANSPORT_READY_V1'
           $isClosureTerminal=Has-Protocol $terminalComment 'CONTROL_G10_G11_READY_RETURN_GUARD_V2_TERMINAL_V1'
           $isRepair03Terminal=Has-Protocol $terminalComment 'GBB_UNATTENDED_RETURN_E2E_REPAIR03_READY_V1'
-          if(-not($isTransportTerminal-or$isClosureTerminal-or$isRepair03Terminal)){Fail-NoSend 'UNRECOGNIZED_SOURCE_TERMINAL'}
+          $isRepair04Terminal=Has-Protocol $terminalComment 'GBB_UNATTENDED_COMPOSER_SENDER_REPAIR04_READY_V1'
+          $isRepair05Terminal=Has-Protocol $terminalComment 'GBB_UNATTENDED_DOORBELL_BINDING_REPAIR05_READY_V1'
+          if(-not($isTransportTerminal-or$isClosureTerminal-or$isRepair03Terminal-or$isRepair04Terminal-or$isRepair05Terminal)){Fail-NoSend 'UNRECOGNIZED_SOURCE_TERMINAL'}
           $terminalCard=[regex]::Match($terminalBody,'(?m)^card_id:\s*([A-Za-z0-9._:-]+)\s*$')
           if(-not$terminalCard.Success-or$terminalCard.Groups[1].Value-cne$sourceCard){Fail-NoSend 'SOURCE_TERMINAL_CARD_MISMATCH'}
           $terminalState=[regex]::Match($terminalBody,'(?m)^state:\s*(READY_FOR_CONTROL_CANARY|BLOCKED|CONTROL_REQUIRED)\s*$')

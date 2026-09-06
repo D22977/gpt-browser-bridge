@@ -1214,6 +1214,36 @@ test("REPAIR-03 terminal validation binds its exact marker, card, head, and mech
   assert.equal(evaluateTerminalFixture(doorbell, { marker, cardId, candidateHead: head, mechanism: "DIRECT_FALLBACK" }).reason, "SOURCE_TERMINAL_MECHANISM_MISMATCH");
 });
 
+test("REPAIR-05 source-card admission preserves Repair04 and rejects unknown cards", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  const allowed = new Set(extractPowerShellArray(doorbell, "allowedSourceCards"));
+  assert.equal(allowed.has("GBB-UNATTENDED-DOORBELL-BINDING-REPAIR-05"), true);
+  assert.equal(allowed.has("GBB-UNATTENDED-COMPOSER-SENDER-REPAIR-04"), true);
+  assert.equal(allowed.has("GBB-UNAUTHORIZED-SOURCE"), false);
+});
+
+test("REPAIR-05 terminal validation admits Repair05 and preserves exact Repair04 binding", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  const repair05 = {
+    marker: "GBB_UNATTENDED_DOORBELL_BINDING_REPAIR05_READY_V1",
+    cardId: "GBB-UNATTENDED-DOORBELL-BINDING-REPAIR-05",
+    candidateHead: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  };
+  assert.deepEqual(evaluateTerminalFixture(doorbell, repair05), { accepted: true, marker: repair05.marker, cardId: repair05.cardId, candidateHead: repair05.candidateHead });
+  assert.equal(evaluateTerminalFixture(doorbell, { ...repair05, terminalCardId: "GBB-UNAUTHORIZED-SOURCE" }).reason, "SOURCE_TERMINAL_CARD_MISMATCH");
+  assert.equal(evaluateTerminalFixture(doorbell, { ...repair05, terminalHeadValue: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }).reason, "SOURCE_TERMINAL_HEAD_MISMATCH");
+  assert.equal(evaluateTerminalFixture(doorbell, { ...repair05, marker: "UNKNOWN_TERMINAL_V1" }).reason, "UNRECOGNIZED_SOURCE_TERMINAL");
+  assert.equal(evaluateTerminalFixture(doorbell, { ...repair05, mechanism: "DIRECT_FALLBACK" }).reason, "SOURCE_TERMINAL_MECHANISM_MISMATCH");
+
+  const repair04 = {
+    marker: "GBB_UNATTENDED_COMPOSER_SENDER_REPAIR04_READY_V1",
+    cardId: "GBB-UNATTENDED-COMPOSER-SENDER-REPAIR-04",
+    candidateHead: "034c2e47d07ee58d19adbb90b94ee1d7a21a8f71",
+  };
+  assert.deepEqual(evaluateTerminalFixture(doorbell, repair04), { accepted: true, marker: repair04.marker, cardId: repair04.cardId, candidateHead: repair04.candidateHead });
+  assert.match(doorbell, /42e55aa194fee1243f8cf32e3c1a63e7ad86f78a/);
+});
+
 test("current switch fixture accepts only exact ACTIVE binding and fails closed on malformed or newer evidence", async () => {
   const { doorbell } = await readTransportWorkflows();
   const exact = {
