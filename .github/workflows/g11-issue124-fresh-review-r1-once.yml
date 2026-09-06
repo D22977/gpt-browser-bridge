@@ -1,0 +1,261 @@
+name: G11 Issue124 Fresh Review R1 One Shot
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  REVIEW_REQUEST_ID: GBB124-G11-R1-38DA7377-20260906
+  REVIEW_REQUEST_RECEIPT: "5560026863"
+  CANDIDATE_HEAD: 38da7377f9b9d1610dd44aa869b861bb8500ccc9
+  SOURCE_WORKER_READY: "5560002300"
+  SOURCE_CARD_ID: GBB-HANDOFF-CONTINUITY-REPAIR-01-G11
+
+concurrency:
+  group: g11-issue124-fresh-review-r1-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  launch-fresh-reviewer:
+    name: Launch exactly one fresh WebGPT Reviewer
+    if: >-
+      github.event.issue.number == 124 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'HERDR_FRESH_REVIEW_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Validate authority and prompt Herdr coordinator once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D22977/gpt-browser-bridge'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-g11-fresh-review-r1'; Accept = 'application/vnd.github+json' }
+
+          function Need([string]$body, [string]$pattern, [string]$name) {
+            $m = [regex]::Match($body, $pattern)
+            if (-not $m.Success) { throw "Malformed HERDR_FRESH_REVIEW_WAKE_V1 field: $name" }
+            return $m.Groups[1].Value
+          }
+          function Get-AllComments([int]$issueNumber) {
+            $all = [System.Collections.Generic.List[object]]::new()
+            for ($page = 1; $page -le 100; $page++) {
+              $xs = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issueNumber/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30
+              $arr = @($xs)
+              foreach ($x in $arr) { if ($null -ne $x) { [void]$all.Add($x) } }
+              if ($arr.Count -lt 100) { break }
+            }
+            return $all.ToArray()
+          }
+          function Publish124([string]$text) {
+            $payload = @{ body = $text } | ConvertTo-Json -Compress
+            $p = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/124/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($p.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$rb.body -cne $text) { throw "Issue124 readback mismatch id=$($p.id)" }
+            return [string]$p.id
+          }
+          function Resolve-CurrentSwitch {
+            $switches = @(Get-AllComments 88 | Where-Object {
+              [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+              [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
+              [string]$_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
+            } | Sort-Object { [int64]$_.id })
+            if ($switches.Count -eq 0) { throw 'No ACTIVE Control switch' }
+            $latest = $switches[-1]
+            $gen = [regex]::Match([string]$latest.body, '(?m)^new_generation:\s*(\d{3})\s*$')
+            if (-not $gen.Success) { throw 'Latest ACTIVE switch malformed' }
+            return [pscustomobject]@{ Receipt=[string]$latest.id; Generation=$gen.Groups[1].Value }
+          }
+
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          if ($event.repository.full_name -cne $repo) { throw 'Wrong repository' }
+          if ([int]$event.issue.number -ne 124) { throw 'Wrong issue' }
+          if ($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong actor' }
+          $body = [string]$event.comment.body
+          if ($body -notmatch '(?m)^HERDR_FRESH_REVIEW_WAKE_V1\s*$') { throw 'Missing wake header' }
+          $requestedGen = Need $body '(?m)^control_generation:\s*(\d{3})\s*$' 'control_generation'
+          $requestedReview = Need $body '(?m)^review_request_id:\s*([A-Za-z0-9._:-]+)\s*$' 'review_request_id'
+          $sourceReview = Need $body '(?m)^source_review_request_receipt:\s*(\d+)\s*$' 'source_review_request_receipt'
+          $head = Need $body '(?m)^candidate_head:\s*([0-9a-f]{40})\s*$' 'candidate_head'
+          $idem = Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
+          if ($requestedReview -cne $env:REVIEW_REQUEST_ID) { throw 'Wrong review_request_id' }
+          if ($sourceReview -cne $env:REVIEW_REQUEST_RECEIPT) { throw 'Wrong review request receipt' }
+          if ($head -cne $env:CANDIDATE_HEAD) { throw 'Wrong candidate head' }
+          if ($idem -cne 'GBB124-HERDR-FRESH-REVIEW-R1-38DA7377-V1') { throw 'Wrong idempotency key' }
+
+          $review = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$sourceReview" -Headers $headers -Method Get -TimeoutSec 30
+          if ([string]$review.issue_url -notmatch '/issues/124$') { throw 'Review request is not on Issue124' }
+          if ([string]$review.body -notmatch [regex]::Escape($env:REVIEW_REQUEST_ID) -or [string]$review.body -notmatch [regex]::Escape($env:CANDIDATE_HEAD)) { throw 'Review request binding mismatch' }
+          $sw = Resolve-CurrentSwitch
+          if ($requestedGen -cne $sw.Generation) { throw "Stale requested generation=$requestedGen active=$($sw.Generation)" }
+
+          $whoami = (& whoami).Trim()
+          $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+          if ($whoami -notmatch '(?i)^d22977\\lupun$') { throw "Unexpected Windows user: $whoami" }
+          if (-not [Environment]::UserInteractive -or $sessionId -eq 0) { throw 'Runner is not interactive' }
+          if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "Unexpected runner=$env:RUNNER_NAME" }
+          if (-not (Test-Path -LiteralPath $herdr)) { throw 'Herdr CLI missing' }
+
+          $wakeId = [string]$event.comment.id
+          $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\github-event-herdr-bridge\state-g11-fresh-review-r1'
+          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+          $statePath = Join-Path $stateRoot "$wakeId.json"
+          if (Test-Path -LiteralPath $statePath) {
+            $prior = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            if ([string]$prior.status -eq 'SENT') {
+              [void](Publish124 (@(
+                'HERDR_FRESH_REVIEW_COORDINATOR_DELIVERY_V1',
+                'state: NO_OP_DUPLICATE',
+                "source_wake_comment_id: $wakeId",
+                "review_request_id: $env:REVIEW_REQUEST_ID",
+                "candidate_head: $env:CANDIDATE_HEAD",
+                'second_prompt_sent: false',
+                'user_relay_count: 0',
+                "workflow_run_id: $env:GITHUB_RUN_ID",
+                'readback_required: true'
+              ) -join "`n"))
+              exit 0
+            }
+            if ([string]$prior.status -eq 'SENDING') {
+              [void](Publish124 (@(
+                'HERDR_FRESH_REVIEW_COORDINATOR_DELIVERY_V1',
+                'state: UNCERTAIN_SEND_NO_BLIND_RETRY',
+                "source_wake_comment_id: $wakeId",
+                "review_request_id: $env:REVIEW_REQUEST_ID",
+                "candidate_head: $env:CANDIDATE_HEAD",
+                'second_prompt_sent: false',
+                'user_relay_count: 0',
+                "workflow_run_id: $env:GITHUB_RUN_ID",
+                'readback_required: true'
+              ) -join "`n"))
+              throw 'Existing SENDING state; no blind retry'
+            }
+          }
+
+          $listRaw = & $herdr agent list
+          if ($LASTEXITCODE -ne 0) {
+            [void](Publish124 (@('HERDR_FRESH_REVIEW_COORDINATOR_GUARD_V1','state: BLOCKED_PRESEND','reason: HERDR_AGENT_LIST_FAILED',"source_wake_comment_id: $wakeId","review_request_id: $env:REVIEW_REQUEST_ID","candidate_head: $env:CANDIDATE_HEAD",'physical_prompt_count: 0','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true') -join "`n"))
+            throw 'herdr agent list failed'
+          }
+          $list = $listRaw | ConvertFrom-Json
+          $agents = @($list.result.agents)
+          $eligible = @($agents | Where-Object {
+            $_.agent -eq 'codex' -and
+            $_.agent_status -in @('idle','done') -and
+            $_.cwd -match '(?i)^C:\\WINDOWS\\system32$' -and
+            ([string]::IsNullOrWhiteSpace([string]$_.name) -or $_.name -notmatch '(?i)(review|mep|pr\d+)') -and
+            $_.pane_id -and $_.agent_session.value
+          })
+          if ($eligible.Count -ne 1) {
+            [void](Publish124 (@('HERDR_FRESH_REVIEW_COORDINATOR_GUARD_V1','state: BLOCKED_PRESEND',"reason: GENERIC_CODEX_COORDINATOR_COUNT_$($eligible.Count)","source_wake_comment_id: $wakeId","review_request_id: $env:REVIEW_REQUEST_ID","candidate_head: $env:CANDIDATE_HEAD",'physical_prompt_count: 0','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true') -join "`n"))
+            throw "Expected exactly one generic Codex coordinator; count=$($eligible.Count)"
+          }
+          $target = $eligible[0]
+          $pane = [string]$target.pane_id
+          $agentSession = [string]$target.agent_session.value
+          $sw2 = Resolve-CurrentSwitch
+          if ($sw2.Receipt -cne $sw.Receipt -or $sw2.Generation -cne $sw.Generation) { throw 'ACTIVE Control changed before prompt boundary' }
+
+          @{ status='SENDING'; pane_id=$pane; agent_session=$agentSession; workflow_run_id=$env:GITHUB_RUN_ID; active_switch=$sw.Receipt; observed_at=(Get-Date).ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+          $minimalWake = "Read GitHub directly. You are the ONE NEW fresh independent ChatGPT Web formal Reviewer for D22977/gpt-browser-bridge Issue #124 review request $env:REVIEW_REQUEST_ID. Review exact head $env:CANDIDATE_HEAD and publish/read back exactly one GBB_HANDOFF_CONTINUITY_FRESH_REVIEW_RESULT_V1 on #124. Do not mutate files, merge, release, run live acceptance, create generation012, or act as Control/Worker/Herdr."
+          $prompt = "Read GitHub directly. Rehydrate D22977/gpt-browser-bridge Issue #124 review request receipt $env:REVIEW_REQUEST_RECEIPT and completion authority 5559953075. You are transport/coordinator only, NOT the Reviewer. Perform ACCESS_CAPABILITY_CHECK_V1 for a currently admitted fresh ChatGPT Web route. Prefer the historically proven Codex in-app Browser / automation-owned isolated fresh-tab route if currently live. Do not use Control011 conversation, this coordinator/Worker context, any prior Reviewer context, DB01 repair, or the human/default browser as the Reviewer context. Create exactly one NEW/fresh independent ChatGPT Web conversation and send only this minimal wake pointer: '$minimalWake' Then publish/read-back exactly one GBB_HANDOFF_CONTINUITY_FRESH_REVIEW_LAUNCH_RESULT_V1 on Issue #124 binding source_wake_comment_id: $wakeId; source_review_request_receipt: $env:REVIEW_REQUEST_RECEIPT; review_request_id: $env:REVIEW_REQUEST_ID; candidate_head: $env:CANDIDATE_HEAD; herdr_pane: $pane; herdr_agent_session: $agentSession; state: DELIVERED; fresh_reviewer_conversation_id/url or equivalent exact binding; transport_selected; user_relay_count: 0; readback_verified: true. If no currently admitted fresh-WebGPT route is live, publish/read-back the same protocol with state: BLOCKED and first_missing_capability, fresh_reviewer_created: false, user_relay_count: 0. Do not review the candidate yourself and do not blind retry any browser/send ambiguity. GitHub is authority."
+          $promptHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($prompt))).ToLowerInvariant()
+          try {
+            $raw = & $herdr agent prompt $pane $prompt
+            if ($LASTEXITCODE -ne 0) { throw "herdr agent prompt exit=$LASTEXITCODE" }
+            $result = $raw | ConvertFrom-Json
+            if ([string]$result.result.type -cne 'agent_prompted') { throw 'Unexpected prompt result type' }
+            if ([string]$result.result.agent.pane_id -cne $pane) { throw 'Prompt pane mismatch' }
+            if ([string]$result.result.agent.agent_session.value -cne $agentSession) { throw 'Prompt session mismatch' }
+          } catch {
+            [void](Publish124 (@('HERDR_FRESH_REVIEW_COORDINATOR_DELIVERY_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_wake_comment_id: $wakeId","review_request_id: $env:REVIEW_REQUEST_ID","candidate_head: $env:CANDIDATE_HEAD","target_pane: $pane","target_agent_session: $agentSession","prompt_sha256: $promptHash",'physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','second_prompt_sent: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true') -join "`n"))
+            throw
+          }
+          @{ status='SENT'; pane_id=$pane; agent_session=$agentSession; workflow_run_id=$env:GITHUB_RUN_ID; active_switch=$sw.Receipt; sent_at=(Get-Date).ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+          [void](Publish124 (@(
+            'HERDR_FRESH_REVIEW_COORDINATOR_DELIVERY_V1',
+            'state: SENT_WAIT_LAUNCH_RESULT',
+            "source_wake_comment_id: $wakeId",
+            "source_review_request_receipt: $env:REVIEW_REQUEST_RECEIPT",
+            "review_request_id: $env:REVIEW_REQUEST_ID",
+            "candidate_head: $env:CANDIDATE_HEAD",
+            "target_pane: $pane",
+            "target_agent_session: $agentSession",
+            "prompt_sha256: $promptHash",
+            'physical_prompt_count: 1',
+            'second_prompt_sent: false',
+            'user_relay_count: 0',
+            "workflow_run_id: $env:GITHUB_RUN_ID",
+            'readback_required: true'
+          ) -join "`n"))
+
+  guard-review-result:
+    name: Guard exact launch/result and return Control
+    needs: launch-fresh-reviewer
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Observe exact launch/result and publish Control return request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          const repo='D22977/gpt-browser-bridge';
+          const issue=124;
+          const reviewRequest=process.env.REVIEW_REQUEST_ID;
+          const reviewRequestReceipt=process.env.REVIEW_REQUEST_RECEIPT;
+          const head=process.env.CANDIDATE_HEAD;
+          const wakeId=String(process.env.GITHUB_EVENT_PATH ? JSON.parse(await (await import('node:fs/promises')).readFile(process.env.GITHUB_EVENT_PATH,'utf8')).comment.id : '');
+          const token=process.env.GH_TOKEN;
+          const headers={Authorization:`Bearer ${token}`,'User-Agent':'gbb-g11-review-guard',Accept:'application/vnd.github+json'};
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function api(path,opts={}){const r=await fetch(`https://api.github.com/repos/${repo}${path}`,{...opts,headers:{...headers,...(opts.headers||{})}});if(!r.ok)throw new Error(`${opts.method||'GET'} ${path} ${r.status} ${await r.text()}`);if(r.status===204)return null;return r.json();}
+          async function comments(n){const out=[];for(let p=1;p<=100;p++){const xs=await api(`/issues/${n}/comments?per_page=100&page=${p}`);out.push(...xs);if(xs.length<100)break;}return out;}
+          const first=b=>String(b||'').split(/\r?\n/).find(x=>x.trim())?.trim()||'';
+          const line=(b,k)=>{const m=String(b||'').match(new RegExp(`^${k}:\\s*(.+?)\\s*$`,'m'));return m?.[1]?.trim()||''};
+          async function publish(body){const p=await api(`/issues/${issue}/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body})});const rb=await api(`/issues/comments/${p.id}`);if(rb.body!==body)throw new Error(`readback mismatch ${p.id}`);return p;}
+          async function active(){const cs=await comments(88);const sw=cs.filter(c=>first(c.body)==='CONTROL_GENERATION_SWITCH_V1'&&line(c.body,'state')==='SWITCH_COMMITTED'&&line(c.body,'new_generation_status')==='ACTIVE').sort((a,b)=>Number(a.id)-Number(b.id)).at(-1);if(!sw)throw new Error('No ACTIVE switch');const gen=line(sw.body,'new_generation'),cid=line(sw.body,'new_conversation_id'),url=line(sw.body,'new_conversation_url');if(!gen||!cid||!url)throw new Error('ACTIVE switch missing route');return {receipt:String(sw.id),gen,cid,url};}
+          let launch=null;
+          for(let i=0;i<60;i++){
+            const cs=await comments(issue);
+            const ms=cs.filter(c=>first(c.body)==='GBB_HANDOFF_CONTINUITY_FRESH_REVIEW_LAUNCH_RESULT_V1'&&line(c.body,'source_wake_comment_id')===wakeId&&line(c.body,'review_request_id')===reviewRequest&&line(c.body,'candidate_head')===head);
+            if(ms.length>1)throw new Error('Multiple launch results for one wake');
+            if(ms.length===1){launch=ms[0];break;}
+            await sleep(5000);
+          }
+          let terminal=null;
+          if(!launch){
+            terminal=await publish(['GBB_HANDOFF_CONTINUITY_FRESH_REVIEW_GUARD_V1','state: BLOCKED_LAUNCH_RESULT_TIMEOUT',`source_wake_comment_id: ${wakeId}`,`source_review_request_receipt: ${reviewRequestReceipt}`,`review_request_id: ${reviewRequest}`,`candidate_head: ${head}`,'user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_verified: true'].join('\n'));
+          } else if(line(launch.body,'state')==='BLOCKED'){
+            terminal=await publish(['GBB_HANDOFF_CONTINUITY_FRESH_REVIEW_GUARD_V1','state: REVIEW_LAUNCH_BLOCKED',`source_wake_comment_id: ${wakeId}`,`source_launch_result_receipt: ${launch.id}`,`review_request_id: ${reviewRequest}`,`candidate_head: ${head}`,`first_missing_capability: ${line(launch.body,'first_missing_capability')||'UNKNOWN'}`,'user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_verified: true'].join('\n'));
+          } else if(line(launch.body,'state')!=='DELIVERED'){
+            terminal=await publish(['GBB_HANDOFF_CONTINUITY_FRESH_REVIEW_GUARD_V1','state: CONTROL_REQUIRED_UNKNOWN_LAUNCH_STATE',`source_wake_comment_id: ${wakeId}`,`source_launch_result_receipt: ${launch.id}`,`review_request_id: ${reviewRequest}`,`candidate_head: ${head}`,'user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_verified: true'].join('\n'));
+          } else {
+            let result=null;
+            for(let i=0;i<180;i++){
+              const cs=await comments(issue);
+              const ms=cs.filter(c=>first(c.body)==='GBB_HANDOFF_CONTINUITY_FRESH_REVIEW_RESULT_V1'&&line(c.body,'review_request_id')===reviewRequest&&line(c.body,'source_worker_ready')===process.env.SOURCE_WORKER_READY&&line(c.body,'candidate_head')===head);
+              if(ms.length>1)throw new Error('Multiple formal review results for one request');
+              if(ms.length===1){result=ms[0];break;}
+              await sleep(5000);
+            }
+            if(result){terminal=result;await publish(['GBB_HANDOFF_CONTINUITY_FRESH_REVIEW_GUARD_V1','state: PASS_REVIEW_RESULT_OBSERVED',`source_wake_comment_id: ${wakeId}`,`source_launch_result_receipt: ${launch.id}`,`source_review_result_receipt: ${result.id}`,`review_request_id: ${reviewRequest}`,`candidate_head: ${head}`,'user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_verified: true'].join('\n'));}
+            else terminal=await publish(['GBB_HANDOFF_CONTINUITY_FRESH_REVIEW_GUARD_V1','state: BLOCKED_REVIEW_RESULT_TIMEOUT',`source_wake_comment_id: ${wakeId}`,`source_launch_result_receipt: ${launch.id}`,`review_request_id: ${reviewRequest}`,`candidate_head: ${head}`,'user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_verified: true'].join('\n'));
+          }
+          const sw=await active();
+          const body=['CONTROL_RETURN_REQUEST_V1',`source_issue: ${issue}`,`source_card_id: ${process.env.SOURCE_CARD_ID}`,`source_terminal_receipt: ${terminal.id}`,`source_head: ${head}`,`target_control_generation: ${sw.gen}`,'target_control_status: ACTIVE',`target_control_conversation_id: ${sw.cid}`,`target_control_conversation_url: ${sw.url}`,`idempotency_key: GBB124-R1-RETURN-${terminal.id}-${head.slice(0,8)}`].join('\n');
+          const ret=await publish(body);
+          console.log(`control_return_request=${ret.id} terminal=${terminal.id}`);
+          NODE
