@@ -1,0 +1,316 @@
+name: G10 G11 Unattended E2E Repair Bootstrap V32
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: g10-g11-unattended-e2e-repair-bootstrap-v32
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    if: >-
+      github.event.issue.number == 88 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_WAKE_V32')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: node {0}
+    steps:
+      - name: Wake one repair Worker and guard through downstream canary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import crypto from 'node:crypto';
+          import { spawnSync } from 'node:child_process';
+
+          const repo = 'D22977/gpt-browser-bridge';
+          const issue = 88;
+          const cardReceipt = '5557143472';
+          const cardId = 'GBB-UNATTENDED-RETURN-E2E-REPAIR-02';
+          const transportAuthority = '5557198480';
+          const presendAdjudication = '5557194039';
+          const expectedSwitch = '5555495204';
+          const expectedGeneration = '010';
+          const expectedConversation = '6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';
+          const repairBase = 'ea32690ae31bb02d6c51abd2adb955dec7cb0405';
+          const herdr = 'C:\\Users\\Lupun\\AppData\\Local\\Programs\\Herdr\\bin\\herdr.exe';
+          const stateRoot = 'D:\\AIWORK_RUNTIME\\GPT_BROWSER_BRIDGE\\g10-g11-unattended-e2e-repair-v32';
+          const sendState = path.join(stateRoot, 'worker-send.json');
+          const token = process.env.GH_TOKEN;
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          fs.mkdirSync(stateRoot, { recursive: true });
+
+          async function api(route, init = {}) {
+            const res = await fetch(`https://api.github.com/repos/${repo}${route}`, {
+              ...init,
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Accept': 'application/vnd.github+json',
+                'User-Agent': 'g10-g11-unattended-e2e-v32',
+                ...(init.headers || {}),
+              },
+            });
+            if (!res.ok) throw new Error(`GitHub ${res.status} ${route}: ${await res.text()}`);
+            if (res.status === 204) return null;
+            return await res.json();
+          }
+
+          async function getComment(id) {
+            const c = await api(`/issues/comments/${id}`);
+            if (!String(c.issue_url || '').endsWith('/issues/88')) throw new Error(`comment ${id} issue mismatch`);
+            if (!Number.isSafeInteger(c.id)) throw new Error(`comment ${id} scalar id invalid`);
+            return { id: String(c.id), body: String(c.body ?? ''), created_at: String(c.created_at ?? ''), issue_url: String(c.issue_url ?? '') };
+          }
+
+          async function recent(since) {
+            const out = [];
+            for (let page = 1; page <= 50; page++) {
+              const items = await api(`/issues/88/comments?since=${encodeURIComponent(since)}&per_page=100&page=${page}`);
+              if (!Array.isArray(items)) throw new Error('recent comments response is not an array');
+              for (const c of items) {
+                if (!c || !Number.isSafeInteger(c.id) || typeof c.body !== 'string' || typeof c.created_at !== 'string') throw new Error('recent comment schema invalid');
+                out.push({ id: String(c.id), body: c.body, created_at: c.created_at, issue_url: String(c.issue_url ?? '') });
+              }
+              if (items.length < 100) break;
+            }
+            return out;
+          }
+
+          const firstLine = body => String(body).split(/\r?\n/, 1)[0].trim();
+          const line = (body, key) => {
+            const m = String(body).match(new RegExp(`^${key}:\\s*(.*?)\\s*$`, 'm'));
+            return m ? m[1] : null;
+          };
+
+          async function verifyCurrentControl() {
+            for (const id of [cardReceipt, transportAuthority, presendAdjudication, expectedSwitch]) await getComment(id);
+            const anchor = await getComment(expectedSwitch);
+            if (firstLine(anchor.body) !== 'CONTROL_GENERATION_SWITCH_V1') throw new Error('expected switch protocol marker malformed');
+            if (line(anchor.body, 'state') !== 'SWITCH_COMMITTED') throw new Error('expected switch not committed');
+            if (line(anchor.body, 'new_generation') !== expectedGeneration) throw new Error('expected switch generation mismatch');
+            if (line(anchor.body, 'new_conversation_id') !== expectedConversation) throw new Error('expected switch conversation mismatch');
+            if (line(anchor.body, 'new_status') !== 'ACTIVE') throw new Error('expected switch status mismatch');
+            if (!anchor.created_at) throw new Error('expected switch created_at missing');
+            const anchorId = BigInt(anchor.id);
+            for (const c of await recent(anchor.created_at)) {
+              if (c.id === expectedSwitch) continue;
+              if (firstLine(c.body) !== 'CONTROL_GENERATION_SWITCH_V1') continue;
+              const cid = BigInt(c.id);
+              if (cid > anchorId) throw new Error(`newer Control switch receipt exists: ${c.id}`);
+            }
+            return anchor.created_at;
+          }
+
+          async function publish(body) {
+            const r = await api(`/issues/${issue}/comments`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ body }),
+            });
+            const rb = await getComment(String(r.id));
+            if (rb.body !== body) throw new Error(`durable read-back mismatch ${r.id}`);
+            return String(r.id);
+          }
+
+          async function blockPresend(reason) {
+            const id = await publish([
+              'CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_V32_DELIVERY_V1',
+              'state: BLOCKED_PRESEND',
+              `reason: ${String(reason).replace(/[\r\n]+/g, ' ')}`,
+              'physical_worker_prompt_count: 0',
+              'second_physical_prompt: false',
+              'user_relay_count: 0',
+              `workflow_run_id: ${process.env.GITHUB_RUN_ID}`,
+              'readback_required: true',
+            ].join('\n'));
+            throw new Error(`BLOCKED_PRESEND receipt=${id}`);
+          }
+
+          async function publishResult(state, terminal, head, canary, detail) {
+            return await publish([
+              'CONTROL_G10_G11_UNATTENDED_E2E_RESULT_V1',
+              `state: ${state}`,
+              `source_repair_card: ${cardReceipt}`,
+              `source_worker_terminal_receipt: ${terminal}`,
+              `candidate_head: ${head}`,
+              `downstream_canary_receipt: ${canary}`,
+              `target_control_generation: ${expectedGeneration}`,
+              `target_control_conversation_id: ${expectedConversation}`,
+              'user_relay_count: 0',
+              `detail: ${detail}`,
+              `workflow_run_id: ${process.env.GITHUB_RUN_ID}`,
+              'readback_required: true',
+            ].join('\n'));
+          }
+
+          function herdrJson(args) {
+            const r = spawnSync(herdr, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+            if (r.error || r.status !== 0) throw new Error(`Herdr ${args.join(' ')} failed: ${r.error?.message || r.stderr || r.stdout}`);
+            return JSON.parse(String(r.stdout || '').trim());
+          }
+
+          function genericWorkers(list) {
+            const agents = Array.isArray(list?.result?.agents) ? list.result.agents : [];
+            return agents.filter(a => a && a.agent === 'codex' && ['idle','done'].includes(String(a.agent_status)) && !String(a.name || '').trim() && String(a.cwd) === 'C:\\WINDOWS\\system32');
+          }
+
+          function exactAgent(list, pane, session) {
+            const agents = Array.isArray(list?.result?.agents) ? list.result.agents : [];
+            return agents.filter(a => a && String(a.pane_id) === pane && String(a?.agent_session?.value) === session);
+          }
+
+          const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+          const wake = String(event?.comment?.body || '');
+          if (!/^CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_WAKE_V32\s*$/m.test(firstLine(wake)) ||
+              line(wake, 'source_repair_card') !== cardReceipt ||
+              line(wake, 'source_transport_authority') !== transportAuthority ||
+              line(wake, 'source_presend_adjudication') !== presendAdjudication ||
+              line(wake, 'source_current_switch') !== expectedSwitch) throw new Error('wake binding mismatch');
+
+          try { await verifyCurrentControl(); } catch (e) { await blockPresend(e.message); }
+          if (fs.existsSync(sendState)) {
+            const old = JSON.parse(fs.readFileSync(sendState, 'utf8'));
+            if (old.status === 'SENDING') throw new Error('UNCERTAIN_SEND_NO_BLIND_RETRY');
+            if (old.status === 'SENT') throw new Error('NO_OP_DUPLICATE_WORKER_SEND');
+          }
+
+          let inventory;
+          try { inventory = herdrJson(['agent','list']); } catch (e) { await blockPresend(e.message); }
+          const eligible = genericWorkers(inventory);
+          if (eligible.length !== 1) await blockPresend(`GENERIC_WORKER_COUNT_${eligible.length}`);
+          const pane = String(eligible[0].pane_id || '');
+          const session = String(eligible[0]?.agent_session?.value || '');
+          if (!pane || !session) await blockPresend('Worker binding missing');
+          try { await verifyCurrentControl(); } catch (e) { await blockPresend(e.message); }
+
+          const prompt = 'Read GitHub directly. Execute only D22977/gpt-browser-bridge Issue #88 card 5557143472 / GBB-UNATTENDED-RETURN-E2E-REPAIR-02 as WORKER. Base exact ea32690ae31bb02d6c51abd2adb955dec7cb0405. Repair only allowed paths, publish/read-back GBB_UNATTENDED_RETURN_E2E_REPAIR_READY_V1, then stop. Do not act as Control/Reviewer and do not create/send generation011.';
+          const promptHash = crypto.createHash('sha256').update(prompt, 'utf8').digest('hex');
+          fs.writeFileSync(sendState, JSON.stringify({ status:'SENDING', pane, session, prompt_hash:promptHash }));
+          let sent;
+          try { sent = herdrJson(['agent','prompt',pane,prompt]); } catch { throw new Error('UNCERTAIN_SEND_NO_BLIND_RETRY'); }
+          if (String(sent?.result?.type) !== 'agent_prompted' || String(sent?.result?.agent?.pane_id) !== pane || String(sent?.result?.agent?.agent_session?.value) !== session) throw new Error('UNCERTAIN_SEND_NO_BLIND_RETRY');
+          const delivery = await publish([
+            'CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_V32_DELIVERY_V1',
+            'state: DELIVERED',
+            `source_repair_card: ${cardReceipt}`,
+            `source_transport_authority: ${transportAuthority}`,
+            `target_pane: ${pane}`,
+            `target_agent_session: ${session}`,
+            `prompt_sha256: ${promptHash}`,
+            'physical_worker_prompt_count: 1',
+            'second_physical_prompt: false',
+            'post_dispatch_terminal_guard: ACTIVE',
+            'downstream_canary_guard_required: true',
+            'user_relay_count: 0',
+            `workflow_run_id: ${process.env.GITHUB_RUN_ID}`,
+            'readback_required: true',
+          ].join('\n'));
+          fs.writeFileSync(sendState, JSON.stringify({ status:'SENT', delivery_receipt:delivery, pane, session }));
+
+          let terminal = null;
+          let idlePolls = 0;
+          for (let n=0; n<1080; n++) {
+            const since = await verifyCurrentControl();
+            const matches = (await recent(since)).filter(c => firstLine(c.body) === 'GBB_UNATTENDED_RETURN_E2E_REPAIR_READY_V1' && line(c.body,'card_id') === cardId);
+            if (matches.length > 1) {
+              const r = await publishResult('CONTROL_REQUIRED','CONFLICT','NONE','NONE','multiple repair terminals');
+              throw new Error(`CONTROL_REQUIRED receipt=${r}`);
+            }
+            if (matches.length === 1) { terminal = matches[0]; break; }
+            let inv;
+            try { inv = herdrJson(['agent','list']); } catch {
+              const r = await publishResult('CONTROL_REQUIRED','NONE','NONE','NONE','Herdr inventory unreadable');
+              throw new Error(`CONTROL_REQUIRED receipt=${r}`);
+            }
+            const exact = exactAgent(inv, pane, session);
+            if (exact.length !== 1) {
+              const r = await publishResult('CONTROL_REQUIRED','NONE','NONE','NONE','bound Worker disappeared');
+              throw new Error(`CONTROL_REQUIRED receipt=${r}`);
+            }
+            idlePolls = ['idle','done'].includes(String(exact[0].agent_status)) ? idlePolls + 1 : 0;
+            if (idlePolls >= 4) {
+              const r = await publishResult('CONTROL_REQUIRED','NONE','NONE','NONE','terminal missing after Worker idle/done');
+              throw new Error(`CONTROL_REQUIRED receipt=${r}`);
+            }
+            await sleep(15000);
+          }
+          if (!terminal) {
+            const r = await publishResult('CONTROL_REQUIRED','NONE','NONE','NONE','repair terminal timeout');
+            throw new Error(`CONTROL_REQUIRED receipt=${r}`);
+          }
+
+          const terminalId = terminal.id;
+          if (line(terminal.body,'state') !== 'READY_FOR_CONTROL_CANARY') {
+            const r = await publishResult('CONTROL_REQUIRED',terminalId,'NONE','NONE',`repair terminal state=${line(terminal.body,'state') || 'MISSING'}`);
+            throw new Error(`CONTROL_REQUIRED receipt=${r}`);
+          }
+          const branch = line(terminal.body,'worker_branch');
+          const head = line(terminal.body,'candidate_head');
+          const parent = line(terminal.body,'candidate_parent');
+          if (!branch || !/^[0-9a-f]{40}$/.test(head || '') || parent !== repairBase) throw new Error('READY candidate binding invalid');
+          const refPath = branch.split('/').map(encodeURIComponent).join('/');
+          const ref = await api(`/git/ref/heads/${refPath}`);
+          if (String(ref?.object?.sha) !== head) throw new Error('remote branch/head mismatch');
+
+          const idem = `${cardId}:${terminalId}:${head}`;
+          await api('/actions/workflows/g10-g11-ready-return-control-doorbell-v2.yml/dispatches', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({ ref:branch, inputs:{ source_terminal_receipt:terminalId, source_card_id:cardId, candidate_head:head, idempotency_key:idem } }),
+          });
+          await publish([
+            'CONTROL_G10_G11_UNATTENDED_E2E_REPAIR_CANARY_DISPATCH_V1',
+            'state: DISPATCHED',
+            `source_worker_terminal_receipt: ${terminalId}`,
+            `source_card_id: ${cardId}`,
+            `worker_branch: ${branch}`,
+            `candidate_head: ${head}`,
+            'selected_return_mechanism: WORKFLOW_DISPATCH',
+            'post_dispatch_terminal_guard: ACTIVE',
+            'user_relay_count: 0',
+            `workflow_run_id: ${process.env.GITHUB_RUN_ID}`,
+            'readback_required: true',
+          ].join('\n'));
+
+          let canary = null;
+          for (let n=0; n<240; n++) {
+            const since = await verifyCurrentControl();
+            const matches = (await recent(since)).filter(c => firstLine(c.body) === 'CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1' && line(c.body,'source_terminal_receipt') === terminalId && line(c.body,'source_card_id') === cardId && line(c.body,'candidate_head') === head);
+            if (matches.length > 1) {
+              const r = await publishResult('CONTROL_REQUIRED',terminalId,head,'CONFLICT','multiple downstream canary terminals');
+              throw new Error(`CONTROL_REQUIRED receipt=${r}`);
+            }
+            if (matches.length === 1) { canary = matches[0]; break; }
+            await sleep(15000);
+          }
+          if (!canary) {
+            const r = await publishResult('CONTROL_REQUIRED',terminalId,head,'NONE','downstream canary timeout');
+            throw new Error(`CONTROL_REQUIRED receipt=${r}`);
+          }
+
+          const cs = line(canary.body,'state');
+          const pass = cs === 'DELIVERED' &&
+            line(canary.body,'physical_send_count') === '1' &&
+            line(canary.body,'second_physical_send') === 'false' &&
+            line(canary.body,'active_switch_receipt') === expectedSwitch &&
+            line(canary.body,'target_control_generation') === expectedGeneration &&
+            line(canary.body,'target_control_conversation_id') === expectedConversation &&
+            line(canary.body,'user_relay_count') === '0';
+          if (!pass) {
+            const r = await publishResult('CONTROL_REQUIRED',terminalId,head,canary.id,`downstream state=${cs || 'MISSING'}`);
+            throw new Error(`CONTROL_REQUIRED receipt=${r}`);
+          }
+          const passReceipt = await publishResult('PASS',terminalId,head,canary.id,'candidate workflow_dispatch path physically delivered exact current Control wake');
+          console.log(`UNATTENDED_E2E_PASS receipt=${passReceipt}`);
