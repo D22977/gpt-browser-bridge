@@ -1,0 +1,68 @@
+name: G10 G11 Safe Send Worker Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g10-g11-safe-send-worker-20260906
+  cancel-in-progress: false
+
+jobs:
+  deliver:
+    if: >-
+      github.event.issue.number == 88 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'CONTROL_G10_G11_SAFE_SEND_WORKER_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Deliver safe-send repair card to exact Herdr Worker once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $repo='D22977/gpt-browser-bridge'; $issue=88
+          $card='5555907820'; $authority='5555912137'; $supersession='5555909973'; $switch='5555495204'
+          $pane='w2:p1'; $session='01a0513f-4e68-7573-bf38-72e2120ebe1d'
+          $forbiddenPane='w2:p3'; $forbiddenSession='01a04e25-60e3-7a03-8cf1-b54a98d60fdc'
+          $herdr='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $stateRoot='D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\g10-g11-safe-send-worker-once\state'
+          $statePath=Join-Path $stateRoot 'GBB-ROTATION-SAFE-SEND-01-20260906.json'
+          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g10-g11-safe-send-worker-once';Accept='application/vnd.github+json'}
+          function Publish([string]$text){$payload=@{body=$text}|ConvertTo-Json -Compress;$r=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30;$rb=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30;if([string]$rb.body-cne$text){throw 'readback mismatch'};return [string]$r.id}
+          function GetAll88{$all=[System.Collections.Generic.List[object]]::new();function Add([object]$v){if($null-eq$v){return};if($v-is[System.Array]){foreach($x in $v){Add $x};return};[void]$all.Add($v)};for($p=1;$p-le40;$p++){$n=$all.Count;Add(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30);if(($all.Count-$n)-lt100){break}};return $all.ToArray()}
+          $event=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json;$body=[string]$event.comment.body
+          if($body-notmatch'(?m)^CONTROL_G10_G11_SAFE_SEND_WORKER_WAKE_V1\s*$'){throw 'bad protocol'}
+          if($body-notmatch'(?m)^source_dispatch_card:\s*5555907820\s*$' -or $body-notmatch'(?m)^source_transport_authority:\s*5555912137\s*$' -or $body-notmatch'(?m)^source_current_switch:\s*5555495204\s*$'){throw 'bad binding'}
+          foreach($cid in @($card,$authority,$supersession,$switch)){$c=Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$cid" -Headers $headers -Method Get -TimeoutSec 30;if([string]$c.issue_url-notmatch'/issues/88$'){throw "authority mismatch $cid"}}
+          $all=@(GetAll88)
+          $newer=@($all|Where-Object{$_.PSObject.Properties.Name-contains'id'-and[int64]$_.id-gt[int64]$switch-and[string]$_.body-match'(?m)^CONTROL_GENERATION_SWITCH_V1\s*$'-and[string]$_.body-match'(?m)^state:\s*SWITCH_COMMITTED\s*$'});if($newer.Count-gt0){throw 'STALE newer switch'}
+          $terminal=@($all|Where-Object{[string]$_.body-match'(?m)^GBB_ROTATION_SAFE_SEND_READY_V1\s*$'-and[string]$_.body-match'(?m)^card_id:\s*GBB-ROTATION-SAFE-SEND-01\s*$'});if($terminal.Count-gt0){$rid=Publish(@('CONTROL_G10_G11_SAFE_SEND_WORKER_DELIVERY_V1','state: NO_OP_EXISTING_TERMINAL',"source_dispatch_card: $card",'physical_prompt_count: 0','user_relay_count: 0','readback_required: true')-join"`n");Write-Output "NO_OP terminal $rid";exit 0}
+          if(Test-Path $statePath){$s=Get-Content $statePath -Raw|ConvertFrom-Json;if([string]$s.status-eq'SENT'){$rid=Publish(@('CONTROL_G10_G11_SAFE_SEND_WORKER_DELIVERY_V1','state: NO_OP_DUPLICATE',"source_dispatch_card: $card",'second_physical_prompt: false','user_relay_count: 0','readback_required: true')-join"`n");Write-Output "NO_OP duplicate $rid";exit 0};if([string]$s.status-eq'SENDING'){throw 'UNCERTAIN_SEND_NO_BLIND_RETRY'}}
+          if(-not(Test-Path $herdr)){throw 'BLOCKED_PRESEND Herdr CLI missing'}
+          $raw=& $herdr agent list 2>&1|Out-String;if($LASTEXITCODE-ne0){throw 'BLOCKED_PRESEND herdr list failed'};$list=$raw|ConvertFrom-Json
+          $exact=@($list.result.agents|Where-Object{[string]$_.agent-eq'codex'-and[string]$_.pane_id-ceq$pane-and[string]$_.agent_session.value-ceq$session})
+          if($exact.Count-ne1){$rid=Publish(@('CONTROL_G10_G11_SAFE_SEND_WORKER_DELIVERY_V1','state: BLOCKED_PRESEND',"source_dispatch_card: $card",'first_failed_gate: EXACT_TARGET_MISSING_OR_AMBIGUOUS',"target_pane: $pane","target_agent_session: $session",'physical_prompt_count: 0','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "BLOCKED_PRESEND receipt=$rid"}
+          $t=$exact[0]
+          $status=[string]$t.agent_status; $name=[string]$t.name; $cwd=[string]$t.cwd
+          if($status-notin@('idle','done') -or -not [string]::IsNullOrWhiteSpace($name) -or $cwd -cne 'C:\WINDOWS\system32'){$rid=Publish(@('CONTROL_G10_G11_SAFE_SEND_WORKER_DELIVERY_V1','state: BLOCKED_PRESEND',"source_dispatch_card: $card",'first_failed_gate: EXACT_TARGET_NOT_IDLE_GENERIC',"target_pane: $pane","target_agent_session: $session","target_status: $status","target_name: $name","target_cwd: $cwd",'physical_prompt_count: 0','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "BLOCKED_PRESEND receipt=$rid"}
+          $forbidden=@($list.result.agents|Where-Object{[string]$_.pane_id-ceq$forbiddenPane-and[string]$_.agent_session.value-ceq$forbiddenSession});if($forbidden.Count-eq1-and[string]$forbidden[0].name-ne'codex_generic_pr98_r2_codex'){throw 'BLOCKED_PRESEND forbidden PR98 binding changed'}
+          $prompt='Read GitHub directly. Execute only D22977/gpt-browser-bridge Issue #88 dispatch receipt 5555907820 / card GBB-ROTATION-SAFE-SEND-01 as WORKER. GitHub is durable authority. Work only in the exact allowed paths and base/current bindings from the card. Do not execute any live ChatGPT candidate send, do not act as Reviewer or Control, and stop after publishing/read-back GBB_ROTATION_SAFE_SEND_READY_V1.'
+          $ph=[Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($prompt))).ToLowerInvariant()
+          @{status='SENDING';pane_id=$pane;agent_session=$session;prompt_sha256=$ph;workflow_run_id=$env:GITHUB_RUN_ID;started_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content $statePath -Encoding utf8
+          $out=& $herdr agent prompt $pane $prompt 2>&1|Out-String
+          if($LASTEXITCODE-ne0){$rid=Publish(@('CONTROL_G10_G11_SAFE_SEND_WORKER_DELIVERY_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_dispatch_card: $card","source_transport_authority: $authority","target_pane: $pane","target_agent_session: $session","prompt_sha256: $ph",'physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN_SEND receipt=$rid"}
+          try{$r=$out|ConvertFrom-Json}catch{$rid=Publish(@('CONTROL_G10_G11_SAFE_SEND_WORKER_DELIVERY_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_dispatch_card: $card",'first_failed_gate: POST_PROMPT_RESPONSE_NOT_JSON','physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN_SEND receipt=$rid"}
+          if([string]$r.result.type-ne'agent_prompted'-or[string]$r.result.agent.pane_id-cne$pane-or[string]$r.result.agent.agent_session.value-cne$session){$rid=Publish(@('CONTROL_G10_G11_SAFE_SEND_WORKER_DELIVERY_V1','state: UNCERTAIN_SEND_NO_BLIND_RETRY',"source_dispatch_card: $card",'first_failed_gate: POST_PROMPT_BINDING_MISMATCH','physical_prompt_count: UNKNOWN_AFTER_SEND_BOUNDARY','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");throw "UNCERTAIN_SEND receipt=$rid"}
+          @{status='SENT';pane_id=$pane;agent_session=$session;prompt_sha256=$ph;workflow_run_id=$env:GITHUB_RUN_ID;sent_at=(Get-Date).ToString('o')}|ConvertTo-Json|Set-Content $statePath -Encoding utf8
+          $rid=Publish(@('CONTROL_G10_G11_SAFE_SEND_WORKER_DELIVERY_V1','state: DELIVERED','decision: PASS_TRANSPORT_ONLY',"source_dispatch_card: $card","source_transport_authority: $authority","source_current_switch: $switch","target_pane: $pane","target_agent_session: $session","prompt_sha256: $ph",'physical_prompt_count: 1','second_physical_prompt: false','user_relay_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'readback_required: true')-join"`n");Write-Output "DELIVERED receipt=$rid"
