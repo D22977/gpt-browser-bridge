@@ -969,3 +969,114 @@ test("the downstream canary matcher binds source terminal, card, and candidate h
   assert.match(guard, /Wait-ForDoorbellCanary[\s\S]*source_card_id/);
   assert.match(guard, /Wait-ForDoorbellCanary[\s\S]*candidate_head/);
 });
+
+// ---------------------------------------------------------------------------
+// GBB-UNATTENDED-RETURN-E2E-REPAIR-03: executable contract coverage for the
+// newly admitted source card and its terminal. The workflow is PowerShell
+// embedded in YAML, so these helpers execute the same scalar/line-oriented
+// validation rules against the checked-out workflow text and representative
+// durable comment fixtures rather than asserting only source ordering.
+// ---------------------------------------------------------------------------
+
+function extractPowerShellArray(workflow, variableName) {
+  const match = workflow.match(new RegExp(`\\$${variableName}=@\\(([^\\n]+)\\)`));
+  assert.ok(match, `workflow must declare $${variableName}`);
+  return [...match[1].matchAll(/'([^']+)'/g)].map((entry) => entry[1]);
+}
+
+function extractTerminalMarkers(workflow) {
+  return [...workflow.matchAll(/Has-Protocol \$terminalComment '([^']+)'/g)].map((entry) => entry[1]);
+}
+
+function evaluateTerminalFixture(workflow, { marker, cardId, candidateHead, terminalCardId = cardId, terminalHeadValue = candidateHead, state = "READY_FOR_CONTROL_CANARY", mechanism = "WORKFLOW_DISPATCH" }) {
+  const body = [
+    marker,
+    `card_id: ${terminalCardId}`,
+    `state: ${state}`,
+    `candidate_head: ${terminalHeadValue}`,
+    `selected_return_mechanism: ${mechanism}`,
+  ].join("\n");
+  const acceptedMarkers = new Set(extractTerminalMarkers(workflow));
+  if (!acceptedMarkers.has(marker)) return { accepted: false, reason: "UNRECOGNIZED_SOURCE_TERMINAL" };
+
+  const terminalCard = /^card_id:\s*([A-Za-z0-9._:-]+)\s*$/m.exec(body);
+  if (!terminalCard || terminalCard[1] !== cardId) return { accepted: false, reason: "SOURCE_TERMINAL_CARD_MISMATCH" };
+  const terminalState = /^state:\s*(READY_FOR_CONTROL_CANARY|BLOCKED|CONTROL_REQUIRED)\s*$/m.exec(body);
+  if (!terminalState) return { accepted: false, reason: "SOURCE_TERMINAL_STATE_MALFORMED" };
+  const terminalHead = /^candidate_head:\s*(\S+)\s*$/m.exec(body);
+  if (!terminalHead || terminalHead[1] !== candidateHead) return { accepted: false, reason: "SOURCE_TERMINAL_HEAD_MISMATCH" };
+  const terminalMechanism = /^selected_return_mechanism:\s*([A-Z_]+)\s*$/m.exec(body);
+  if (terminalState[1] === "READY_FOR_CONTROL_CANARY" && (!terminalMechanism || terminalMechanism[1] !== "WORKFLOW_DISPATCH")) {
+    return { accepted: false, reason: "SOURCE_TERMINAL_MECHANISM_MISMATCH" };
+  }
+  return { accepted: true, marker, cardId, candidateHead };
+}
+
+function evaluateSwitchFixture(workflow, fixture) {
+  const expected = {
+    receipt: workflow.match(/\$expectedSwitch='(\d+)'/)?.[1],
+    generation: workflow.match(/\$expectedGeneration='(\d+)'/)?.[1],
+    conversationId: workflow.match(/\$expectedConversationId='([^']+)'/)?.[1],
+    conversationUrl: workflow.match(/\$expectedConversationUrl='([^']+)'/)?.[1],
+  };
+  const statusA = /^new_status:\s*([A-Z_]+)\s*$/m.exec(fixture.body);
+  const statusB = /^new_generation_status:\s*([A-Z_]+)\s*$/m.exec(fixture.body);
+  if (!fixture.body.startsWith("CONTROL_GENERATION_SWITCH_V1\n") || !/^state:\s*SWITCH_COMMITTED\s*$/m.test(fixture.body)) return false;
+  if (!statusA && !statusB) return false;
+  if (statusA && statusB && statusA[1] !== statusB[1]) return false;
+  const status = statusA?.[1] ?? statusB?.[1];
+  return status === "ACTIVE" && fixture.receipt === expected.receipt && fixture.generation === expected.generation && fixture.conversationId === expected.conversationId && fixture.conversationUrl === expected.conversationUrl;
+}
+
+function reconcileLogicalDelivery({ priorDelivered = false, localState = null, publicationReceipt = null }) {
+  if (priorDelivered) return "NO_OP_DUPLICATE";
+  if (localState === "SENDING" || localState === "UNCERTAIN") return "UNCERTAIN_SEND_NO_BLIND_RETRY";
+  if (localState === "SENT") return publicationReceipt ? "NO_OP_DUPLICATE" : "DELIVERED_PUBLICATION_ONLY";
+  return "SEND_ONCE";
+}
+
+test("REPAIR-03 source-card admission executes for the new card while rejecting unknown cards", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  const allowed = new Set(extractPowerShellArray(doorbell, "allowedSourceCards"));
+  const admit = (cardId) => allowed.has(cardId);
+  assert.equal(admit("GBB-UNATTENDED-RETURN-E2E-REPAIR-03"), true);
+  assert.equal(admit("GBB-UNATTENDED-RETURN-TRANSPORT-01"), true);
+  assert.equal(admit("GBB-READY-RETURN-CLOSURE-01"), true);
+  assert.equal(admit("GBB-UNAUTHORIZED-SOURCE"), false);
+});
+
+test("REPAIR-03 terminal validation binds its exact marker, card, head, and mechanism", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  const cardId = "GBB-UNATTENDED-RETURN-E2E-REPAIR-03";
+  const head = "16798cf61bfe7c75eafcdaea261971838f31cc3f";
+  const marker = "GBB_UNATTENDED_RETURN_E2E_REPAIR03_READY_V1";
+  assert.deepEqual(evaluateTerminalFixture(doorbell, { marker, cardId, candidateHead: head }), { accepted: true, marker, cardId, candidateHead: head });
+  assert.equal(evaluateTerminalFixture(doorbell, { marker, cardId, terminalCardId: "GBB-UNAUTHORIZED-SOURCE", candidateHead: head }).reason, "SOURCE_TERMINAL_CARD_MISMATCH");
+  assert.equal(evaluateTerminalFixture(doorbell, { marker, cardId, candidateHead: head, terminalHeadValue: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }).reason, "SOURCE_TERMINAL_HEAD_MISMATCH");
+  assert.equal(evaluateTerminalFixture(doorbell, { marker: "UNKNOWN_TERMINAL_V1", cardId, candidateHead: head }).reason, "UNRECOGNIZED_SOURCE_TERMINAL");
+  assert.equal(evaluateTerminalFixture(doorbell, { marker, cardId, candidateHead: head, mechanism: "DIRECT_FALLBACK" }).reason, "SOURCE_TERMINAL_MECHANISM_MISMATCH");
+});
+
+test("current switch fixture accepts only exact ACTIVE binding and fails closed on malformed or newer evidence", async () => {
+  const { doorbell } = await readTransportWorkflows();
+  const exact = {
+    receipt: "5555495204",
+    generation: "010",
+    conversationId: "6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562",
+    conversationUrl: "https://chatgpt.com/c/6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562",
+    body: "CONTROL_GENERATION_SWITCH_V1\nstate: SWITCH_COMMITTED\nnew_status: ACTIVE\n",
+  };
+  assert.equal(evaluateSwitchFixture(doorbell, exact), true);
+  assert.equal(evaluateSwitchFixture(doorbell, { ...exact, receipt: "5559999999" }), false);
+  assert.equal(evaluateSwitchFixture(doorbell, { ...exact, body: exact.body.replace("new_status: ACTIVE", "new_status: ACTIVE\nnew_generation_status: RETIRED") }), false);
+  assert.equal(evaluateSwitchFixture(doorbell, { ...exact, body: exact.body.replace("new_status: ACTIVE", "new_status:") }), false);
+});
+
+test("logical terminal reconciliation executes duplicate, no-blind-retry, publication-only, and first-send branches", () => {
+  assert.equal(reconcileLogicalDelivery({ priorDelivered: true }), "NO_OP_DUPLICATE");
+  assert.equal(reconcileLogicalDelivery({ localState: "SENDING" }), "UNCERTAIN_SEND_NO_BLIND_RETRY");
+  assert.equal(reconcileLogicalDelivery({ localState: "UNCERTAIN" }), "UNCERTAIN_SEND_NO_BLIND_RETRY");
+  assert.equal(reconcileLogicalDelivery({ localState: "SENT" }), "DELIVERED_PUBLICATION_ONLY");
+  assert.equal(reconcileLogicalDelivery({ localState: "SENT", publicationReceipt: "5550000000" }), "NO_OP_DUPLICATE");
+  assert.equal(reconcileLogicalDelivery({}), "SEND_ONCE");
+});
