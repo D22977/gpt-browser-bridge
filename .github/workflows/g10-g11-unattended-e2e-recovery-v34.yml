@@ -1,0 +1,60 @@
+name: G10 G11 Unattended E2E Recovery V34
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: g10-g11-unattended-e2e-recovery-v34
+  cancel-in-progress: false
+
+jobs:
+  recover-and-guard:
+    if: >-
+      github.event.issue.number == 88 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'CONTROL_G10_G11_UNATTENDED_E2E_RECOVERY_WAKE_V34')
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: node {0}
+    steps:
+      - name: Normalize exact terminal, dispatch candidate once, guard physical Control wake
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import fs from 'node:fs';
+          const repo='D22977/gpt-browser-bridge', issue=88;
+          const adjudication='5557664516', terminalId='5557654499', cardId='GBB-UNATTENDED-RETURN-E2E-REPAIR-03';
+          const branch='worker/g10-g11-unattended-return-e2e-repair-03';
+          const head='43245ea7eb090f1769d3694b6695e59d9352408d', base='16798cf61bfe7c75eafcdaea261971838f31cc3f';
+          const expectedSwitch='5555495204', expectedGeneration='010', expectedConversation='6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562', expectedUrl='https://chatgpt.com/c/6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';
+          const allowedPaths=['.github/workflows/g10-g11-ready-return-control-doorbell-v2.yml','tests/baseline.test.mjs'];
+          const token=process.env.GH_TOKEN, sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function api(route,init={}){const r=await fetch(`https://api.github.com/repos/${repo}${route}`,{...init,headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json','User-Agent':'g10-g11-v34',...(init.headers||{})}});const t=await r.text();if(!r.ok)throw new Error(`GitHub ${r.status} ${route}: ${t}`);if(!t)return null;try{return JSON.parse(t)}catch{return t}}
+          const first=b=>String(b||'').split(/\r?\n/,1)[0].trim();
+          const line=(b,k)=>{const m=String(b||'').match(new RegExp(`^${k}:\\s*(.*?)\\s*$`,'m'));return m?m[1]:null};
+          async function comment(id){const c=await api(`/issues/comments/${id}`);if(!Number.isSafeInteger(c.id)||!String(c.issue_url).endsWith('/issues/88')||typeof c.body!=='string')throw new Error(`comment ${id} malformed`);return c}
+          async function recent(since){const out=[];for(let p=1;p<=50;p++){const xs=await api(`/issues/88/comments?since=${encodeURIComponent(since)}&per_page=100&page=${p}`);if(!Array.isArray(xs))throw new Error('comments not array');for(const c of xs){if(!Number.isSafeInteger(c.id)||typeof c.body!=='string')throw new Error('comment shape invalid');out.push(c)}if(xs.length<100)break}return out}
+          async function verify(){const a=await comment(expectedSwitch);if(first(a.body)!=='CONTROL_GENERATION_SWITCH_V1'||line(a.body,'state')!=='SWITCH_COMMITTED'||line(a.body,'new_generation')!==expectedGeneration||line(a.body,'new_conversation_id')!==expectedConversation||line(a.body,'new_conversation_url')!==expectedUrl||line(a.body,'new_status')!=='ACTIVE')throw new Error('current switch mismatch');for(const c of await recent(a.created_at)){if(String(c.id)===expectedSwitch||first(c.body)!=='CONTROL_GENERATION_SWITCH_V1')continue;if(BigInt(c.id)>BigInt(expectedSwitch))throw new Error(`newer switch evidence ${c.id}`)}return a}
+          async function publish(body){const x=await api(`/issues/${issue}/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body})});const rb=await comment(String(x.id));if(rb.body!==body)throw new Error('receipt readback mismatch');return String(x.id)}
+          async function final(state,canary,detail=''){return publish(['CONTROL_G10_G11_UNATTENDED_E2E_RESULT_V1',`state: ${state}`,`source_adjudication: ${adjudication}`,`source_worker_terminal_receipt: ${terminalId}`,`source_card_id: ${cardId}`,`candidate_head: ${head}`,`downstream_canary_receipt: ${canary||'NONE'}`,`active_switch_receipt: ${expectedSwitch}`,`target_control_generation: ${expectedGeneration}`,`target_control_conversation_id: ${expectedConversation}`,`physical_control_send_count: ${state==='PASS'?'1':'0'}`,`second_physical_control_send: false`,'user_relay_count: 0',`exact_control_wake: ${state==='PASS'?'PASS':'NOT_PASS'}`,`unattended_e2e: ${state==='PASS'?'PASS':'NOT_PASS'}`,detail?`detail: ${detail}`:'',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].filter(Boolean).join('\n'))}
+          const event=JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH,'utf8')),wake=String(event?.comment?.body||'');
+          if(first(wake)!=='CONTROL_G10_G11_UNATTENDED_E2E_RECOVERY_WAKE_V34'||line(wake,'source_adjudication')!==adjudication||line(wake,'source_worker_terminal')!==terminalId||line(wake,'candidate_head')!==head||line(wake,'source_current_switch')!==expectedSwitch)throw new Error('wake binding mismatch');
+          const anchor=await verify();const adj=await comment(adjudication);if(first(adj.body)!=='CONTROL_G10_G11_UNATTENDED_E2E_V33_SCHEMA_ALIAS_ADJUDICATION_V1'||line(adj.body,'v34_transport_recovery_authorized')!=='true')throw new Error('adjudication invalid');
+          const terminal=await comment(terminalId),tb=terminal.body;if(first(tb)!=='GBB_UNATTENDED_RETURN_E2E_REPAIR03_READY_V1'||line(tb,'state')!=='READY_FOR_CONTROL_CANARY'||line(tb,'card_id')!==cardId||line(tb,'branch')!==branch||line(tb,'candidate_head')!==head||line(tb,'parent_head')!==base||line(tb,'base_exact')!==base||line(tb,'selected_return_mechanism')!=='WORKFLOW_DISPATCH'||line(tb,'physical_control_canary_send_count')!=='0'||line(tb,'user_relay_count')!=='0')throw new Error('source terminal normalization failed');
+          const ref=await api(`/git/ref/heads/${branch}`);if(String(ref?.object?.sha)!==head)throw new Error('remote branch/head mismatch');
+          const commit=await api(`/commits/${head}`);if(!Array.isArray(commit?.parents)||commit.parents.length!==1||String(commit.parents[0]?.sha)!==base)throw new Error('remote parent mismatch');const files=(commit.files||[]).map(f=>String(f.filename)).sort();if(JSON.stringify(files)!==JSON.stringify([...allowedPaths].sort()))throw new Error(`changed paths mismatch ${files.join(',')}`);const byPath=new Map((commit.files||[]).map(f=>[String(f.filename),String(f.sha)]));if(byPath.get(allowedPaths[0])!==line(tb,'workflow_blob_sha')||byPath.get(allowedPaths[1])!==line(tb,'tests_blob_sha'))throw new Error('remote blob binding mismatch');
+          const wf=await api(`/contents/.github/workflows/g10-g11-ready-return-control-doorbell-v2.yml?ref=${head}`);const text=Buffer.from(String(wf.content||'').replace(/\n/g,''),'base64').toString('utf8');if(!text.includes("'GBB-UNATTENDED-RETURN-E2E-REPAIR-03'")||!text.includes("'GBB_UNATTENDED_RETURN_E2E_REPAIR03_READY_V1'"))throw new Error('candidate admission markers missing');
+          await verify();const prior=(await recent(anchor.created_at)).filter(c=>first(c.body)==='CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1'&&line(c.body,'source_terminal_receipt')===terminalId&&line(c.body,'source_card_id')===cardId&&line(c.body,'candidate_head')===head);if(prior.length){const delivered=prior.filter(c=>line(c.body,'state')==='DELIVERED');if(delivered.length===1&&line(delivered[0].body,'active_switch_receipt')===expectedSwitch&&line(delivered[0].body,'target_control_generation')===expectedGeneration&&line(delivered[0].body,'target_control_conversation_id')===expectedConversation&&line(delivered[0].body,'target_control_conversation_url')===expectedUrl&&line(delivered[0].body,'physical_send_count')==='1'&&line(delivered[0].body,'second_physical_send')==='false'&&line(delivered[0].body,'user_relay_count')==='0'){await final('PASS',String(delivered[0].id),'publication-only recovery from existing exact DELIVERED canary');process.exit(0)}throw new Error('prior non-PASS/ambiguous canary forbids retry')}
+          const idem=`${cardId}:${terminalId}:${head}`;await api('/actions/workflows/g10-g11-ready-return-control-doorbell-v2.yml/dispatches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:branch,inputs:{source_terminal_receipt:terminalId,source_card_id:cardId,candidate_head:head,idempotency_key:idem}})});
+          await publish(['CONTROL_G10_G11_UNATTENDED_E2E_RECOVERY_V34_CANARY_DISPATCH_V1','state: DISPATCHED',`source_adjudication: ${adjudication}`,`source_worker_terminal_receipt: ${terminalId}`,`source_card_id: ${cardId}`,`candidate_head: ${head}`,`candidate_branch: ${branch}`,'normalized_parent_alias: parent_head+base_exact','remote_parent_verified: true','changed_paths_verified: true','post_dispatch_terminal_guard: ACTIVE','physical_control_send_before_candidate: 0','user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].join('\n'));
+          for(let n=0;n<180;n++){await verify();const ms=(await recent(anchor.created_at)).filter(c=>first(c.body)==='CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1'&&line(c.body,'source_terminal_receipt')===terminalId&&line(c.body,'source_card_id')===cardId&&line(c.body,'candidate_head')===head);if(ms.length>1)throw new Error('multiple exact downstream canaries');if(ms.length===1){const c=ms[0],state=line(c.body,'state');if(state==='DELIVERED'&&line(c.body,'active_switch_receipt')===expectedSwitch&&line(c.body,'target_control_generation')===expectedGeneration&&line(c.body,'target_control_conversation_id')===expectedConversation&&line(c.body,'target_control_conversation_url')===expectedUrl&&line(c.body,'physical_send_count')==='1'&&line(c.body,'second_physical_send')==='false'&&line(c.body,'user_relay_count')==='0'){await final('PASS',String(c.id));process.exit(0)}await final('CONTROL_REQUIRED',String(c.id),`downstream state ${state||'MISSING'} did not satisfy PASS boundary`);throw new Error(`downstream canary not PASS: ${state}`)}await sleep(10000)}
+          await final('CONTROL_REQUIRED',null,'downstream canary timeout under active GitHub-hosted guard');throw new Error('downstream canary timeout');
