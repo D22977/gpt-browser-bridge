@@ -1,0 +1,112 @@
+name: G10 G11 Unattended Doorbell Binding Repair V36
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+jobs:
+  worker-repair:
+    if: github.event.issue.number == 88 && github.event.comment.user.login == 'D22977' && startsWith(github.event.comment.body, 'CONTROL_G10_G11_UNATTENDED_DOORBELL_BINDING_REPAIR_WAKE_V36')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 80
+    outputs:
+      terminal_id: ${{ steps.run.outputs.terminal_id }}
+      candidate_head: ${{ steps.run.outputs.candidate_head }}
+      worker_branch: ${{ steps.run.outputs.worker_branch }}
+    steps:
+      - id: run
+        name: Deliver one Repair05 Worker and guard exact READY
+        shell: node {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import crypto from 'node:crypto';
+          import {spawnSync} from 'node:child_process';
+          const repo='D22977/gpt-browser-bridge', issue=88;
+          const authority='5558790557', cardReceipt='5558785101', adjudication='5558782148';
+          const cardId='GBB-UNATTENDED-DOORBELL-BINDING-REPAIR-05';
+          const base='034c2e47d07ee58d19adbb90b94ee1d7a21a8f71';
+          const branch='worker/g10-g11-unattended-doorbell-binding-repair-05';
+          const expectedSwitch='5555495204', expectedGeneration='010', expectedConversation='6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';
+          const expectedSenderBlob='42e55aa194fee1243f8cf32e3c1a63e7ad86f78a';
+          const allowed=new Set(['.github/workflows/g10-g11-ready-return-control-doorbell-v2.yml','tests/baseline.test.mjs']);
+          const herdr='C:\\Users\\Lupun\\AppData\\Local\\Programs\\Herdr\\bin\\herdr.exe';
+          const stateDir='D:\\AIWORK_RUNTIME\\GPT_BROWSER_BRIDGE\\g10-g11-unattended-doorbell-binding-v36';
+          const stateFile=path.join(stateDir,'repair05-send.json'); fs.mkdirSync(stateDir,{recursive:true});
+          const token=process.env.GH_TOKEN, sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function api(route,init={}){const r=await fetch(`https://api.github.com/repos/${repo}${route}`,{...init,headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json','User-Agent':'g10-g11-v36-worker',...(init.headers||{})}});const t=await r.text();if(!r.ok)throw new Error(`GitHub ${r.status} ${route}: ${t}`);if(!t)return null;try{return JSON.parse(t)}catch{return t}}
+          const first=b=>String(b||'').split(/\r?\n/,1)[0].trim();
+          const line=(b,k)=>{const m=String(b||'').match(new RegExp(`^${k}:\\s*(.*?)\\s*$`,'m'));return m?m[1]:null};
+          async function comment(id){const c=await api(`/issues/comments/${id}`);if(!Number.isSafeInteger(c?.id)||!String(c.issue_url||'').endsWith('/issues/88')||typeof c.body!=='string')throw new Error(`comment ${id} malformed`);return c}
+          async function recent(since){const out=[];for(let p=1;p<=50;p++){const xs=await api(`/issues/88/comments?since=${encodeURIComponent(since)}&per_page=100&page=${p}`);if(!Array.isArray(xs))throw new Error('comments not array');for(const c of xs){if(!Number.isSafeInteger(c?.id)||typeof c.body!=='string')throw new Error('comment shape malformed');out.push(c)}if(xs.length<100)break}return out}
+          async function verifyAuthority(){const [sw,card,adj,auth]=await Promise.all([comment(expectedSwitch),comment(cardReceipt),comment(adjudication),comment(authority)]);if(first(sw.body)!=='CONTROL_GENERATION_SWITCH_V1'||line(sw.body,'state')!=='SWITCH_COMMITTED'||line(sw.body,'new_generation')!==expectedGeneration||line(sw.body,'new_conversation_id')!==expectedConversation||line(sw.body,'new_status')!=='ACTIVE')throw new Error('current switch mismatch');if(first(card.body)!=='DISPATCH_CARD_V1'||line(card.body,'card_id')!==cardId)throw new Error('card mismatch');if(first(adj.body)!=='CONTROL_G10_G11_UNATTENDED_E2E_REPAIR04_BINDING_ADJUDICATION_V1')throw new Error('adjudication mismatch');if(first(auth.body)!=='CONTROL_G10_G11_UNATTENDED_DOORBELL_BINDING_SPLIT_TRANSPORT_AUTHORITY_V36'||line(auth.body,'state')!=='AUTHORIZED')throw new Error('transport authority mismatch');for(const c of await recent(sw.created_at)){if(String(c.id)===expectedSwitch||first(c.body)!=='CONTROL_GENERATION_SWITCH_V1')continue;if(BigInt(c.id)>BigInt(expectedSwitch))throw new Error(`newer switch evidence ${c.id}`)}return sw}
+          async function publish(body){const x=await api(`/issues/${issue}/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body})});const rb=await comment(String(x.id));if(rb.body!==body)throw new Error('receipt readback mismatch');return String(x.id)}
+          function herdrJson(args){const r=spawnSync(herdr,args,{encoding:'utf8',windowsHide:true,maxBuffer:8*1024*1024});if(r.error||r.status!==0)throw new Error(`Herdr failed: ${r.error?.message||r.stderr||r.stdout}`);return JSON.parse(String(r.stdout||'').trim())}
+          function genericWorkers(list){const a=Array.isArray(list?.result?.agents)?list.result.agents:[];return a.filter(x=>x&&x.agent==='codex'&&['idle','done'].includes(String(x.agent_status))&&!String(x.name||'').trim()&&String(x.cwd)==='C:\\WINDOWS\\system32')}
+          function exactAgent(list,pane,session){const a=Array.isArray(list?.result?.agents)?list.result.agents:[];return a.filter(x=>x&&String(x.pane_id)===pane&&String(x?.agent_session?.value)===session)}
+          const event=JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH,'utf8')), wake=String(event?.comment?.body||'');
+          if(first(wake)!=='CONTROL_G10_G11_UNATTENDED_DOORBELL_BINDING_REPAIR_WAKE_V36'||line(wake,'source_transport_authority')!==authority||line(wake,'source_repair_card')!==cardReceipt||line(wake,'source_adjudication')!==adjudication||line(wake,'source_current_switch')!==expectedSwitch||line(wake,'source_prevalidation')==null)throw new Error('wake binding mismatch');
+          await verifyAuthority();
+          if(fs.existsSync(stateFile)){const s=JSON.parse(fs.readFileSync(stateFile,'utf8'));if(s.status==='SENDING')throw new Error('UNCERTAIN_WORKER_SEND_NO_BLIND_RETRY');if(s.status==='SENT')throw new Error('NO_OP_DUPLICATE_WORKER_SEND')}
+          const inv=herdrJson(['agent','list']), eligible=genericWorkers(inv);if(eligible.length!==1)throw new Error(`GENERIC_WORKER_COUNT_${eligible.length}`);const pane=String(eligible[0].pane_id||''), session=String(eligible[0]?.agent_session?.value||'');if(!pane||!session)throw new Error('worker binding missing');
+          await verifyAuthority();
+          const prompt='Read GitHub directly. Execute only D22977/gpt-browser-bridge Issue #88 card 5558785101 / GBB-UNATTENDED-DOORBELL-BINDING-REPAIR-05 as WORKER. Base exact 034c2e47d07ee58d19adbb90b94ee1d7a21a8f71. Modify only the two allowed paths, push worker/g10-g11-unattended-doorbell-binding-repair-05, publish/read-back GBB_UNATTENDED_DOORBELL_BINDING_REPAIR05_READY_V1, then stop. Do not edit src/gpt_send.mjs, do not send a Control message, do not act as Control/Reviewer, and do not create/send generation011.';
+          const promptHash=crypto.createHash('sha256').update(prompt).digest('hex');fs.writeFileSync(stateFile,JSON.stringify({status:'SENDING',pane,session,prompt_hash:promptHash}));
+          let sent;try{sent=herdrJson(['agent','prompt',pane,prompt])}catch{throw new Error('UNCERTAIN_WORKER_SEND_NO_BLIND_RETRY')}if(String(sent?.result?.type)!=='agent_prompted'||String(sent?.result?.agent?.pane_id)!==pane||String(sent?.result?.agent?.agent_session?.value)!==session)throw new Error('UNCERTAIN_WORKER_SEND_NO_BLIND_RETRY');
+          const delivery=await publish(['CONTROL_G10_G11_UNATTENDED_DOORBELL_BINDING_REPAIR05_V36_DELIVERY_V1','state: DELIVERED',`source_repair_card: ${cardReceipt}`,`target_pane: ${pane}`,`target_agent_session: ${session}`,`prompt_sha256: ${promptHash}`,'physical_worker_prompt_count: 1','second_physical_prompt: false','post_dispatch_terminal_guard: ACTIVE','user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].join('\n'));fs.writeFileSync(stateFile,JSON.stringify({status:'SENT',delivery,pane,session}));
+          let terminal=null,idle=0;const guardSince=String(event?.comment?.created_at||new Date().toISOString());
+          for(let n=0;n<320;n++){await verifyAuthority();const matches=(await recent(guardSince)).filter(c=>first(c.body)==='GBB_UNATTENDED_DOORBELL_BINDING_REPAIR05_READY_V1'&&line(c.body,'card_id')===cardId);if(matches.length>1)throw new Error('multiple Repair05 terminals');if(matches.length===1){terminal=matches[0];break}const now=herdrJson(['agent','list']), ex=exactAgent(now,pane,session);if(ex.length!==1)throw new Error('bound Worker disappeared');idle=['idle','done'].includes(String(ex[0].agent_status))?idle+1:0;if(idle>=6)throw new Error('Repair05 terminal missing after Worker idle/done');await sleep(15000)}
+          if(!terminal)throw new Error('Repair05 terminal timeout');if(line(terminal.body,'state')!=='READY_FOR_CONTROL_CANARY')throw new Error(`Repair05 terminal=${line(terminal.body,'state')}`);const head=line(terminal.body,'candidate_head');const parent=line(terminal.body,'candidate_parent');const wb=line(terminal.body,'worker_branch')||line(terminal.body,'branch');if(!/^[0-9a-f]{40}$/.test(head||'')||parent!==base||wb!==branch||line(terminal.body,'selected_return_mechanism')!=='WORKFLOW_DISPATCH')throw new Error('Repair05 READY binding invalid');
+          const ref=await api(`/git/ref/heads/${branch}`);if(String(ref?.object?.sha)!==head)throw new Error('remote branch/head mismatch');const commit=await api(`/commits/${head}`);if(String(commit?.parents?.[0]?.sha)!==base)throw new Error('remote parent mismatch');const cmp=await api(`/compare/${base}...${head}`);const files=Array.isArray(cmp?.files)?cmp.files.map(f=>String(f.filename)):[];if(!files.length||files.some(f=>!allowed.has(f))||!files.includes('.github/workflows/g10-g11-ready-return-control-doorbell-v2.yml'))throw new Error(`changed paths invalid: ${files.join(',')}`);
+          const sender=await api(`/contents/src/gpt_send.mjs?ref=${head}`), wf=await api(`/contents/.github/workflows/g10-g11-ready-return-control-doorbell-v2.yml?ref=${head}`);if(String(sender?.sha)!==expectedSenderBlob||!wf?.content)throw new Error('sender/workflow remote binding missing');const wfText=Buffer.from(String(wf.content).replace(/\n/g,''),'base64').toString('utf8');for(const marker of [expectedSenderBlob,cardId,'GBB_UNATTENDED_DOORBELL_BINDING_REPAIR05_READY_V1','GBB-UNATTENDED-COMPOSER-SENDER-REPAIR-04','GBB_UNATTENDED_COMPOSER_SENDER_REPAIR04_READY_V1'])if(!wfText.includes(marker))throw new Error(`workflow binding missing ${marker}`);
+          const stage=await publish(['CONTROL_G10_G11_UNATTENDED_DOORBELL_BINDING_REPAIR05_V36_WORKER_STAGE_V1','state: READY_AND_LOCAL_RUNNER_RELEASE_PENDING',`source_terminal_receipt: ${terminal.id}`,`candidate_head: ${head}`,`candidate_parent: ${base}`,`worker_branch: ${branch}`,`sender_blob_sha: ${sender.sha}`,`workflow_blob_sha: ${wf.sha}`,`changed_paths_exact: ${files.join(',')}`,'physical_worker_prompt_count: 1','user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].join('\n'));
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,`terminal_id=${terminal.id}\ncandidate_head=${head}\nworker_branch=${branch}\n`);
+
+  doorbell-guard:
+    needs: worker-repair
+    if: needs.worker-repair.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Dispatch repaired candidate once and guard exact Control canary
+        shell: node {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TERMINAL_ID: ${{ needs.worker-repair.outputs.terminal_id }}
+          CANDIDATE_HEAD: ${{ needs.worker-repair.outputs.candidate_head }}
+          WORKER_BRANCH: ${{ needs.worker-repair.outputs.worker_branch }}
+        run: |
+          const repo='D22977/gpt-browser-bridge',issue=88;
+          const expectedSwitch='5555495204', expectedGeneration='010', expectedConversation='6a9c2234-f4b4-83ee-ba4b-82c3ee3a2562';
+          const authority='5558790557', cardReceipt='5558785101', adjudication='5558782148';
+          const cardId='GBB-UNATTENDED-DOORBELL-BINDING-REPAIR-05', base='034c2e47d07ee58d19adbb90b94ee1d7a21a8f71';
+          const expectedSenderBlob='42e55aa194fee1243f8cf32e3c1a63e7ad86f78a';
+          const terminal=String(process.env.TERMINAL_ID||''), head=String(process.env.CANDIDATE_HEAD||''), branch=String(process.env.WORKER_BRANCH||'');
+          const token=process.env.GH_TOKEN,sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function api(route,init={}){const r=await fetch(`https://api.github.com/repos/${repo}${route}`,{...init,headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json','User-Agent':'g10-g11-v36-guard',...(init.headers||{})}});const t=await r.text();if(!r.ok)throw new Error(`GitHub ${r.status} ${route}: ${t}`);if(!t)return null;try{return JSON.parse(t)}catch{return t}}
+          const first=b=>String(b||'').split(/\r?\n/,1)[0].trim();const line=(b,k)=>{const m=String(b||'').match(new RegExp(`^${k}:\\s*(.*?)\\s*$`,'m'));return m?m[1]:null};
+          async function comment(id){const c=await api(`/issues/comments/${id}`);if(!Number.isSafeInteger(c?.id)||!String(c.issue_url||'').endsWith('/issues/88')||typeof c.body!=='string')throw new Error(`comment ${id} malformed`);return c}
+          async function recent(since){const out=[];for(let p=1;p<=50;p++){const xs=await api(`/issues/88/comments?since=${encodeURIComponent(since)}&per_page=100&page=${p}`);if(!Array.isArray(xs))throw new Error('comments not array');out.push(...xs);if(xs.length<100)break}return out}
+          async function publish(body){const x=await api(`/issues/${issue}/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body})});const rb=await comment(String(x.id));if(rb.body!==body)throw new Error('receipt readback mismatch');return String(x.id)}
+          async function verifyAuthority(){const [sw,card,adj,auth]=await Promise.all([comment(expectedSwitch),comment(cardReceipt),comment(adjudication),comment(authority)]);if(first(sw.body)!=='CONTROL_GENERATION_SWITCH_V1'||line(sw.body,'state')!=='SWITCH_COMMITTED'||line(sw.body,'new_generation')!==expectedGeneration||line(sw.body,'new_conversation_id')!==expectedConversation||line(sw.body,'new_status')!=='ACTIVE')throw new Error('current switch mismatch');if(first(card.body)!=='DISPATCH_CARD_V1'||line(card.body,'card_id')!==cardId)throw new Error('card mismatch');if(first(adj.body)!=='CONTROL_G10_G11_UNATTENDED_E2E_REPAIR04_BINDING_ADJUDICATION_V1')throw new Error('adjudication mismatch');if(first(auth.body)!=='CONTROL_G10_G11_UNATTENDED_DOORBELL_BINDING_SPLIT_TRANSPORT_AUTHORITY_V36'||line(auth.body,'state')!=='AUTHORIZED')throw new Error('authority mismatch');for(const c of await recent(sw.created_at)){if(String(c.id)===expectedSwitch||first(c.body)!=='CONTROL_GENERATION_SWITCH_V1')continue;if(BigInt(c.id)>BigInt(expectedSwitch))throw new Error(`newer switch evidence ${c.id}`)}}
+          async function publishResult(state,canary='NONE',detail=''){const body=['CONTROL_G10_G11_UNATTENDED_E2E_RESULT_V1',`state: ${state}`,`source_adjudication: ${adjudication}`,`source_worker_terminal_receipt: ${terminal}`,`source_card_id: ${cardId}`,`candidate_head: ${head}`,`downstream_canary_receipt: ${canary}`,`active_switch_receipt: ${expectedSwitch}`,`target_control_generation: ${expectedGeneration}`,`target_control_conversation_id: ${expectedConversation}`,`physical_control_send_count: ${state==='PASS'?'1':'NOT_PASS'}`,'second_physical_control_send: false','user_relay_count: 0',`exact_control_wake: ${state==='PASS'?'PASS':'NOT_PASS'}`,`unattended_e2e: ${state==='PASS'?'PASS':'NOT_PASS'}`,detail?`detail: ${detail.replace(/[\r\n]+/g,' ').slice(0,500)}`:'',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].filter(Boolean).join('\n');return publish(body)}
+          try{
+            await verifyAuthority();if(!/^\d+$/.test(terminal)||!/^[0-9a-f]{40}$/.test(head)||branch!=='worker/g10-g11-unattended-doorbell-binding-repair-05')throw new Error('job output binding invalid');
+            const term=await comment(terminal);if(first(term.body)!=='GBB_UNATTENDED_DOORBELL_BINDING_REPAIR05_READY_V1'||line(term.body,'state')!=='READY_FOR_CONTROL_CANARY'||line(term.body,'card_id')!==cardId||line(term.body,'candidate_head')!==head||line(term.body,'candidate_parent')!==base||line(term.body,'selected_return_mechanism')!=='WORKFLOW_DISPATCH')throw new Error('terminal binding invalid');
+            const ref=await api(`/git/ref/heads/${branch}`);if(String(ref?.object?.sha)!==head)throw new Error('remote branch/head mismatch');const commit=await api(`/commits/${head}`);if(String(commit?.parents?.[0]?.sha)!==base)throw new Error('remote parent mismatch');const cmp=await api(`/compare/${base}...${head}`);const files=Array.isArray(cmp?.files)?cmp.files.map(f=>String(f.filename)):[];const allowed=new Set(['.github/workflows/g10-g11-ready-return-control-doorbell-v2.yml','tests/baseline.test.mjs']);if(!files.length||files.some(f=>!allowed.has(f)))throw new Error(`scope mismatch ${files.join(',')}`);
+            const sender=await api(`/contents/src/gpt_send.mjs?ref=${head}`),wf=await api(`/contents/.github/workflows/g10-g11-ready-return-control-doorbell-v2.yml?ref=${head}`);if(String(sender?.sha)!==expectedSenderBlob||!wf?.content)throw new Error('remote sender/workflow binding missing');const wfText=Buffer.from(String(wf.content).replace(/\n/g,''),'base64').toString('utf8');for(const marker of [expectedSenderBlob,cardId,'GBB_UNATTENDED_DOORBELL_BINDING_REPAIR05_READY_V1','GBB-UNATTENDED-COMPOSER-SENDER-REPAIR-04','GBB_UNATTENDED_COMPOSER_SENDER_REPAIR04_READY_V1'])if(!wfText.includes(marker))throw new Error(`workflow binding missing ${marker}`);
+            await verifyAuthority();const guardSince=new Date(Date.now()-5000).toISOString();const idempotency=`${cardId}:${terminal}:${head}`;
+            await api('/actions/workflows/g10-g11-ready-return-control-doorbell-v2.yml/dispatches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref:branch,inputs:{source_terminal_receipt:terminal,source_card_id:cardId,candidate_head:head,idempotency_key:idempotency}})});
+            await publish(['CONTROL_G10_G11_UNATTENDED_DOORBELL_BINDING_V36_CANARY_DISPATCH_V1','state: DISPATCHED',`source_worker_terminal_receipt: ${terminal}`,`source_card_id: ${cardId}`,`candidate_head: ${head}`,`candidate_branch: ${branch}`,'post_dispatch_terminal_guard: ACTIVE','physical_control_send_before_candidate: 0','user_relay_count: 0',`workflow_run_id: ${process.env.GITHUB_RUN_ID}`,'readback_required: true'].join('\n'));
+            let canary=null;for(let n=0;n<120;n++){await verifyAuthority();const matches=(await recent(guardSince)).filter(c=>first(c.body)==='CONTROL_UNATTENDED_RETURN_DOORBELL_CANARY_V1'&&line(c.body,'source_terminal_receipt')===terminal&&line(c.body,'source_card_id')===cardId&&line(c.body,'candidate_head')===head);if(matches.length>1)throw new Error('multiple downstream canaries');if(matches.length===1){canary=matches[0];break}await sleep(15000)}if(!canary)throw new Error('downstream canary timeout');
+            const ok=line(canary.body,'state')==='DELIVERED'&&line(canary.body,'active_switch_receipt')===expectedSwitch&&line(canary.body,'target_control_generation')===expectedGeneration&&line(canary.body,'target_control_conversation_id')===expectedConversation&&line(canary.body,'physical_send_count')==='1'&&line(canary.body,'second_physical_send')==='false'&&line(canary.body,'user_relay_count')==='0';
+            if(!ok){await publishResult('CONTROL_REQUIRED',String(canary.id),`downstream state ${line(canary.body,'state')||'MALFORMED'} did not satisfy PASS boundary`);throw new Error('downstream canary NOT_PASS')}
+            await publishResult('PASS',String(canary.id),'exact Control wake and unattended E2E PASS');
+          }catch(e){const msg=String(e?.message||e);try{const rs=await recent(new Date(Date.now()-3600000).toISOString());const existing=rs.find(c=>first(c.body)==='CONTROL_G10_G11_UNATTENDED_E2E_RESULT_V1'&&line(c.body,'source_worker_terminal_receipt')===terminal&&line(c.body,'candidate_head')===head);if(!existing)await publishResult('CONTROL_REQUIRED','NONE',msg)}catch{}throw e}
