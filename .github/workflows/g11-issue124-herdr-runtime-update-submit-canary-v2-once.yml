@@ -1,0 +1,270 @@
+name: G11 Issue124 Herdr Runtime Update Submit Canary V2 Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g11-issue124-herdr-update-submit-v2-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  canary-v2:
+    if: >-
+      github.event.issue.number == 124 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'HERDR_RUNTIME_UPDATE_SUBMIT_CANARY_WAKE_V2')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: V2 exact switch admission, official update, fresh submit proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D22977/gpt-browser-bridge'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $expectedAuthority = '5565375438'
+          $expectedCard = '5565343447'
+          $currentSwitchReceipt = [int64]5559192452
+          $historicalPane = 'w2:p1'
+          $historicalSession = '01a0513f-4e68-7573-bf38-72e2120ebe1d'
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            'User-Agent' = 'g11-herdr-update-submit-canary-v2'
+            Accept = 'application/vnd.github+json'
+          }
+
+          function Need([string]$body, [string]$pattern, [string]$name) {
+            $m = [regex]::Match($body, $pattern)
+            if (-not $m.Success) { throw "Malformed field: $name" }
+            return $m.Groups[1].Value
+          }
+
+          function Publish124([string]$text) {
+            $payload = @{ body = $text } | ConvertTo-Json -Compress
+            $posted = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/124/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $readback = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$readback.body -cne $text) { throw "readback mismatch receipt=$($posted.id)" }
+            return [string]$posted.id
+          }
+
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $body = [string]$event.comment.body
+          $wakeId = [string]$event.comment.id
+          $phase = 'PREFLIGHT'
+          $workspaceId = ''
+          $pane = ''
+          $agentName = ''
+          $session = ''
+          $before = ''
+          $after = ''
+          $statePath = ''
+
+          try {
+            $authority = Need $body '(?m)^authority_receipt:\s*(\d+)\s*$' 'authority_receipt'
+            $card = Need $body '(?m)^repair_card_receipt:\s*(\d+)\s*$' 'repair_card_receipt'
+            [void](Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key')
+            if ($authority -cne $expectedAuthority -or $card -cne $expectedCard) { throw 'Wake authority mismatch' }
+
+            $switch = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$currentSwitchReceipt" -Headers $headers -Method Get -TimeoutSec 30
+            $switchBody = [string]$switch.body
+            if (-not $switchBody.StartsWith('CONTROL_GENERATION_SWITCH_V1')) { throw 'Exact switch protocol mismatch' }
+            if ($switchBody -notmatch '(?m)^state:\s*SWITCH_COMMITTED\s*$') { throw 'Exact switch not committed' }
+            if ($switchBody -notmatch '(?m)^new_generation:\s*011\s*$') { throw 'Exact switch generation mismatch' }
+            if ($switchBody -notmatch '(?m)^new_generation_status:\s*ACTIVE\s*$') { throw 'Exact switch generation not ACTIVE' }
+
+            $newerSwitches = @()
+            for ($page = 1; $page -le 10; $page++) {
+              $recent = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=2026-09-06T12%3A24%3A23Z&per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+              $newerSwitches += @($recent | Where-Object {
+                [int64]$_.id -gt $currentSwitchReceipt -and
+                [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+                [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
+              })
+              if ($recent.Count -lt 100) { break }
+            }
+            if ($newerSwitches.Count -gt 0) { throw "Newer committed Control switch exists: $([string]$newerSwitches[-1].id)" }
+
+            if (-not (Test-Path -LiteralPath $herdr)) { throw 'Herdr CLI missing' }
+            if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "Unexpected runner: $env:RUNNER_NAME" }
+            if (-not [Environment]::UserInteractive -or [System.Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'Runner not interactive' }
+
+            $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\herdr-update-submit-canary-v2'
+            New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+            $statePath = Join-Path $stateRoot "$wakeId.json"
+            if (Test-Path -LiteralPath $statePath) { throw 'Existing local V2 state; no blind rerun' }
+            @{
+              status = 'ADMITTED'
+              phase = $phase
+              wake_id = $wakeId
+              workflow_run_id = $env:GITHUB_RUN_ID
+              created_at = (Get-Date).ToString('o')
+            } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+            $phase = 'HERDR_UPDATE'
+            $before = ((& $herdr --version 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw 'herdr --version failed' }
+
+            $previewUpdate = ((& $herdr update 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "preview update failed: $previewUpdate" }
+
+            $channel = ((& $herdr channel set stable 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "channel set stable failed: $channel" }
+
+            $handoff = ((& $herdr update --handoff 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "live handoff failed: $handoff" }
+
+            $after = ((& $herdr --version 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw 'updated herdr --version failed' }
+            $vm = [regex]::Match($after, '(\d+)\.(\d+)\.(\d+)')
+            if (-not $vm.Success) { throw "cannot parse updated version: $after" }
+            $version = [version]::new([int]$vm.Groups[1].Value, [int]$vm.Groups[2].Value, [int]$vm.Groups[3].Value)
+            if ($version -lt [version]'0.8.2') { throw "Herdr below 0.8.2 after update: $after" }
+
+            $phase = 'FRESH_AGENT_START'
+            $createdRaw = ((& $herdr workspace create --cwd 'C:\WINDOWS\system32' --label "gbb124-v2-$wakeId" --no-focus 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "workspace create failed: $createdRaw" }
+            $created = $createdRaw | ConvertFrom-Json
+            $workspaceId = [string]$created.result.workspace.workspace_id
+            $pane = [string]$created.result.root_pane.pane_id
+            if ([string]::IsNullOrWhiteSpace($workspaceId) -or [string]::IsNullOrWhiteSpace($pane)) { throw 'workspace identity missing' }
+            if ($pane -ceq $historicalPane) { throw 'historical pane reused' }
+
+            $suffix = $wakeId.Substring([Math]::Max(0, $wakeId.Length - 6))
+            $agentName = "gbb124v2$suffix"
+            $startRaw = ((& $herdr agent start $agentName --kind codex --pane $pane 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "agent start failed or blocked: $startRaw" }
+
+            $listRaw = ((& $herdr agent list 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw 'agent list failed' }
+            $agents = @(($listRaw | ConvertFrom-Json).result.agents)
+            $fresh = @($agents | Where-Object { [string]$_.name -ceq $agentName })
+            if ($fresh.Count -ne 1) { throw "fresh agent count=$($fresh.Count)" }
+            if ([string]$fresh[0].pane_id -cne $pane) { throw 'fresh pane binding mismatch' }
+            $session = [string]$fresh[0].agent_session.value
+            if ([string]::IsNullOrWhiteSpace($session)) { throw 'fresh session missing' }
+            if ($session -ceq $historicalSession) { throw 'historical session reused' }
+            if ([string]$fresh[0].agent_status -eq 'blocked') { throw 'fresh agent blocked before prompt' }
+
+            $phase = 'SUBMIT_PROOF'
+            @{
+              status = 'PROMPT_SENDING'
+              phase = $phase
+              wake_id = $wakeId
+              workspace_id = $workspaceId
+              pane_id = $pane
+              agent_name = $agentName
+              agent_session = $session
+              workflow_run_id = $env:GITHUB_RUN_ID
+              updated_at = (Get-Date).ToString('o')
+            } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+            $challenge = "G11R2-$wakeId-X7q"
+            $chars = $challenge.ToCharArray()
+            [array]::Reverse($chars)
+            $expectedResponse = -join $chars
+            $promptText = "Reverse the characters of this token and reply with only the reversed token: $challenge"
+            $promptRaw = ((& $herdr agent prompt $agentName $promptText --wait --timeout 60000 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "agent prompt --wait failed after send boundary: $promptRaw" }
+
+            $readRaw = ((& $herdr agent read $agentName --lines 100 2>&1) | Out-String)
+            if ($LASTEXITCODE -ne 0) { throw 'agent read failed' }
+            if ($readRaw -notmatch [regex]::Escape($expectedResponse)) { throw 'derived response token missing; downstream execution not proven' }
+
+            $phase = 'PASS'
+            @{
+              status = 'PASS'
+              phase = $phase
+              wake_id = $wakeId
+              workspace_id = $workspaceId
+              pane_id = $pane
+              agent_name = $agentName
+              agent_session = $session
+              version_before = $before
+              version_after = $after
+              workflow_run_id = $env:GITHUB_RUN_ID
+              finished_at = (Get-Date).ToString('o')
+            } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+            $result = @(
+              'HERDR_RUNTIME_UPDATE_SUBMIT_CANARY_RESULT_V2'
+              'state: PASS'
+              "source_wake_comment_id: $wakeId"
+              "authority_receipt: $authority"
+              "repair_card_receipt: $card"
+              "herdr_version_before: $before"
+              "herdr_version_after: $after"
+              'channel_target: stable'
+              'live_handoff: PASS'
+              "fresh_workspace: $workspaceId"
+              "fresh_pane: $pane"
+              "fresh_agent: $agentName"
+              "fresh_agent_session: $session"
+              'historical_pane_reused: false'
+              'historical_session_reused: false'
+              'agent_prompt_wait: PASS'
+              'derived_response_readback: PASS'
+              'herdr_send_keys_fallback_used: false'
+              'owner_enter_count: 0'
+              'user_task_result_relay_count: 0'
+              'orca_used: false'
+              "workflow_run_id: $env:GITHUB_RUN_ID"
+              'readback_verified: true'
+            ) -join "`n"
+            [void](Publish124 $result)
+          }
+          catch {
+            $diag = ($_.Exception.Message -replace '[\r\n]+',' ')
+            if (-not [string]::IsNullOrWhiteSpace($statePath)) {
+              @{
+                status = 'BLOCKED'
+                phase = $phase
+                wake_id = $wakeId
+                workspace_id = $workspaceId
+                pane_id = $pane
+                agent_name = $agentName
+                agent_session = $session
+                version_before = $before
+                version_after = $after
+                diagnostic = $diag
+                workflow_run_id = $env:GITHUB_RUN_ID
+                failed_at = (Get-Date).ToString('o')
+              } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+            }
+            $result = @(
+              'HERDR_RUNTIME_UPDATE_SUBMIT_CANARY_RESULT_V2'
+              'state: BLOCKED'
+              "source_wake_comment_id: $wakeId"
+              "phase: $phase"
+              "herdr_version_before: $before"
+              "herdr_version_after: $after"
+              "fresh_workspace: $workspaceId"
+              "fresh_pane: $pane"
+              "fresh_agent: $agentName"
+              "fresh_agent_session: $session"
+              "diagnostic: $diag"
+              'prompt_retry_performed: false'
+              'herdr_send_keys_fallback_used: false'
+              'owner_enter_count: 0'
+              'user_task_result_relay_count: 0'
+              'orca_used: false'
+              "workflow_run_id: $env:GITHUB_RUN_ID"
+              'readback_verified: true'
+            ) -join "`n"
+            [void](Publish124 $result)
+            exit 1
+          }
+          finally {
+            if (-not [string]::IsNullOrWhiteSpace($workspaceId)) {
+              try { & $herdr workspace close $workspaceId | Out-Null } catch {}
+            }
+          }
