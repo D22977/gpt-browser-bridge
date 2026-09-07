@@ -1,0 +1,496 @@
+name: G11 Issue138 Herdr Named Session Fresh Canary Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g11-issue138-herdr-named-session-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  named-session-canary:
+    if: >-
+      github.event.issue.number == 138 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'HERDR_SERVER_COMPAT_FRESH_CANARY_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Exact authority, isolated server, fresh challenge, durable terminal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D22977/gpt-browser-bridge'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $expectedAdjudication = '5570474282'
+          $expectedIndex = '5570483115'
+          $expectedParentPointer = '5570333007'
+          $currentSwitchReceipt = '5559192452'
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            'User-Agent' = 'g11-issue138-herdr-named-session-canary'
+            Accept = 'application/vnd.github+json'
+          }
+
+          function Need([string]$body, [string]$pattern, [string]$name) {
+            $m = [regex]::Match($body, $pattern)
+            if (-not $m.Success) { throw "Malformed field: $name" }
+            return $m.Groups[1].Value
+          }
+
+          function Publish([int]$issue, [string]$text) {
+            $payload = @{ body = $text } | ConvertTo-Json -Compress
+            $posted = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $readback = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$readback.body -cne $text) { throw "readback mismatch receipt=$($posted.id)" }
+            return [string]$posted.id
+          }
+
+          function HashText([string]$text) {
+            $bytes = [Text.Encoding]::UTF8.GetBytes($text)
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try { return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+            finally { $sha.Dispose() }
+          }
+
+          function SafeOneLine([string]$text) {
+            if ($null -eq $text) { return '' }
+            $v = ($text -replace '[\r\n]+',' ' -replace '[\x00-\x1F]',' ').Trim()
+            if ($v.Length -gt 500) { return $v.Substring(0,500) }
+            return $v
+          }
+
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $body = [string]$event.comment.body
+          $wakeId = [string]$event.comment.id
+          $authority = Need $body '(?m)^authority_receipt:\s*(\d+)\s*$' 'authority_receipt'
+          $index = Need $body '(?m)^current_index_receipt:\s*(\d+)\s*$' 'current_index_receipt'
+          $idem = Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
+          if ($authority -cne $expectedAdjudication -or $index -cne $expectedIndex) { throw 'wake authority mismatch' }
+
+          $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\issue138-herdr-named-session-canary'
+          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+          $statePath = Join-Path $stateRoot "$wakeId.json"
+          if (Test-Path -LiteralPath $statePath) {
+            $existing = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            $dup = @(
+              'HERDR_SERVER_COMPAT_FRESH_CANARY_RESULT_V1'
+              'state: NO_OP_DUPLICATE'
+              "source_wake_comment_id: $wakeId"
+              "idempotency_key: $idem"
+              "existing_state: $([string]$existing.status)"
+              'prompt_count: 0'
+              'owner_enter_count: 0'
+              'orca_used: false'
+              'readback_verified: true'
+            ) -join "`n"
+            [void](Publish 138 $dup)
+            exit 0
+          }
+
+          $phase = 'PREFLIGHT'
+          $namedSession = ''
+          $workspaceId = ''
+          $pane = ''
+          $agentName = ''
+          $agentSession = ''
+          $serverProcId = ''
+          $promptCount = 0
+          $markerSeen = $false
+          $cleanupState = 'NOT_STARTED'
+          $evidenceReceipt = ''
+          $promptOutcome = ''
+          $clientVersion = ''
+          $defaultInventoryHash = ''
+          $defaultInventorySummary = ''
+          $processInventoryHash = ''
+          $processCount = 0
+          $uncertain = $false
+          $serverStarted = $false
+
+          try {
+            # Durable authority preflight.
+            foreach ($receipt in @($expectedAdjudication,$expectedIndex,$expectedParentPointer,$currentSwitchReceipt)) {
+              $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$receipt" -Headers $headers -Method Get -TimeoutSec 30
+              if ([string]::IsNullOrWhiteSpace([string]$r.body)) { throw "authority receipt unreadable: $receipt" }
+            }
+            $switch = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$currentSwitchReceipt" -Headers $headers -Method Get -TimeoutSec 30
+            $switchBody = [string]$switch.body
+            if (-not $switchBody.StartsWith('CONTROL_GENERATION_SWITCH_V1')) { throw 'switch protocol mismatch' }
+            if ($switchBody -notmatch '(?m)^state:\s*SWITCH_COMMITTED\s*$' -or $switchBody -notmatch '(?m)^new_generation:\s*011\s*$' -or $switchBody -notmatch '(?m)^new_generation_status:\s*ACTIVE\s*$') { throw 'generation011 is not exact ACTIVE switch' }
+
+            $newerSwitches = @()
+            for ($page = 1; $page -le 10; $page++) {
+              $recent = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=2026-09-06T12%3A24%3A24Z&per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+              $newerSwitches += @($recent | Where-Object { [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' })
+              if ($recent.Count -lt 100) { break }
+            }
+            if ($newerSwitches.Count -gt 0) { throw 'newer committed Control switch exists' }
+
+            $newerIndexes = @()
+            for ($page = 1; $page -le 5; $page++) {
+              $recent43 = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/43/comments?since=2026-09-07T12%3A15%3A28Z&per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+              $newerIndexes += @($recent43 | Where-Object { [string]$_.body -match '(?m)^CURRENT_REHYDRATION_INDEX_V\d+\s*$' -and [string]$_.body -match '(?m)^state:\s*CURRENT\s*$' })
+              if ($recent43.Count -lt 100) { break }
+            }
+            if ($newerIndexes.Count -gt 0) { throw 'newer CURRENT_REHYDRATION_INDEX exists' }
+
+            if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "unexpected runner=$env:RUNNER_NAME" }
+            if (-not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'runner is not interactive user session' }
+            if (-not (Test-Path -LiteralPath $herdr)) { throw 'Herdr CLI missing' }
+            $clientVersion = ((& $herdr --version 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $clientVersion -notmatch '0\.8\.2') { throw "Herdr client is not exact stable 0.8.2: $clientVersion" }
+
+            # Read-only inventory. Failure to query the old default runtime is recorded/protected, not repaired here.
+            $phase = 'READ_ONLY_INVENTORY'
+            $defaultPieces = @()
+            try {
+              $s = ((& $herdr session list --json 2>&1) | Out-String).Trim()
+              $defaultPieces += "session_list_exit=$LASTEXITCODE;$s"
+            } catch { $defaultPieces += "session_list_error=$($_.Exception.Message)" }
+            try {
+              $a = ((& $herdr agent list 2>&1) | Out-String).Trim()
+              $defaultPieces += "agent_list_exit=$LASTEXITCODE;$a"
+            } catch { $defaultPieces += "agent_list_error=$($_.Exception.Message)" }
+            $defaultRaw = $defaultPieces -join "`n"
+            $defaultInventoryHash = HashText $defaultRaw
+            $defaultInventorySummary = if ($defaultRaw -match 'protocol_mismatch|protocol 19') { 'DEFAULT_RUNTIME_PROTECTED_PROTOCOL19_OR_UNREADABLE' } else { 'DEFAULT_RUNTIME_READ_ONLY_OBSERVED_NO_MUTATION' }
+
+            $procRows = @(Get-CimInstance Win32_Process | Where-Object { [string]$_.Name -match '(?i)^herdr(\.exe)?$' } | ForEach-Object {
+              "pid=$($_.ProcessId);ppid=$($_.ParentProcessId);session=$($_.SessionId);name=$($_.Name);cmdhash=$(HashText ([string]$_.CommandLine))"
+            })
+            $processCount = $procRows.Count
+            $processInventoryHash = HashText ($procRows -join "`n")
+
+            @{
+              status = 'ADMITTED_INVENTORY_COMPLETE'
+              phase = $phase
+              wake_id = $wakeId
+              runner_name = $env:RUNNER_NAME
+              runner_user = "$env:USERDOMAIN\\$env:USERNAME"
+              runner_session_id = [Diagnostics.Process]::GetCurrentProcess().SessionId
+              client_version = $clientVersion
+              default_inventory_hash = $defaultInventoryHash
+              default_inventory_summary = $defaultInventorySummary
+              herdr_process_count = $processCount
+              herdr_process_inventory_hash = $processInventoryHash
+              default_runtime_mutation_authorized = $false
+              created_at = (Get-Date).ToString('o')
+            } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+            # Preferred recovery: independent named runtime. Never stop/mutate the old default server.
+            $phase = 'NAMED_SERVER_START'
+            $suffix = $wakeId.Substring([Math]::Max(0,$wakeId.Length-8))
+            $namedSession = "g138-$suffix"
+            $agentName = "g138c$suffix"
+            if ($agentName.Length -gt 32) { $agentName = $agentName.Substring(0,32) }
+
+            $stdout = Join-Path $stateRoot "$wakeId-server.out.log"
+            $stderr = Join-Path $stateRoot "$wakeId-server.err.log"
+            $serverProc = Start-Process -FilePath $herdr -ArgumentList @('--session',$namedSession,'server') -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $serverProcId = [string]$serverProc.Id
+            $serverReady = $false
+            $serverStatusRaw = ''
+            for ($i=0; $i -lt 30; $i++) {
+              Start-Sleep -Milliseconds 500
+              try {
+                $serverStatusRaw = ((& $herdr --session $namedSession status server 2>&1) | Out-String).Trim()
+                if ($LASTEXITCODE -eq 0 -and $serverStatusRaw -notmatch 'protocol_mismatch|protocol 19') { $serverReady = $true; break }
+              } catch {}
+              if ($serverProc.HasExited) { break }
+            }
+            if (-not $serverReady) {
+              $err = if (Test-Path $stderr) { SafeOneLine (Get-Content -LiteralPath $stderr -Raw) } else { '' }
+              throw "isolated named Herdr server did not become compatible: $err"
+            }
+            $serverStarted = $true
+
+            $phase = 'FRESH_AGENT_START'
+            $createdRaw = ((& $herdr --session $namedSession workspace create --cwd 'C:\WINDOWS\system32' --label "g138-$wakeId" --no-focus 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "named workspace create failed: $(SafeOneLine $createdRaw)" }
+            $created = $createdRaw | ConvertFrom-Json
+            $workspaceId = [string]$created.result.workspace.workspace_id
+            $pane = [string]$created.result.root_pane.pane_id
+            if ([string]::IsNullOrWhiteSpace($workspaceId) -or [string]::IsNullOrWhiteSpace($pane)) { throw 'fresh workspace identity missing' }
+
+            $startRaw = ((& $herdr --session $namedSession agent start $agentName --kind codex --pane $pane --timeout 90000 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "fresh agent start failed: $(SafeOneLine $startRaw)" }
+            $listRaw = ((& $herdr --session $namedSession agent list 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw 'fresh agent list failed' }
+            $agents = @(($listRaw | ConvertFrom-Json).result.agents)
+            $fresh = @($agents | Where-Object { [string]$_.name -ceq $agentName })
+            if ($fresh.Count -ne 1) { throw "fresh agent count=$($fresh.Count)" }
+            if ([string]$fresh[0].pane_id -cne $pane) { throw 'fresh pane binding mismatch' }
+            $agentSession = [string]$fresh[0].agent_session.value
+            if ([string]::IsNullOrWhiteSpace($agentSession)) { throw 'fresh agent session missing' }
+
+            $phase = 'SUBMIT_CHALLENGE'
+            $challenge = "G138-$wakeId-Q9m"
+            $chars = $challenge.ToCharArray(); [array]::Reverse($chars); $expected = -join $chars
+            $promptText = "Reverse the characters of this token and reply with only the reversed token: $challenge"
+            @{
+              status = 'PROMPT_SENDING'
+              phase = $phase
+              wake_id = $wakeId
+              named_session = $namedSession
+              workspace_id = $workspaceId
+              pane_id = $pane
+              agent_name = $agentName
+              agent_session = $agentSession
+              prompt_count = 0
+              challenge_hash = HashText $challenge
+              expected_marker_hash = HashText $expected
+              updated_at = (Get-Date).ToString('o')
+            } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+            $promptCount = 1
+            $promptExit = 0
+            $promptRaw = ''
+            try {
+              $promptRaw = ((& $herdr --session $namedSession agent prompt $agentName $promptText --wait --timeout 60000 2>&1) | Out-String).Trim()
+              $promptExit = $LASTEXITCODE
+            } catch {
+              $promptExit = 1
+              $promptRaw = $_.Exception.Message
+            }
+            $promptOutcome = "exit=$promptExit;hash=$(HashText $promptRaw)"
+
+            # --wait can false-negative. Never resend. Read/status only for up to 90 seconds.
+            $phase = 'READ_ONLY_RECONCILE_AFTER_SINGLE_PROMPT'
+            for ($i=0; $i -lt 45; $i++) {
+              try {
+                $readRaw = ((& $herdr --session $namedSession agent read $agentName --lines 120 2>&1) | Out-String)
+                if ($LASTEXITCODE -eq 0 -and $readRaw -match [regex]::Escape($expected)) { $markerSeen = $true; break }
+              } catch {}
+              Start-Sleep -Seconds 2
+            }
+            if (-not $markerSeen) { $uncertain = $true }
+
+            # Durable evidence comes before cleanup. No raw agent terminal output is published.
+            $phase = 'EVIDENCE_PUBLICATION'
+            $evidence = @(
+              'HERDR_SERVER_COMPAT_FRESH_CANARY_EVIDENCE_V1'
+              "source_wake_comment_id: $wakeId"
+              "authority_receipt: $authority"
+              "current_index_receipt: $index"
+              "idempotency_key: $idem"
+              "runner_name: $env:RUNNER_NAME"
+              "runner_user: $env:USERDOMAIN\\$env:USERNAME"
+              "runner_session_id: $([Diagnostics.Process]::GetCurrentProcess().SessionId)"
+              "client_version: $(SafeOneLine $clientVersion)"
+              "named_session: $namedSession"
+              "named_server_process_id: $serverProcId"
+              "named_server_status_hash: $(HashText $serverStatusRaw)"
+              "default_runtime_inventory_summary: $defaultInventorySummary"
+              "default_runtime_inventory_hash: $defaultInventoryHash"
+              "default_runtime_mutated: false"
+              "herdr_process_count_before_named_server: $processCount"
+              "herdr_process_inventory_hash: $processInventoryHash"
+              "fresh_workspace: $workspaceId"
+              "fresh_pane: $pane"
+              "fresh_agent: $agentName"
+              "fresh_agent_session: $agentSession"
+              "challenge_hash: $(HashText $challenge)"
+              "expected_marker_hash: $(HashText $expected)"
+              "prompt_count: $promptCount"
+              "prompt_outcome: $promptOutcome"
+              "transformed_marker_observed: $($markerSeen.ToString().ToLowerInvariant())"
+              'owner_enter_count: 0'
+              'manual_enter_used: false'
+              'send_keys_used: false'
+              'orca_used: false'
+              'historical_pane_reused: false'
+              'second_prompt_sent: false'
+              "workflow_run_id: $env:GITHUB_RUN_ID"
+              'readback_verified: true'
+            ) -join "`n"
+            $evidenceReceipt = Publish 138 $evidence
+
+            if ($uncertain) {
+              @{
+                status = 'UNCERTAIN_SEND_NO_BLIND_RETRY'
+                phase = 'TERMINAL'
+                wake_id = $wakeId
+                evidence_receipt = $evidenceReceipt
+                named_session = $namedSession
+                workspace_id = $workspaceId
+                pane_id = $pane
+                agent_name = $agentName
+                agent_session = $agentSession
+                prompt_count = 1
+                cleanup = 'DEFERRED_FOR_READ_ONLY_RECONCILIATION'
+                finished_at = (Get-Date).ToString('o')
+              } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+              $terminal = @(
+                'HERDR_SERVER_COMPAT_FRESH_CANARY_RESULT_V1'
+                'state: UNCERTAIN_SEND_NO_BLIND_RETRY'
+                "source_wake_comment_id: $wakeId"
+                "evidence_receipt: $evidenceReceipt"
+                "named_session: $namedSession"
+                "fresh_workspace: $workspaceId"
+                "fresh_pane: $pane"
+                "fresh_agent: $agentName"
+                "fresh_agent_session: $agentSession"
+                'prompt_count: 1'
+                'second_prompt_sent: false'
+                'cleanup: DEFERRED_FOR_READ_ONLY_RECONCILIATION'
+                'owner_enter_count: 0'
+                'orca_used: false'
+                'user_task_result_relay_count: 0'
+                'readback_verified: true'
+              ) -join "`n"
+              $terminalReceipt = Publish 138 $terminal
+              $parent = @(
+                'HERDR_SERVER_COMPAT_FRESH_CANARY_PARENT_POINTER_V1'
+                'state: UNCERTAIN_SEND_NO_BLIND_RETRY'
+                'recovery_issue: 138'
+                "source_wake_comment_id: $wakeId"
+                "terminal_receipt: $terminalReceipt"
+                "evidence_receipt: $evidenceReceipt"
+                'no_blind_retry: true'
+                'readback_required: true'
+              ) -join "`n"
+              [void](Publish 124 $parent)
+              exit 1
+            }
+
+            # PASS cleanup: close owned workspace, then stop only the exact owned named session.
+            $phase = 'OWNED_CLEANUP'
+            try { & $herdr --session $namedSession workspace close $workspaceId | Out-Null } catch {}
+            $stopRaw = ((& $herdr session stop $namedSession --json 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "owned named session cleanup failed after PASS evidence: $(SafeOneLine $stopRaw)" }
+            $cleanupState = 'OWNED_NAMED_SESSION_STOPPED'
+
+            @{
+              status = 'PASS'
+              phase = 'TERMINAL'
+              wake_id = $wakeId
+              evidence_receipt = $evidenceReceipt
+              named_session = $namedSession
+              workspace_id = $workspaceId
+              pane_id = $pane
+              agent_name = $agentName
+              agent_session = $agentSession
+              prompt_count = 1
+              transformed_marker_observed = $true
+              cleanup = $cleanupState
+              finished_at = (Get-Date).ToString('o')
+            } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+
+            $terminal = @(
+              'HERDR_SERVER_COMPAT_FRESH_CANARY_RESULT_V1'
+              'state: PASS'
+              "source_wake_comment_id: $wakeId"
+              "authority_receipt: $authority"
+              "current_index_receipt: $index"
+              "evidence_receipt: $evidenceReceipt"
+              "client_version: $(SafeOneLine $clientVersion)"
+              'server_compatibility: PASS_ISOLATED_NAMED_SESSION'
+              "named_session: $namedSession"
+              "fresh_workspace: $workspaceId"
+              "fresh_pane: $pane"
+              "fresh_agent: $agentName"
+              "fresh_agent_session: $agentSession"
+              'transformed_marker_observed: true'
+              'prompt_count: 1'
+              'second_prompt_sent: false'
+              'owner_enter_count: 0'
+              'manual_enter_used: false'
+              'send_keys_used: false'
+              'orca_used: false'
+              'historical_pane_reused: false'
+              'default_runtime_mutated: false'
+              "cleanup: $cleanupState"
+              'user_task_result_relay_count: 0'
+              'readback_verified: true'
+            ) -join "`n"
+            $terminalReceipt = Publish 138 $terminal
+            $parent = @(
+              'HERDR_SERVER_COMPAT_FRESH_CANARY_PARENT_POINTER_V1'
+              'state: PASS'
+              'recovery_issue: 138'
+              "source_wake_comment_id: $wakeId"
+              "terminal_receipt: $terminalReceipt"
+              "evidence_receipt: $evidenceReceipt"
+              'repair02_resume_required: true'
+              'readback_required: true'
+            ) -join "`n"
+            [void](Publish 124 $parent)
+          }
+          catch {
+            $diag = SafeOneLine $_.Exception.Message
+            if ($promptCount -gt 0 -and -not $markerSeen) {
+              # Never convert a possibly sent prompt into BLOCKED or cleanup; preserve for observation.
+              $uncertain = $true
+            }
+            if ($uncertain) {
+              $state = 'UNCERTAIN_SEND_NO_BLIND_RETRY'
+              $cleanupState = 'DEFERRED_FOR_READ_ONLY_RECONCILIATION'
+            } else {
+              $state = if ($phase -eq 'PREFLIGHT') { 'STALE' } else { 'BLOCKED' }
+              # Pre-send owned runtime can be cleaned; the default runtime is never touched.
+              if (-not [string]::IsNullOrWhiteSpace($namedSession)) {
+                try { if (-not [string]::IsNullOrWhiteSpace($workspaceId)) { & $herdr --session $namedSession workspace close $workspaceId | Out-Null } } catch {}
+                try { & $herdr session stop $namedSession --json | Out-Null; $cleanupState = 'OWNED_NAMED_SESSION_STOPPED' } catch { $cleanupState = 'OWNED_CLEANUP_FAILED' }
+              } else { $cleanupState = 'NO_OWNED_SESSION_CREATED' }
+            }
+            @{
+              status = $state
+              phase = $phase
+              wake_id = $wakeId
+              named_session = $namedSession
+              workspace_id = $workspaceId
+              pane_id = $pane
+              agent_name = $agentName
+              agent_session = $agentSession
+              prompt_count = $promptCount
+              diagnostic = $diag
+              cleanup = $cleanupState
+              failed_at = (Get-Date).ToString('o')
+            } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+            $terminal = @(
+              'HERDR_SERVER_COMPAT_FRESH_CANARY_RESULT_V1'
+              "state: $state"
+              "source_wake_comment_id: $wakeId"
+              "phase: $phase"
+              "diagnostic: $diag"
+              "client_version: $(SafeOneLine $clientVersion)"
+              "named_session: $namedSession"
+              "fresh_workspace: $workspaceId"
+              "fresh_pane: $pane"
+              "fresh_agent: $agentName"
+              "fresh_agent_session: $agentSession"
+              "prompt_count: $promptCount"
+              'second_prompt_sent: false'
+              "cleanup: $cleanupState"
+              'owner_enter_count: 0'
+              'manual_enter_used: false'
+              'send_keys_used: false'
+              'orca_used: false'
+              'default_runtime_mutated: false'
+              'user_task_result_relay_count: 0'
+              'readback_verified: true'
+            ) -join "`n"
+            $terminalReceipt = Publish 138 $terminal
+            $parent = @(
+              'HERDR_SERVER_COMPAT_FRESH_CANARY_PARENT_POINTER_V1'
+              "state: $state"
+              'recovery_issue: 138'
+              "source_wake_comment_id: $wakeId"
+              "terminal_receipt: $terminalReceipt"
+              "no_blind_retry: $($uncertain.ToString().ToLowerInvariant())"
+              'readback_required: true'
+            ) -join "`n"
+            [void](Publish 124 $parent)
+            exit 1
+          }
