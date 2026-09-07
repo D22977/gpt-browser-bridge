@@ -104,6 +104,7 @@ jobs:
           $pane = ''
           $agentName = ''
           $agentSession = ''
+          $agentGetHash = ''
           $serverProcId = ''
           $promptCount = 0
           $markerSeen = $false
@@ -119,7 +120,6 @@ jobs:
           $serverStarted = $false
 
           try {
-            # Durable authority preflight.
             foreach ($receipt in @($expectedAdjudication,$expectedIndex,$expectedParentPointer,$currentSwitchReceipt)) {
               $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$receipt" -Headers $headers -Method Get -TimeoutSec 30
               if ([string]::IsNullOrWhiteSpace([string]$r.body)) { throw "authority receipt unreadable: $receipt" }
@@ -151,7 +151,6 @@ jobs:
             $clientVersion = ((& $herdr --version 2>&1) | Out-String).Trim()
             if ($LASTEXITCODE -ne 0 -or $clientVersion -notmatch '0\.8\.2') { throw "Herdr client is not exact stable 0.8.2: $clientVersion" }
 
-            # Read-only inventory. Failure to query the old default runtime is recorded/protected, not repaired here.
             $phase = 'READ_ONLY_INVENTORY'
             $defaultPieces = @()
             try {
@@ -188,7 +187,6 @@ jobs:
               created_at = (Get-Date).ToString('o')
             } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
 
-            # Preferred recovery: independent named runtime. Never stop/mutate the old default server.
             $phase = 'NAMED_SERVER_START'
             $suffix = $wakeId.Substring([Math]::Max(0,$wakeId.Length-8))
             $namedSession = "g138-$suffix"
@@ -231,8 +229,17 @@ jobs:
             $fresh = @($agents | Where-Object { [string]$_.name -ceq $agentName })
             if ($fresh.Count -ne 1) { throw "fresh agent count=$($fresh.Count)" }
             if ([string]$fresh[0].pane_id -cne $pane) { throw 'fresh pane binding mismatch' }
-            $agentSession = [string]$fresh[0].agent_session.value
-            if ([string]::IsNullOrWhiteSpace($agentSession)) { throw 'fresh agent session missing' }
+
+            $getRaw = ((& $herdr --session $namedSession agent get $agentName 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw "fresh agent get failed: $(SafeOneLine $getRaw)" }
+            $getObj = $getRaw | ConvertFrom-Json
+            $getAgent = $getObj.result.agent
+            if ([string]$getAgent.name -cne $agentName) { throw 'fresh agent get name mismatch' }
+            if ([string]$getAgent.pane_id -cne $pane) { throw 'fresh agent get pane mismatch' }
+            $agentGetHash = HashText $getRaw
+            $agentSession = [string]$getAgent.agent_session.value
+            if ([string]::IsNullOrWhiteSpace($agentSession)) { $agentSession = [string]$fresh[0].agent_session.value }
+            if ([string]::IsNullOrWhiteSpace($agentSession)) { $agentSession = 'UNREPORTED_NATIVE_SESSION' }
 
             $phase = 'SUBMIT_CHALLENGE'
             $challenge = "G138-$wakeId-Q9m"
@@ -247,6 +254,7 @@ jobs:
               pane_id = $pane
               agent_name = $agentName
               agent_session = $agentSession
+              agent_get_hash = $agentGetHash
               prompt_count = 0
               challenge_hash = HashText $challenge
               expected_marker_hash = HashText $expected
@@ -265,7 +273,6 @@ jobs:
             }
             $promptOutcome = "exit=$promptExit;hash=$(HashText $promptRaw)"
 
-            # --wait can false-negative. Never resend. Read/status only for up to 90 seconds.
             $phase = 'READ_ONLY_RECONCILE_AFTER_SINGLE_PROMPT'
             for ($i=0; $i -lt 45; $i++) {
               try {
@@ -276,7 +283,6 @@ jobs:
             }
             if (-not $markerSeen) { $uncertain = $true }
 
-            # Durable evidence comes before cleanup. No raw agent terminal output is published.
             $phase = 'EVIDENCE_PUBLICATION'
             $evidence = @(
               'HERDR_SERVER_COMPAT_FRESH_CANARY_EVIDENCE_V1'
@@ -300,6 +306,8 @@ jobs:
               "fresh_pane: $pane"
               "fresh_agent: $agentName"
               "fresh_agent_session: $agentSession"
+              'fresh_identity_basis: NAMED_RUNTIME_WORKSPACE_PANE_UNIQUE_AGENT_LOGICAL_WAKE'
+              "agent_get_hash: $agentGetHash"
               "challenge_hash: $(HashText $challenge)"
               "expected_marker_hash: $(HashText $expected)"
               "prompt_count: $promptCount"
@@ -341,6 +349,7 @@ jobs:
                 "fresh_pane: $pane"
                 "fresh_agent: $agentName"
                 "fresh_agent_session: $agentSession"
+                'fresh_identity_basis: NAMED_RUNTIME_WORKSPACE_PANE_UNIQUE_AGENT_LOGICAL_WAKE'
                 'prompt_count: 1'
                 'second_prompt_sent: false'
                 'cleanup: DEFERRED_FOR_READ_ONLY_RECONCILIATION'
@@ -364,7 +373,6 @@ jobs:
               exit 1
             }
 
-            # PASS cleanup: close owned workspace, then stop only the exact owned named session.
             $phase = 'OWNED_CLEANUP'
             try { & $herdr --session $namedSession workspace close $workspaceId | Out-Null } catch {}
             $stopRaw = ((& $herdr session stop $namedSession --json 2>&1) | Out-String).Trim()
@@ -401,6 +409,8 @@ jobs:
               "fresh_pane: $pane"
               "fresh_agent: $agentName"
               "fresh_agent_session: $agentSession"
+              'fresh_identity_basis: NAMED_RUNTIME_WORKSPACE_PANE_UNIQUE_AGENT_LOGICAL_WAKE'
+              "agent_get_hash: $agentGetHash"
               'transformed_marker_observed: true'
               'prompt_count: 1'
               'second_prompt_sent: false'
@@ -429,16 +439,12 @@ jobs:
           }
           catch {
             $diag = SafeOneLine $_.Exception.Message
-            if ($promptCount -gt 0 -and -not $markerSeen) {
-              # Never convert a possibly sent prompt into BLOCKED or cleanup; preserve for observation.
-              $uncertain = $true
-            }
+            if ($promptCount -gt 0 -and -not $markerSeen) { $uncertain = $true }
             if ($uncertain) {
               $state = 'UNCERTAIN_SEND_NO_BLIND_RETRY'
               $cleanupState = 'DEFERRED_FOR_READ_ONLY_RECONCILIATION'
             } else {
               $state = if ($phase -eq 'PREFLIGHT') { 'STALE' } else { 'BLOCKED' }
-              # Pre-send owned runtime can be cleaned; the default runtime is never touched.
               if (-not [string]::IsNullOrWhiteSpace($namedSession)) {
                 try { if (-not [string]::IsNullOrWhiteSpace($workspaceId)) { & $herdr --session $namedSession workspace close $workspaceId | Out-Null } } catch {}
                 try { & $herdr session stop $namedSession --json | Out-Null; $cleanupState = 'OWNED_NAMED_SESSION_STOPPED' } catch { $cleanupState = 'OWNED_CLEANUP_FAILED' }
