@@ -86,13 +86,12 @@ jobs:
             for ($page = 1; $page -le 10; $page++) {
               $recent = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=2026-09-06T12%3A24%3A23Z&per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
               $newerSwitches += @($recent | Where-Object {
-                [int64]$_.id -gt $currentSwitchReceipt -and
                 [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
                 [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
               })
               if ($recent.Count -lt 100) { break }
             }
-            if ($newerSwitches.Count -gt 0) { throw "Newer committed Control switch exists: $([string]$newerSwitches[-1].id)" }
+            if ($newerSwitches.Count -gt 0) { throw "Newer committed Control switch exists after current exact switch" }
 
             if (-not (Test-Path -LiteralPath $herdr)) { throw 'Herdr CLI missing' }
             if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "Unexpected runner: $env:RUNNER_NAME" }
