@@ -8,6 +8,7 @@ import { mkdtemp, readFile, mkdir as mkdirAsync, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 import {
   computePromptHash,
@@ -33,6 +34,262 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(__dirname, "..", "fixtures", "chatgpt");
+
+// Execute the production PowerShell functions, extracted without executing the
+// workflow entrypoint. All I/O in these fixtures is disposable or injected.
+const BOOTSTRAP = "g11-issue124-repair02-fresh-worker-bootstrap-once.yml";
+const RETURN_BRIDGE = "herdr-control-comment-bridge.yml";
+async function workflowText(name) {
+  return readFile(path.join(__dirname, "../.github/workflows", name), "utf8");
+}
+async function runRepairFunctions(name, script) {
+  const text = await workflowText(name);
+  const fragment = text.match(/# BEGIN REPAIR03 FUNCTIONS\r?\n([\s\S]*?)\s*# END REPAIR03 FUNCTIONS/);
+  assert.ok(fragment, `${name}: executable repair functions present`);
+  const source = fragment[1].split(/\r?\n/).map(line => line.replace(/^          /, "")).join("\n");
+  const dir = await mkdtemp(path.join(tmpdir(), "gbb-r03-test-"));
+  const file = path.join(dir, "fixture.ps1");
+  await writeFile(file, `$ErrorActionPreference = 'Stop'\n${source}\n${script}`, "utf8");
+  const result = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-File", file], { encoding: "utf8", timeout: 30000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  return JSON.parse(result.stdout.trim());
+}
+
+test("Repair03 T01/T03: consumed prompt plus approval block is typed even without start receipt", async () => {
+  const result = await runRepairFunctions(BOOTSTRAP, `
+    Get-GuardDecision -AgentStatus blocked -PromptCount 1 -Consumed $false -Terminal '' -Expired $false -Readback 'Would you like to run: Get-Content skills/worker/SKILL.md' | ConvertTo-Json -Compress
+  `);
+  assert.equal(result.state, "CONTROL_REQUIRED_BLOCKED_APPROVAL");
+  assert.equal(result.prompt_consumption, "PROMPT_CONSUMED");
+  assert.match(result.capability, /Get-Content skills\/worker\/SKILL.md/);
+});
+
+test("Repair03 T03/T08/T09: exit, timeout, unknown and late READY preserve exact lifecycle", async () => {
+  const result = await runRepairFunctions(BOOTSTRAP, `
+    @(
+      (Get-GuardDecision exited 1 $false '' $false ''),
+      (Get-GuardDecision working 1 $true '' $true ''),
+      (Get-GuardDecision unknown 1 $false '' $false ''),
+      (Get-GuardDecision blocked 1 $true 'READY_FOR_FRESH_REVIEW' $true 'approval'),
+      (Get-GuardDecision idle 1 $false '' $false '')
+    ) | ConvertTo-Json -Compress
+  `);
+  assert.equal(result[0].state, "CONTROL_REQUIRED_AGENT_EXITED");
+  assert.equal(result[1].state, "CONTROL_REQUIRED_WORKER_TIMEOUT");
+  assert.equal(result[2].state, "CONTROL_REQUIRED_AGENT_UNKNOWN");
+  assert.equal(result[3].state, "WORKER_TERMINAL_OBSERVED");
+  assert.equal(result[3].cleanup, "PARKED_FOR_BOUNDED_REPAIR");
+  assert.equal(result[4].state, "WAIT");
+});
+
+test("Repair03 T06: exclusive claim blocks duplicate dispatch and restart SENDING/SENT", async () => {
+  const result = await runRepairFunctions(RETURN_BRIDGE, `
+    $file = Join-Path $PSScriptRoot 'claim.json'
+    $first = Claim-Delivery $file '124|card|wake|head|011' 'SENDING'
+    $second = Claim-Delivery $file '124|card|wake|head|011' 'SENDING'
+    @{status='SENT'; binding='124|card|wake|head|011'} | ConvertTo-Json | Set-Content $file
+    $third = Claim-Delivery $file '124|card|wake|head|011' 'SENDING'
+    [pscustomobject]@{first=$first; second=$second; third=$third} | ConvertTo-Json -Compress
+  `);
+  assert.equal(result.first, "CLAIMED");
+  assert.equal(result.second, "CONTROL_REQUIRED_RECONCILE_NO_BLIND_RETRY");
+  assert.equal(result.third, "NO_OP_DUPLICATE");
+});
+
+test("Repair03 T05/T09: internal admission binds exact bot terminal, head and current target", async () => {
+  const result = await runRepairFunctions(RETURN_BRIDGE, `
+    $request = @{source_issue='124'; source_card_id='GBB-HERDR-SUBMIT-FRESH-COORDINATOR-REPAIR-02-G11'; source_terminal_receipt='901'; source_head=('a'*40); source_bootstrap_wake='900'; target_control_generation='011'; target_control_conversation_id='6a9d4f5b-ba9c-83ee-9694-44f99ea7515e'; target_control_conversation_url='https://chatgpt.com/c/6a9d4f5b-ba9c-83ee-9694-44f99ea7515e'; idempotency_key='GBB124-900-RETURN'}
+    $terminal = @{id=901; issue_url='https://api.github.com/repos/D22977/gpt-browser-bridge/issues/124'; user=@{login='github-actions[bot]'}; body=("REPAIR02_FRESH_WORKER_BOOTSTRAP_RESULT_V1\nstate: WORKER_TERMINAL_OBSERVED\nsource_head: "+('a'*40)+"\nsource_card_id: GBB-HERDR-SUBMIT-FRESH-COORDINATOR-REPAIR-02-G11\nsource_bootstrap_wake: 900\nworkflow_run_id: 123\nreadback_verified: true")}
+    $active = @{generation='011'; id=$request.target_control_conversation_id; url=$request.target_control_conversation_url}
+    $good = Test-ReturnBinding $request $terminal $active $true
+    $request.source_head = 'b'*40
+    $head = Test-ReturnBinding $request $terminal $active $true
+    $request.source_head = 'a'*40
+    $active.generation = '012'
+    $drift = Test-ReturnBinding $request $terminal $active $true
+    $active.generation = '011'
+    $terminal.user.login = 'intruder'
+    $actor = Test-ReturnBinding $request $terminal $active $true
+    @($good,$head,$drift,$actor) | ConvertTo-Json -Compress
+  `);
+  assert.deepEqual(result, ["VALID", "STALE_SOURCE_HEAD", "STALE_ACTIVE_CONTROL", "INVALID_TERMINAL_ACTOR"]);
+});
+
+test("Repair03 T07: ACK alone cannot satisfy reread and bounded next-action binding", async () => {
+  const result = await runRepairFunctions(RETURN_BRIDGE, `
+    $head = 'a'*40
+    $ack = "CONTROL_RETURN_ACK_V1\nsource_return_request_receipt: 901\nsource_head: $head\ntarget_control_generation: 011"
+    $decision = "CONTROL_RETURN_CONTINUATION_V1\nsource_return_request_receipt: 901\nsource_ack_receipt: 902\nsource_head: $head\ntarget_control_generation: 011\nreread_receipts: 43:903,81:904,88:905,124:901\nbounded_decision: WAIT_FRESH_REVIEW\nnext_action_receipt: 906"
+    @((Test-ControlContinuation $ack '' '901' '902' $head '011'), (Test-ControlContinuation $ack $decision '901' '902' $head '011')) | ConvertTo-Json -Compress
+  `);
+  assert.deepEqual(result, [false, true]);
+});
+
+test("Repair03 T02/T04/T05/T08/T09: real workflow wiring preserves scoped preflight and owner compatibility", async () => {
+  const boot = await workflowText(BOOTSTRAP);
+  const bridge = await workflowText(RETURN_BRIDGE);
+  for (const required of ["Get-GuardDecision", "agent get", "agent read", "worker_repo_root", "--approve-for-me", "skills/worker/SKILL.md", "git -C $workerRoot", "workflow_job", "source_head:", "PARKED_FOR_BOUNDED_REPAIR", "5570904521", "workflow_dispatch", "actions: write"]) assert.ok(boot.includes(required), required);
+  assert.ok(bridge.includes("workflow_dispatch:"));
+  assert.ok(bridge.includes("CONTROL_RETURN_REQUEST_V1"));
+  assert.ok(bridge.includes("author_association == 'OWNER'"));
+  assert.ok(bridge.includes("Claim-Delivery"));
+  assert.ok(bridge.includes("CONTROL_RETURN_CONTINUATION_V1"));
+  assert.doesNotMatch(boot, /dangerously-bypass-approvals-and-sandbox|workspace close|session stop/);
+});
+
+test("Repair03 T04/T05: actual bot terminal publisher reads back before exact workflow dispatch", async () => {
+  const result = await runRepairFunctions(BOOTSTRAP, `
+    $repo='D22977/gpt-browser-bridge'; $wakeId='900'; $expectedCard='5565343447'
+    $sourceCardId='GBB-HERDR-SUBMIT-FRESH-COORDINATOR-REPAIR-02-G11'; $workerBase='a'*40; $sourceDefaultHead='b'*40
+    $currentSwitchReceipt='5559192452'; $headers=@{}; $idem='fixture'; $workerRoot=$PSScriptRoot
+    $namedSession='fresh-900'; $workspaceId='w1'; $pane='w1:p1'; $agentName='worker900'; $agentSession='native900'
+    $promptCount=1; $consumedReceipt='899'; $terminalReceipt='898'; $requiredBranch='worker/fixture'
+    $observation=@{status='blocked'; readback='Get-Content skills/worker/SKILL.md'; hash='abc'}
+    $decision=@{prompt_consumption='PROMPT_CONSUMED'}; $env:GITHUB_RUN_ID='123'; $env:GITHUB_JOB='test'
+    $script:calls=[Collections.Generic.List[string]]::new()
+    function Invoke-RestMethod($Uri,$Headers,$Method,$Body,$ContentType,$TimeoutSec) {
+      if ($Uri -match '/dispatches$') { $script:calls.Add('dispatch'); $script:payload=$Body | ConvertFrom-Json; return }
+      if ($Method -eq 'Post') { $script:calls.Add('publish'); $script:published=($Body | ConvertFrom-Json).body; return @{id=901} }
+      if ($Uri -match '/901$') { $script:calls.Add('readback'); return @{body=$script:published} }
+      return @{body="new_conversation_id: 6a9d4f5b-ba9c-83ee-9694-44f99ea7515e\nnew_conversation_url: https://chatgpt.com/c/6a9d4f5b-ba9c-83ee-9694-44f99ea7515e"}
+    }
+    Publish-Terminal 'CONTROL_REQUIRED_BLOCKED_APPROVAL' 'fixture'
+    [pscustomobject]@{calls=$script:calls.ToArray(); body=$script:published; payload=$script:payload; attempted=$terminalPublicationAttempted} | ConvertTo-Json -Depth 8 -Compress
+  `);
+  assert.deepEqual(result.calls, ["publish", "readback", "dispatch"]);
+  const request = JSON.parse(result.payload.inputs.request);
+  assert.equal(result.payload.ref, "review-base/gbb-gh-01");
+  assert.equal(request.source_terminal_receipt, "901");
+  assert.equal(request.source_bootstrap_wake, "900");
+  assert.equal(request.source_head, "a".repeat(40));
+  assert.equal(request.target_control_generation, "011");
+  for (const line of ["workflow_run_id: 123", "workflow_job: test", "fresh_agent_session: native900", "physical_prompt_count: 1", "owner_enter_count: 0", "send_keys_used: false", "orca_used: false", "readback_verified: true"]) assert.ok(result.body.includes(line), line);
+  assert.equal(result.attempted, true);
+});
+
+test("Repair03 T05: failed terminal readback never dispatches a return", async () => {
+  const result = await runRepairFunctions(BOOTSTRAP, `
+    $repo='D22977/gpt-browser-bridge'; $wakeId='900'; $headers=@{}
+    $observation=@{}; $decision=@{}; $script:dispatchCount=0
+    function Invoke-RestMethod($Uri,$Headers,$Method,$Body,$ContentType,$TimeoutSec) {
+      if ($Uri -match '/dispatches$') { $script:dispatchCount++; return }
+      if ($Method -eq 'Post') { return @{id=901} }
+      return @{body='wrong readback'}
+    }
+    $failed=$false
+    try { Publish-Terminal 'BLOCKED' 'fixture' } catch { $failed=$true }
+    [pscustomobject]@{failed=$failed; dispatches=$script:dispatchCount; attempted=$terminalPublicationAttempted} | ConvertTo-Json -Compress
+  `);
+  assert.deepEqual(result, { failed: true, dispatches: 0, attempted: true });
+});
+
+test("Repair03 T03/T08/T09: actual guard reconciles a late READY without another prompt or cleanup", async () => {
+  const workflow = await workflowText(BOOTSTRAP);
+  const loop = workflow.match(/# BEGIN REPAIR03 GUARD\r?\n([\s\S]*?)\s*# END REPAIR03 GUARD/)[1]
+    .split(/\r?\n/).map(line => line.replace(/^          /, "")).join("\n");
+  const result = await runRepairFunctions(BOOTSTRAP, `
+    $wakeId='900'; $sinceEncoded='fixture'; $promptCount=1; $promptExit=0
+    $consumedReceipt=''; $terminalReceipt=''; $statePath=Join-Path $PSScriptRoot 'guard.json'
+    $script:reads=0; $script:sleeps=0; $script:published=@()
+    function FindReceipt($protocol,$wake,$since) {
+      if ($protocol -eq 'GBB_HERDR_SUBMIT_FRESH_REPAIR_CONSUMED_STARTED_V1') { return $null }
+      $script:reads++
+      if ($script:reads -eq 2) { return @{id='901'; body='state: READY_FOR_FRESH_REVIEW'} }
+      return $null
+    }
+    function Observe-Agent { return @{status='blocked'; readback='approval'; hash='fixture'} }
+    function Start-Sleep { $script:sleeps++; throw 'Unexpected wait' }
+    function Publish-Terminal($state,$detail,$cleanup) { $script:published+=@{state=$state; cleanup=$cleanup; terminal=$terminalReceipt} }
+    ${loop}
+    [pscustomobject]@{published=$script:published; reads=$script:reads; sleeps=$script:sleeps; promptCount=$promptCount} | ConvertTo-Json -Depth 5 -Compress
+  `);
+  assert.deepEqual(result.published, [{ state: "WORKER_TERMINAL_OBSERVED", cleanup: "PARKED_FOR_BOUNDED_REPAIR", terminal: "901" }]);
+  assert.equal(result.reads, 2);
+  assert.equal(result.sleeps, 0);
+  assert.equal(result.promptCount, 1);
+});
+
+test("Repair03 T06/T09: receipt search completes pages and ignores quoted or foreign receipts", async () => {
+  const result = await runRepairFunctions(BOOTSTRAP, `
+    $repo='D22977/gpt-browser-bridge'; $headers=@{}; $script:pages=0
+    function Invoke-RestMethod($Uri,$Headers,$Method,$TimeoutSec) {
+      $script:pages++
+      if ($script:pages -eq 1) {
+        1..100 | ForEach-Object { @{id=$_; user=@{login='D22977'}; body="quoted\nGBB_HERDR_SUBMIT_FRESH_REPAIR_RESULT_V1\nsource_bootstrap_wake: 900"} }
+      } else {
+        @{id=101; user=@{login='intruder'}; body="GBB_HERDR_SUBMIT_FRESH_REPAIR_RESULT_V1\nsource_bootstrap_wake: 900"}
+        @{id=102; user=@{login='D22977'}; body="GBB_HERDR_SUBMIT_FRESH_REPAIR_RESULT_V1\nsource_bootstrap_wake: 900"}
+      }
+    }
+    $receipt=FindReceipt 'GBB_HERDR_SUBMIT_FRESH_REPAIR_RESULT_V1' '900' 'fixture'
+    [pscustomobject]@{id=$receipt.id; pages=$script:pages} | ConvertTo-Json -Compress
+  `);
+  assert.deepEqual(result, { id: 102, pages: 2 });
+});
+
+test("Repair03 T06: partial claim and conflicting binding fail closed without rewriting evidence", async () => {
+  const result = await runRepairFunctions(RETURN_BRIDGE, `
+    $file=Join-Path $PSScriptRoot 'broken.json'
+    Set-Content $file '{'
+    $partial=Claim-Delivery $file 'new' 'SENDING'
+    $unchanged=(Get-Content $file -Raw).Trim()
+    @{status='SENT'; binding='other'} | ConvertTo-Json | Set-Content $file
+    $conflict=Claim-Delivery $file 'new' 'SENDING'
+    @($partial,$unchanged,$conflict) | ConvertTo-Json -Compress
+  `);
+  assert.deepEqual(result, ["CONTROL_REQUIRED_RECONCILE_NO_BLIND_RETRY", "{", "CONTROL_REQUIRED_RECONCILE_NO_BLIND_RETRY"]);
+});
+
+test("Repair03 T09: historical wake exits before new fields, runtime creation or prompt", async () => {
+  const workflow = await workflowText(BOOTSTRAP);
+  const entry = workflow.slice(workflow.indexOf("          $event = Get-Content"), workflow.indexOf("          $stateRoot ="))
+    .split(/\r?\n/).map(line => line.replace(/^          /, "")).join("\n");
+  const result = await runRepairFunctions(BOOTSTRAP, `
+    $env:GITHUB_EVENT_PATH=Join-Path $PSScriptRoot 'old-wake.json'
+    @{comment=@{id='5570904521'; body='historical wake without new admission fields'; created_at='2026-09-07T00:00:00Z'}} | ConvertTo-Json | Set-Content $env:GITHUB_EVENT_PATH
+    function Publish-Terminal($state,$detail) { [pscustomobject]@{state=$state; detail=$detail; prompts=$promptCount; runtime=$namedSession} | ConvertTo-Json -Compress }
+    ${entry}
+    throw 'Historical wake reached executable entrypoint'
+  `);
+  assert.deepEqual(result, { state: "NO_OP_DUPLICATE", detail: "HISTORICAL_WAKE_NO_RETRY", prompts: 0, runtime: "" });
+});
+
+test("Repair03 T05/T06/T09: actual owner and internal admission share one logical delivery key", async () => {
+  const workflow = await workflowText(RETURN_BRIDGE);
+  const admission = workflow.slice(workflow.indexOf("          $event = Get-Content"), workflow.indexOf("          $whoami ="))
+    .split(/\r?\n/).map(line => line.replace(/^          /, "")).join("\n");
+  const results = [];
+  for (const mode of ["issue_comment", "workflow_dispatch"]) {
+    results.push(await runRepairFunctions(RETURN_BRIDGE, `
+      $env:RUNNER_TEMP=$PSScriptRoot; $env:GITHUB_RUN_ID='123'; $env:GITHUB_ENV=Join-Path $PSScriptRoot 'env.txt'
+      $env:GITHUB_EVENT_NAME='${mode}'; $env:GITHUB_ACTOR='D22977'; $env:GITHUB_EVENT_PATH=Join-Path $PSScriptRoot 'event.json'
+      $head='a'*40; $default='b'*40; $card='GBB-HERDR-SUBMIT-FRESH-COORDINATOR-REPAIR-02-G11'
+      $id='6a9d4f5b-ba9c-83ee-9694-44f99ea7515e'; $url="https://chatgpt.com/c/$id"
+      $input=@{source_issue='124'; source_card_id=$card; source_terminal_receipt='901'; source_head=$head; source_bootstrap_wake='900'; target_control_generation='011'; target_control_conversation_id=$id; target_control_conversation_url=$url; idempotency_key='GBB124-900-RETURN'}
+      $lines=@('CONTROL_RETURN_REQUEST_V1','target_control_status: ACTIVE')
+      foreach ($k in $input.Keys) { if ($k -ne 'source_bootstrap_wake') { $lines+="$($k): $($input[$k])" } }
+      $eventFixture=@{repository=@{full_name='D22977/gpt-browser-bridge'}; issue=@{number=124}; comment=@{id=902; user=@{login='D22977'}; author_association='OWNER'; body=($lines -join "\n")}; inputs=@{request=($input|ConvertTo-Json -Compress)}}
+      $eventFixture | ConvertTo-Json -Depth 8 | Set-Content $env:GITHUB_EVENT_PATH
+      function Invoke-RestMethod($Uri,$Headers,$TimeoutSec) {
+        if ($Uri -match '/comments/901$') { return @{id=901; user=@{login='github-actions[bot]'}; issue_url='https://api.github.com/repos/D22977/gpt-browser-bridge/issues/124'; body="REPAIR02_FRESH_WORKER_BOOTSTRAP_RESULT_V1\nstate: WORKER_TERMINAL_OBSERVED\nsource_head: $head\nsource_default_head: $default\nsource_card_id: $card\nsource_bootstrap_wake: 900\nworkflow_run_id: 123\nreadback_verified: true"} }
+        if ($Uri -match '/issues/88/comments') { return @{id=905; body="CONTROL_GENERATION_SWITCH_V1\nstate: SWITCH_COMMITTED\nnew_generation_status: ACTIVE\nnew_generation: 011\nnew_conversation_id: $id\nnew_conversation_url: $url"} }
+        if ($Uri -match '/actions/runs/123$') { return @{path='.github/workflows/g11-issue124-repair02-fresh-worker-bootstrap-once.yml'; event='issue_comment'; head_sha=$default; repository=@{full_name='D22977/gpt-browser-bridge'}} }
+        if ($Uri -match '/comments/900$') { return @{user=@{login='D22977'}; author_association='OWNER'; issue_url='https://api.github.com/repos/D22977/gpt-browser-bridge/issues/124'; body="REPAIR02_FRESH_WORKER_BOOTSTRAP_WAKE_V1\nworker_base_sha: $head"} }
+        if ($Uri -match '/branches/') { return @{commit=@{sha=$default}} }
+        throw "Unexpected API route $Uri"
+      }
+      ${admission}
+      [pscustomobject]@{validation=$validation; key=$key; binding=$binding; requestId=$requestId} | ConvertTo-Json -Compress
+    `));
+  }
+  assert.equal(results[0].validation, "VALID");
+  assert.equal(results[1].validation, "VALID");
+  assert.equal(results[0].key, results[1].key);
+  assert.equal(results[0].binding, `124|900|${"a".repeat(40)}`);
+  assert.equal(results[0].requestId, "902");
+  assert.equal(results[1].requestId, "901");
+});
 
 async function loadFixture(name) {
   return JSON.parse(await readFile(path.join(FIXTURES, name), "utf8"));

@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   issues: write
+  actions: write
 
 concurrency:
   group: g11-issue124-repair02-worker-${{ github.event.comment.id }}
@@ -35,6 +36,7 @@ jobs:
           $expectedIndex = '5570750943'
           $expectedResume = '5570736127'
           $expectedCard = '5565343447'
+          $sourceCardId = 'GBB-HERDR-SUBMIT-FRESH-COORDINATOR-REPAIR-02-G11'
           $currentSwitchReceipt = '5559192452'
           $requiredBranch = 'worker/g11-herdr-submit-fresh-repair-02'
           $headers = @{
@@ -43,10 +45,11 @@ jobs:
             Accept = 'application/vnd.github+json'
           }
 
+          # BEGIN REPAIR03 FUNCTIONS
           function Need([string]$body, [string]$pattern, [string]$name) {
-            $m = [regex]::Match($body, $pattern)
-            if (-not $m.Success) { throw "Malformed field: $name" }
-            return $m.Groups[1].Value
+            $matches = [regex]::Matches($body, $pattern)
+            if ($matches.Count -ne 1) { throw "Malformed or repeated field: $name" }
+            return $matches[0].Groups[1].Value
           }
 
           function Publish([int]$issue, [string]$text) {
@@ -64,51 +67,91 @@ jobs:
             return $v
           }
 
-          function FindReceipt([string]$protocol, [string]$wakeId, [string]$sinceEncoded) {
-            for ($page = 1; $page -le 5; $page++) {
+          function FindReceipt([string]$protocol, [string]$wakeId, [string]$sinceEncoded, [string]$author='D22977') {
+            $found = @()
+            for ($page = 1; $page -le 100; $page++) {
               $items = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/124/comments?since=$sinceEncoded&per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
               foreach ($item in $items) {
                 $b = [string]$item.body
-                if ($b.StartsWith($protocol) -and $b -match "(?m)^source_bootstrap_wake:\s*$wakeId\s*$") { return $item }
+                if (($b.Trim() -split '\r?\n')[0] -ceq $protocol -and $b -match "(?m)^source_bootstrap_wake:\s*$wakeId\s*$" -and $item.user.login -ceq $author) { $found += $item }
               }
-              if ($items.Count -lt 100) { break }
+              if ($items.Count -lt 100) {
+                if ($found.Count -gt 1) { throw 'Conflicting Worker receipts; reconciliation required' }
+                if ($found.Count -eq 1) { return $found[0] }
+                return $null
+              }
             }
-            return $null
+            throw 'Receipt pagination incomplete'
           }
+
+          function Get-GuardDecision([string]$AgentStatus, [int]$PromptCount, [bool]$Consumed, [string]$Terminal, [bool]$Expired, [string]$Readback) {
+            $result = @{state='WAIT'; prompt_consumption='UNCONFIRMED'; capability=''; cleanup='PRESERVED_FOR_CONTROL'}
+            if ($Consumed -or ($PromptCount -gt 0 -and $AgentStatus -in @('working','blocked'))) { $result.prompt_consumption='PROMPT_CONSUMED' }
+            if ($Terminal) {
+              $result.state='WORKER_TERMINAL_OBSERVED'
+              if ($Terminal -eq 'READY_FOR_FRESH_REVIEW') { $result.cleanup='PARKED_FOR_BOUNDED_REPAIR' }
+            } elseif ($AgentStatus -eq 'blocked') {
+              $result.state='CONTROL_REQUIRED_BLOCKED_APPROVAL'
+              $result.capability=if ($Readback.Trim()) { $Readback.Trim() } else { 'EXACT_REQUEST_UNREADABLE_NO_APPROVAL_INFERRED' }
+            } elseif ($AgentStatus -eq 'exited') { $result.state='CONTROL_REQUIRED_AGENT_EXITED'
+            } elseif ($AgentStatus -notin @('working','idle')) { $result.state='CONTROL_REQUIRED_AGENT_UNKNOWN'
+            } elseif ($Expired) { $result.state='CONTROL_REQUIRED_WORKER_TIMEOUT' }
+            return $result
+          }
+
+          function Observe-Agent {
+            if (-not $namedSession -or -not $agentName) { return @{status='unknown'; readback='AGENT_NOT_CREATED'} }
+            $raw = (& $herdr --session $namedSession agent get $agentName 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) { return @{status='unknown'; readback='EXACT_AGENT_GET_FAILED'} }
+            $a = ($raw | ConvertFrom-Json).result.agent
+            if ($a.name -cne $agentName -or $a.pane_id -cne $pane -or $a.workspace_id -cne $workspaceId -or $a.cwd -cne $workerRoot) { return @{status='unknown'; readback='EXACT_AGENT_IDENTITY_DRIFT'} }
+            if ($a.agent_session.value) { $script:agentSession=[string]$a.agent_session.value }
+            $read = (& $herdr --session $namedSession agent read $agentName --source visible --lines 35 --format text 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) { return @{status='unknown'; readback='EXACT_AGENT_READBACK_FAILED'} }
+            # Do not publish arbitrary terminal content or credentials. Extract only
+            # the requested capability; everything else remains a local hash.
+            $cap = [regex]::Match($read, '(?im)^.*(?:Would you like to run|Get-Content|permission|approval|trust the contents).*$').Value
+            $cap = $cap -replace '(?i)(bearer\s+|token[=:]\s*|password[=:]\s*)\S+', '$1[REDACTED]'
+            $cap = $cap -replace '(?i)(gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)', '[REDACTED]'
+            $cap = $cap -replace '(?i)(Authorization|Cookie|Set-Cookie):.*', '$1: [REDACTED]'
+            $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($read))).ToLowerInvariant()
+            return @{status=[string]$a.agent_status; readback=(SafeOneLine $cap); hash=$hash}
+          }
+
+          function Publish-Terminal([string]$state, [string]$diagnostic, [string]$cleanup='PRESERVED_FOR_CONTROL') {
+            $text = @('REPAIR02_FRESH_WORKER_BOOTSTRAP_RESULT_V1',"state: $state","source_bootstrap_wake: $wakeId",
+              "source_issue: 124","source_card_id: $sourceCardId","source_card_receipt: $expectedCard","source_head: $workerBase","source_default_head: $sourceDefaultHead",
+              "workflow_run_id: $env:GITHUB_RUN_ID","workflow_job: $env:GITHUB_JOB","named_session: $namedSession",
+              "fresh_workspace: $workspaceId","fresh_pane: $pane","fresh_agent: $agentName","fresh_agent_session: $agentSession",
+              "worker_repo_root: $workerRoot","required_worker_branch: $requiredBranch","worker_consumed_started_receipt: $consumedReceipt",
+              "worker_terminal_receipt: $terminalReceipt","agent_status: $($observation.status)","agent_readback_sha256: $($observation.hash)",
+              "requested_capability: $($observation.readback)","diagnostic: $diagnostic","physical_prompt_count: $promptCount",
+              "prompt_consumption: $($decision.prompt_consumption)","cleanup: $cleanup",'owner_enter_count: 0','manual_enter_used: false',
+              'send_keys_used: false','orca_used: false','second_prompt_sent: false','user_task_result_relay_count: 0','readback_verified: true',"idempotency_key: $idem") -join "`n"
+            # A failed/ambiguous publication is never retried by the catch path.
+            $script:terminalPublicationAttempted=$true
+            $receipt=Publish 124 $text
+            if ($state -eq 'NO_OP_DUPLICATE') { return } # never return a historical/duplicate event physically
+            $target = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$currentSwitchReceipt" -Headers $headers -TimeoutSec 30
+            $targetId=Need $target.body '(?m)^new_conversation_id:\s*([0-9a-f-]+)\s*$' 'target id'
+            $targetUrl=Need $target.body '(?m)^new_conversation_url:\s*(https://chatgpt\.com/\S+)\s*$' 'target url'
+            $request=@{source_issue='124'; source_card_id=$sourceCardId; source_terminal_receipt=$receipt; source_head=$workerBase;
+              source_bootstrap_wake=$wakeId; target_control_generation='011'; target_control_conversation_id=$targetId;
+              target_control_conversation_url=$targetUrl; idempotency_key="GBB124-$wakeId-RETURN"}
+            # GITHUB_TOKEN issue_comment cannot trigger another workflow. This
+            # workflow_dispatch is the internal edge; the receiver revalidates all bindings.
+            $dispatch=@{ref='review-base/gbb-gh-01'; inputs=@{request=($request | ConvertTo-Json -Compress)}} | ConvertTo-Json -Depth 5
+            Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/actions/workflows/herdr-control-comment-bridge.yml/dispatches" -Headers $headers -Method Post -Body $dispatch -ContentType 'application/json' -TimeoutSec 30 | Out-Null
+          }
+
+          # END REPAIR03 FUNCTIONS
 
           $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
           $body = [string]$event.comment.body
           $wakeId = [string]$event.comment.id
           $wakeCreated = [string]$event.comment.created_at
           $sinceEncoded = [uri]::EscapeDataString($wakeCreated)
-          $index = Need $body '(?m)^current_index_receipt:\s*(\d+)\s*$' 'current_index_receipt'
-          $resume = Need $body '(?m)^resume_receipt:\s*(\d+)\s*$' 'resume_receipt'
-          $card = Need $body '(?m)^repair02_card_receipt:\s*(\d+)\s*$' 'repair02_card_receipt'
-          $baseReceipt = Need $body '(?m)^base_supersession_receipt:\s*(\d+)\s*$' 'base_supersession_receipt'
-          $workerBase = Need $body '(?m)^worker_base_sha:\s*([0-9a-f]{40})\s*$' 'worker_base_sha'
-          $idem = Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
-          if ($index -cne $expectedIndex -or $resume -cne $expectedResume -or $card -cne $expectedCard) { throw 'wake authority mismatch' }
-
-          $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\issue124-repair02-worker-bootstrap'
-          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
-          $statePath = Join-Path $stateRoot "$wakeId.json"
-          if (Test-Path -LiteralPath $statePath) {
-            $existing = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-            $dup = @(
-              'REPAIR02_FRESH_WORKER_BOOTSTRAP_RESULT_V1'
-              'state: NO_OP_DUPLICATE'
-              "source_bootstrap_wake: $wakeId"
-              "idempotency_key: $idem"
-              "existing_state: $([string]$existing.status)"
-              'physical_prompt_count: 0'
-              'owner_enter_count: 0'
-              'orca_used: false'
-              'readback_verified: true'
-            ) -join "`n"
-            [void](Publish 124 $dup)
-            exit 0
-          }
-
+          $sourceDefaultHead = [string]$env:GITHUB_SHA
           $phase = 'PREFLIGHT'
           $namedSession = ''
           $workspaceId = ''
@@ -118,10 +161,50 @@ jobs:
           $promptCount = 0
           $consumedReceipt = ''
           $terminalReceipt = ''
-          $serverStarted = $false
-          $uncertain = $false
+          $terminalPublicationAttempted = $false
+          $observation = @{status='unknown'; readback='NOT_OBSERVED'; hash=''}
+          $decision = @{prompt_consumption='UNCONFIRMED'}
+          $workerRoot = ''
+          $workerBase = [regex]::Match($body,'(?m)^worker_base_sha:\s*([0-9a-f]{40})\s*$').Groups[1].Value
+          $idem = "BOOTSTRAP-$wakeId"
+          # A historical wake is rejected before requiring any new admission fields.
+          if ($wakeId -eq '5570904521') { Publish-Terminal 'NO_OP_DUPLICATE' 'HISTORICAL_WAKE_NO_RETRY'; exit 0 }
+          try {
+            $index = Need $body '(?m)^current_index_receipt:\s*(\d+)\s*$' 'current_index_receipt'
+            $resume = Need $body '(?m)^resume_receipt:\s*(\d+)\s*$' 'resume_receipt'
+            $card = Need $body '(?m)^repair02_card_receipt:\s*(\d+)\s*$' 'repair02_card_receipt'
+            $baseReceipt = Need $body '(?m)^base_supersession_receipt:\s*(\d+)\s*$' 'base_supersession_receipt'
+            $workerBase = Need $body '(?m)^worker_base_sha:\s*([0-9a-f]{40})\s*$' 'worker_base_sha'
+            $idem = Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
+            if ($index -cne $expectedIndex -or $resume -cne $expectedResume -or $card -cne $expectedCard) { throw 'wake authority mismatch' }
+
+            $workerRoot = Need $body '(?m)^worker_repo_root:\s*([^\r\n]+)\s*$' 'worker_repo_root'
+          } catch {
+            Publish-Terminal 'CONTROL_REQUIRED_INVALID_WAKE' 'Wake authority or required field invalid; no prompt sent'
+            exit 1
+          }
+          $stateRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\issue124-repair02-worker-bootstrap'
+          New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+          $statePath = Join-Path $stateRoot "$wakeId.json"
+          try {
+            $claim = [IO.File]::Open($statePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try {
+              $bytes=[Text.Encoding]::UTF8.GetBytes((@{status='PREFLIGHT'; wake_id=$wakeId; source_head=$workerBase} | ConvertTo-Json))
+              $claim.Write($bytes,0,$bytes.Length); $claim.Flush($true)
+            } finally { $claim.Dispose() }
+          } catch [IO.IOException] {
+            # Existing, partial, SENDING and SENT state all prohibit a second prompt.
+            Publish-Terminal 'NO_OP_DUPLICATE' 'EXISTING_STATE_REQUIRES_RECONCILIATION_NO_BLIND_RETRY'
+            exit 0
+          }
 
           try {
+            foreach ($protocol in @('REPAIR02_FRESH_WORKER_BOOTSTRAP_DELIVERY_V1','REPAIR02_FRESH_WORKER_BOOTSTRAP_RESULT_V1')) {
+              if (FindReceipt $protocol $wakeId $sinceEncoded 'github-actions[bot]') {
+                Publish-Terminal 'NO_OP_DUPLICATE' 'DURABLE_PRIOR_EXECUTION_NO_RETRY'
+                exit 0
+              }
+            }
             foreach ($receipt in @($expectedIndex,$expectedResume,$expectedCard,$currentSwitchReceipt,$baseReceipt)) {
               $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$receipt" -Headers $headers -Method Get -TimeoutSec 30
               if ([string]::IsNullOrWhiteSpace([string]$r.body)) { throw "authority receipt unreadable: $receipt" }
@@ -137,6 +220,7 @@ jobs:
               $recent = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=2026-09-06T12%3A24%3A24Z&per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
               $newerSwitches += @($recent | Where-Object { [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and [string]$_.id -ne $currentSwitchReceipt })
               if ($recent.Count -lt 100) { break }
+              if ($page -eq 10) { throw 'Control pagination incomplete' }
             }
             if ($newerSwitches.Count -gt 0) { throw 'newer committed Control switch exists' }
 
@@ -146,6 +230,7 @@ jobs:
             if ($baseBody -notmatch "(?m)^exact_worker_mutation_base:\s*$workerBase\s*$" -or $baseBody -notmatch '(?m)^required_worker_branch:\s*worker/g11-herdr-submit-fresh-repair-02\s*$' -or $baseBody -notmatch '(?m)^state:\s*READY_FOR_FRESH_WORKER_WAKE\s*$') { throw 'base supersession binding mismatch' }
 
             $defaultBranch = Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/branches/review-base%2Fgbb-gh-01' -Headers $headers -Method Get -TimeoutSec 30
+            $sourceDefaultHead = [string]$defaultBranch.commit.sha
             if ([string]$defaultBranch.commit.sha -cne $workerBase) { throw "default head drifted: $([string]$defaultBranch.commit.sha)" }
 
             try {
@@ -163,11 +248,46 @@ jobs:
             $clientVersion = ((& $herdr --version 2>&1) | Out-String).Trim()
             if ($LASTEXITCODE -ne 0 -or $clientVersion -notmatch '0\.8\.2') { throw "Herdr client not exact stable 0.8.2: $clientVersion" }
 
+            $runtimePrefix = [IO.Path]::GetFullPath('D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\')
+            $workerRoot = [IO.Path]::GetFullPath($workerRoot)
+            if (-not $workerRoot.StartsWith($runtimePrefix,[StringComparison]::OrdinalIgnoreCase)) { throw 'Worker root outside runtime' }
+            $walk = Get-Item -LiteralPath $workerRoot
+            while ($walk -and $walk.FullName.Length -ge $runtimePrefix.TrimEnd('\').Length) {
+              if ($walk.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Worker root contains reparse point' }
+              $walk=$walk.Parent
+            }
+            $root=(& git -C $workerRoot rev-parse --show-toplevel | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($root) -cne $workerRoot) { throw 'Worker repo root mismatch' }
+            $origin=(& git -C $workerRoot remote get-url origin | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $origin -cne 'https://github.com/D22977/gpt-browser-bridge.git') { throw 'Worker origin mismatch' }
+            $head=(& git -C $workerRoot rev-parse HEAD | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $head -cne $workerBase) { throw 'Worker local base mismatch' }
+            $dirty=(& git -C $workerRoot status --porcelain=v1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'DIRTY_ATTRIBUTION_UNKNOWN' }
+            $branch=(& git -C $workerRoot branch --show-current | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $branch) { throw 'Worker must start detached at exact base' }
+            & git -C $workerRoot show-ref --verify --quiet "refs/heads/$requiredBranch"
+            if ($LASTEXITCODE -ne 1) { throw 'Worker branch present or unreadable' }
+            foreach ($relative in @('AGENTS.md','skills/worker/SKILL.md','plans/GBB_PARENT_WORK_ORDER.md','package.json')) {
+              if ([string]::IsNullOrWhiteSpace((Get-Content -LiteralPath (Join-Path $workerRoot $relative) -Raw))) { throw "Required local skill/tool unreadable: $relative" }
+            }
+            # Use the same command/token environment the Worker inherits. Publication
+            # below proves issues-write; dry-run receive-pack verifies its Git write route.
+            & gh api "repos/$repo/issues/124" --jq .number | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Worker GitHub CLI read route unavailable' }
+            & git -C $workerRoot push --dry-run origin "HEAD:refs/heads/$requiredBranch" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Worker GitHub branch write route unavailable' }
+            $codexHelp=(& codex --help 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0 -or $codexHelp -notmatch '\-\-approve-for-me') { throw 'Task scoped Codex approval mode unavailable' }
+            [void](Publish 124 (@('REPAIR02_WORKER_PREFLIGHT_V1',"source_bootstrap_wake: $wakeId","source_head: $workerBase",'git_read_write_route: VERIFIED','required_skills: READABLE','readback_verified: true') -join "`n"))
+
             $phase = 'NAMED_SERVER_START'
             $suffix = $wakeId.Substring([Math]::Max(0,$wakeId.Length-8))
             $namedSession = "g124-r02-$suffix"
             $agentName = "g124r02$suffix"
             if ($agentName.Length -gt 32) { $agentName = $agentName.Substring(0,32) }
+            $nativeState=Join-Path $env:APPDATA "herdr\sessions\$namedSession"
+            if (Test-Path -LiteralPath $nativeState) { throw 'Historical/prepared named Herdr runtime exists; no reuse' }
             $stdout = Join-Path $stateRoot "$wakeId-server.out.log"
             $stderr = Join-Path $stateRoot "$wakeId-server.err.log"
             $serverProc = Start-Process -FilePath $herdr -ArgumentList @('--session',$namedSession,'server') -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
@@ -176,22 +296,21 @@ jobs:
               Start-Sleep -Milliseconds 500
               try {
                 $statusRaw = ((& $herdr --session $namedSession status server 2>&1) | Out-String).Trim()
-                if ($LASTEXITCODE -eq 0 -and $statusRaw -notmatch 'protocol_mismatch|protocol 19') { $serverReady = $true; break }
+                if ($LASTEXITCODE -eq 0 -and $statusRaw -match 'version:\s*0\.8\.2' -and $statusRaw -match 'compatible:\s*yes' -and $statusRaw -notmatch 'protocol_mismatch|protocol 19') { $serverReady = $true; break }
               } catch {}
               if ($serverProc.HasExited) { break }
             }
             if (-not $serverReady) { throw 'isolated named Herdr server did not become compatible' }
-            $serverStarted = $true
 
             $phase = 'FRESH_AGENT_START'
-            $createdRaw = ((& $herdr --session $namedSession workspace create --cwd 'C:\WINDOWS\system32' --label "g124-r02-$wakeId" --no-focus 2>&1) | Out-String).Trim()
+            $createdRaw = ((& $herdr --session $namedSession workspace create --cwd $workerRoot --label "g124-r02-$wakeId" --no-focus 2>&1) | Out-String).Trim()
             if ($LASTEXITCODE -ne 0) { throw "workspace create failed: $(SafeOneLine $createdRaw)" }
             $created = $createdRaw | ConvertFrom-Json
             $workspaceId = [string]$created.result.workspace.workspace_id
             $pane = [string]$created.result.root_pane.pane_id
             if ([string]::IsNullOrWhiteSpace($workspaceId) -or [string]::IsNullOrWhiteSpace($pane)) { throw 'fresh workspace identity missing' }
 
-            $startRaw = ((& $herdr --session $namedSession agent start $agentName --kind codex --pane $pane --timeout 90000 2>&1) | Out-String).Trim()
+            $startRaw = ((& $herdr --session $namedSession agent start $agentName --kind codex --pane $pane --timeout 90000 -- --approve-for-me 2>&1) | Out-String).Trim()
             if ($LASTEXITCODE -ne 0) { throw "fresh agent start failed: $(SafeOneLine $startRaw)" }
             $getRaw = ((& $herdr --session $namedSession agent get $agentName 2>&1) | Out-String).Trim()
             if ($LASTEXITCODE -ne 0) { throw "fresh agent get failed: $(SafeOneLine $getRaw)" }
@@ -201,6 +320,18 @@ jobs:
             $nativeSession = [string]$getAgent.agent_session.value
             if (-not [string]::IsNullOrWhiteSpace($nativeSession)) { $agentSession = $nativeSession }
 
+            $observation=Observe-Agent
+            if ($observation.status -notin @('idle','working')) { Publish-Terminal 'CONTROL_REQUIRED_PREPROMPT_AGENT_NOT_READY' 'No prompt sent'; exit 1 }
+            $current=Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/branches/review-base%2Fgbb-gh-01' -Headers $headers -TimeoutSec 30
+            if ($current.commit.sha -cne $workerBase) { throw 'STALE_DEFAULT_HEAD_BEFORE_PROMPT' }
+            for ($page=1; $page -le 100; $page++) {
+              $switchPage=@(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?per_page=100&page=$page" -Headers $headers -TimeoutSec 30)
+              foreach ($entry in $switchPage) {
+                if ([int64]$entry.id -gt [int64]$currentSwitchReceipt -and ($entry.body.Trim() -split '\r?\n')[0] -ceq 'CONTROL_GENERATION_SWITCH_V1' -and $entry.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$') { throw 'STALE_ACTIVE_CONTROL_BEFORE_PROMPT' }
+              }
+              if ($switchPage.Count -lt 100) { break }
+              if ($page -eq 100) { throw 'Control pre-send pagination incomplete' }
+            }
             $phase = 'PROMPT_SENDING'
             @{
               status = 'PROMPT_SENDING'
@@ -220,7 +351,7 @@ jobs:
             $promptCount = 1
             $promptRaw = ((& $herdr --session $namedSession agent prompt $agentName $promptText 2>&1) | Out-String).Trim()
             $promptExit = $LASTEXITCODE
-            if ($promptExit -ne 0) { $uncertain = $true }
+            # A nonzero submit exit is evidence to reconcile, never authority to resend.
 
             @{
               status = 'PROMPT_SUBMITTED_WAIT_CONSUMED'
@@ -261,157 +392,44 @@ jobs:
             ) -join "`n"
             $deliveryReceipt = Publish 124 $delivery
 
-            $phase = 'WAIT_CONSUMED_STARTED'
-            for ($i=0; $i -lt 180; $i++) {
-              $consumed = FindReceipt 'GBB_HERDR_SUBMIT_FRESH_REPAIR_CONSUMED_STARTED_V1' $wakeId $sinceEncoded
-              if ($null -ne $consumed) { $consumedReceipt = [string]$consumed.id; break }
+            # BEGIN REPAIR03 GUARD
+            $phase = 'WAIT_WORKER'
+            $deadline=(Get-Date).AddMinutes(150)
+            while ($true) {
+              $consumed=FindReceipt 'GBB_HERDR_SUBMIT_FRESH_REPAIR_CONSUMED_STARTED_V1' $wakeId $sinceEncoded
+              $workerTerminal=FindReceipt 'GBB_HERDR_SUBMIT_FRESH_REPAIR_RESULT_V1' $wakeId $sinceEncoded
+              if ($consumed) { $consumedReceipt=[string]$consumed.id }
+              $workerState=''
+              if ($workerTerminal) {
+                $terminalReceipt=[string]$workerTerminal.id
+                $workerState=Need $workerTerminal.body '(?m)^(?:state|decision):\s*(READY_FOR_FRESH_REVIEW|BLOCKED|CONTROL_REQUIRED|STALE|NO_OP_DUPLICATE)\s*$' 'Worker terminal decision'
+              }
+              $observation=Observe-Agent
+              $decision=Get-GuardDecision $observation.status $promptCount ([bool]$consumedReceipt) $workerState ((Get-Date) -ge $deadline) $observation.readback
+              if ($decision.state -ne 'WAIT') {
+                # One last durable reread wins over a simultaneous timeout/exit/block.
+                if (-not $workerTerminal) {
+                  $late=FindReceipt 'GBB_HERDR_SUBMIT_FRESH_REPAIR_RESULT_V1' $wakeId $sinceEncoded
+                  if ($late) {
+                    $terminalReceipt=[string]$late.id
+                    $workerState=Need $late.body '(?m)^(?:state|decision):\s*(READY_FOR_FRESH_REVIEW|BLOCKED|CONTROL_REQUIRED|STALE|NO_OP_DUPLICATE)\s*$' 'late terminal'
+                    $decision=Get-GuardDecision $observation.status $promptCount ([bool]$consumedReceipt) $workerState $true $observation.readback
+                  }
+                }
+                @{status=$decision.state; wake_id=$wakeId; terminal_receipt=$terminalReceipt; cleanup=$decision.cleanup; prompt_count=$promptCount} | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
+                Publish-Terminal $decision.state "worker_state=$workerState; prompt_exit=$promptExit" $decision.cleanup
+                break
+              }
               Start-Sleep -Seconds 5
             }
-
-            if ([string]::IsNullOrWhiteSpace($consumedReceipt)) {
-              $uncertain = $true
-              $terminal = @(
-                'REPAIR02_FRESH_WORKER_BOOTSTRAP_RESULT_V1'
-                'state: UNCERTAIN_SEND_NO_BLIND_RETRY'
-                "source_bootstrap_wake: $wakeId"
-                "delivery_receipt: $deliveryReceipt"
-                "named_session: $namedSession"
-                "fresh_workspace: $workspaceId"
-                "fresh_pane: $pane"
-                "fresh_agent: $agentName"
-                "fresh_agent_session: $agentSession"
-                'physical_prompt_count: 1'
-                'second_prompt_sent: false'
-                'cleanup: DEFERRED_WHILE_ACTION_HOLDS_SESSION'
-                'owner_enter_count: 0'
-                'orca_used: false'
-                'readback_verified: true'
-              ) -join "`n"
-              [void](Publish 124 $terminal)
-              Start-Sleep -Seconds 600
-              exit 1
-            }
-
-            $consumedGuard = @(
-              'REPAIR02_FRESH_WORKER_BOOTSTRAP_GUARD_V1'
-              'state: PASS_WORKER_CONSUMED_STARTED'
-              "source_bootstrap_wake: $wakeId"
-              "delivery_receipt: $deliveryReceipt"
-              "worker_consumed_started_receipt: $consumedReceipt"
-              "named_session: $namedSession"
-              "fresh_workspace: $workspaceId"
-              "fresh_pane: $pane"
-              "fresh_agent: $agentName"
-              "fresh_agent_session: $agentSession"
-              'physical_prompt_count: 1'
-              'owner_enter_count: 0'
-              'orca_used: false'
-              'readback_verified: true'
-            ) -join "`n"
-            [void](Publish 124 $consumedGuard)
-
-            @{
-              status = 'WORKER_CONSUMED_STARTED_WAIT_TERMINAL'
-              wake_id = $wakeId
-              consumed_receipt = $consumedReceipt
-              named_session = $namedSession
-              workspace_id = $workspaceId
-              pane_id = $pane
-              agent_name = $agentName
-              agent_session = $agentSession
-              prompt_count = 1
-              updated_at = (Get-Date).ToString('o')
-            } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
-
-            $phase = 'WAIT_WORKER_TERMINAL'
-            for ($i=0; $i -lt 1800; $i++) {
-              $workerTerminal = FindReceipt 'GBB_HERDR_SUBMIT_FRESH_REPAIR_RESULT_V1' $wakeId $sinceEncoded
-              if ($null -ne $workerTerminal) { $terminalReceipt = [string]$workerTerminal.id; break }
-              Start-Sleep -Seconds 5
-            }
-
-            if ([string]::IsNullOrWhiteSpace($terminalReceipt)) {
-              $timeout = @(
-                'REPAIR02_FRESH_WORKER_BOOTSTRAP_RESULT_V1'
-                'state: CONTROL_REQUIRED_WORKER_TERMINAL_TIMEOUT'
-                "source_bootstrap_wake: $wakeId"
-                "worker_consumed_started_receipt: $consumedReceipt"
-                "named_session: $namedSession"
-                "fresh_agent: $agentName"
-                'physical_prompt_count: 1'
-                'second_prompt_sent: false'
-                'owner_enter_count: 0'
-                'orca_used: false'
-                'readback_verified: true'
-              ) -join "`n"
-              [void](Publish 124 $timeout)
-              exit 1
-            }
-
-            $phase = 'OWNED_CLEANUP'
-            try { & $herdr --session $namedSession workspace close $workspaceId | Out-Null } catch {}
-            $stopRaw = ((& $herdr session stop $namedSession --json 2>&1) | Out-String).Trim()
-            $cleanupState = if ($LASTEXITCODE -eq 0) { 'OWNED_NAMED_SESSION_STOPPED' } else { 'OWNED_CLEANUP_FAILED_AFTER_WORKER_TERMINAL' }
-
-            @{
-              status = 'WORKER_TERMINAL_OBSERVED'
-              wake_id = $wakeId
-              consumed_receipt = $consumedReceipt
-              terminal_receipt = $terminalReceipt
-              cleanup = $cleanupState
-              prompt_count = 1
-              finished_at = (Get-Date).ToString('o')
-            } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
-
-            $done = @(
-              'REPAIR02_FRESH_WORKER_BOOTSTRAP_RESULT_V1'
-              'state: WORKER_TERMINAL_OBSERVED'
-              "source_bootstrap_wake: $wakeId"
-              "worker_consumed_started_receipt: $consumedReceipt"
-              "worker_terminal_receipt: $terminalReceipt"
-              "named_session: $namedSession"
-              "fresh_workspace: $workspaceId"
-              "fresh_pane: $pane"
-              "fresh_agent: $agentName"
-              "fresh_agent_session: $agentSession"
-              'physical_prompt_count: 1'
-              'second_prompt_sent: false'
-              "cleanup: $cleanupState"
-              'owner_enter_count: 0'
-              'orca_used: false'
-              'user_task_result_relay_count: 0'
-              'readback_verified: true'
-            ) -join "`n"
-            [void](Publish 124 $done)
-          }
-          catch {
-            $diag = SafeOneLine $_.Exception.Message
-            if ($promptCount -gt 0 -and [string]::IsNullOrWhiteSpace($consumedReceipt)) { $uncertain = $true }
-            if (-not $uncertain -and -not [string]::IsNullOrWhiteSpace($namedSession)) {
-              try { if (-not [string]::IsNullOrWhiteSpace($workspaceId)) { & $herdr --session $namedSession workspace close $workspaceId | Out-Null } } catch {}
-              try { & $herdr session stop $namedSession --json | Out-Null } catch {}
-            }
-            $state = if ($uncertain) { 'UNCERTAIN_SEND_NO_BLIND_RETRY' } elseif ($phase -eq 'PREFLIGHT') { 'STALE' } else { 'BLOCKED' }
-            $terminal = @(
-              'REPAIR02_FRESH_WORKER_BOOTSTRAP_RESULT_V1'
-              "state: $state"
-              "source_bootstrap_wake: $wakeId"
-              "phase: $phase"
-              "diagnostic: $diag"
-              "named_session: $namedSession"
-              "fresh_workspace: $workspaceId"
-              "fresh_pane: $pane"
-              "fresh_agent: $agentName"
-              "fresh_agent_session: $agentSession"
-              "physical_prompt_count: $promptCount"
-              'second_prompt_sent: false'
-              'owner_enter_count: 0'
-              'manual_enter_used: false'
-              'send_keys_used: false'
-              'orca_used: false'
-              'user_task_result_relay_count: 0'
-              'readback_verified: true'
-            ) -join "`n"
-            [void](Publish 124 $terminal)
+            # END REPAIR03 GUARD
+          } catch {
+            if ($terminalPublicationAttempted) { throw } # ambiguous publication/dispatch: NO_BLIND_RETRY
+            $observation=Observe-Agent
+            $decision=Get-GuardDecision $observation.status $promptCount ([bool]$consumedReceipt) '' $false $observation.readback
+            $state=if ($phase -eq 'PREFLIGHT') { 'CONTROL_REQUIRED_PREFLIGHT' } elseif ($decision.state -ne 'WAIT') { $decision.state } else { 'CONTROL_REQUIRED_RECONCILIATION' }
+            # Preserve every owned runtime for Control disposition, including STALE and
+            # BLOCKED. No close/stop can kill a late-running Worker or its repair round.
+            Publish-Terminal $state (SafeOneLine $_.Exception.Message)
             exit 1
           }

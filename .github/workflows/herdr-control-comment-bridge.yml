@@ -3,22 +3,31 @@ name: GBB Control Return Comment Bridge
 on:
   issue_comment:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      request:
+        description: Exact internal bootstrap terminal and ACTIVE Control binding as JSON
+        required: true
+        type: string
 
 permissions:
   contents: read
   issues: write
+  actions: read
 
 concurrency:
-  group: gbb-control-return-${{ github.event.comment.id }}
+  group: gbb-control-return-${{ github.event.comment.id || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   control-return-doorbell:
     name: GBB Control Return Doorbell Transport
     if: >-
-      github.event.comment.user.login == 'D22977' &&
+      (github.event_name == 'workflow_dispatch' &&
+      (github.actor == 'D22977' || github.actor == 'github-actions[bot]')) ||
+      (github.event_name == 'issue_comment' && github.event.comment.user.login == 'D22977' &&
       github.event.comment.author_association == 'OWNER' &&
-      startsWith(github.event.comment.body, 'CONTROL_RETURN_REQUEST_V1')
+      startsWith(github.event.comment.body, 'CONTROL_RETURN_REQUEST_V1'))
     runs-on: [self-hosted, Windows, GBB-REVIEWER]
     timeout-minutes: 8
     defaults:
@@ -30,62 +39,128 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # BEGIN REPAIR03 FUNCTIONS
+          function Field([string]$body, [string]$name) {
+            $m=[regex]::Matches($body, "(?m)^$([regex]::Escape($name)):[ \t]*([^\r\n]+?)[ \t]*\r?$")
+            if ($m.Count -ne 1) { return '' }
+            return $m[0].Groups[1].Value
+          }
+          function Test-ReturnBinding($request, $terminal, $active, [bool]$internal) {
+            if ([string]$terminal.id -cne [string]$request.source_terminal_receipt -or $terminal.issue_url -cne "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/$($request.source_issue)") { return 'INVALID_TERMINAL_ID' }
+            if ((Field $terminal.body 'source_head') -cne $request.source_head) { return 'STALE_SOURCE_HEAD' }
+            if ($request.target_control_generation -cne $active.generation -or $request.target_control_conversation_id -cne $active.id -or $request.target_control_conversation_url -cne $active.url) { return 'STALE_ACTIVE_CONTROL' }
+            if ($internal) {
+              if ($terminal.user.login -cne 'github-actions[bot]') { return 'INVALID_TERMINAL_ACTOR' }
+              if (($terminal.body.Trim() -split '\r?\n')[0] -cne 'REPAIR02_FRESH_WORKER_BOOTSTRAP_RESULT_V1') { return 'INVALID_TERMINAL_PROTOCOL' }
+              if ($request.source_issue -cne '124' -or $request.source_card_id -cne 'GBB-HERDR-SUBMIT-FRESH-COORDINATOR-REPAIR-02-G11' -or (Field $terminal.body 'source_card_id') -cne $request.source_card_id -or (Field $terminal.body 'source_bootstrap_wake') -cne $request.source_bootstrap_wake) { return 'INVALID_SOURCE_BINDING' }
+              if ((Field $terminal.body 'readback_verified') -cne 'true' -or (Field $terminal.body 'workflow_run_id') -notmatch '^\d+$') { return 'INVALID_TERMINAL_EVIDENCE' }
+              $state=Field $terminal.body 'state'
+              if ($state -eq 'NO_OP_DUPLICATE') { return 'NO_OP_DUPLICATE' }
+              if ($state -notmatch '^(WORKER_TERMINAL_OBSERVED|CONTROL_REQUIRED_[A-Z_]+|BLOCKED|STALE)$') { return 'INVALID_TERMINAL_STATE' }
+            } elseif ($terminal.user.login -notin @('D22977','github-actions[bot]')) { return 'INVALID_TERMINAL_ACTOR' }
+            return 'VALID'
+          }
+          function Claim-Delivery([string]$file, [string]$binding, [string]$status) {
+            try {
+              $stream=[IO.File]::Open($file,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+              try {
+                $bytes=[Text.Encoding]::UTF8.GetBytes((@{status=$status; binding=$binding} | ConvertTo-Json -Compress))
+                $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true)
+              } finally { $stream.Dispose() }
+              return 'CLAIMED'
+            } catch [IO.IOException] {
+              try { $old=Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { return 'CONTROL_REQUIRED_RECONCILE_NO_BLIND_RETRY' }
+              if ($old.binding -ceq $binding -and $old.status -eq 'SENT') { return 'NO_OP_DUPLICATE' }
+              return 'CONTROL_REQUIRED_RECONCILE_NO_BLIND_RETRY'
+            }
+          }
+          function Test-ControlContinuation([string]$ack, [string]$decision, [string]$requestId, [string]$ackId, [string]$head, [string]$generation) {
+            if (($ack.Trim() -split '\r?\n')[0] -cne 'CONTROL_RETURN_ACK_V1' -or ($decision.Trim() -split '\r?\n')[0] -cne 'CONTROL_RETURN_CONTINUATION_V1') { return $false }
+            foreach ($body in @($ack,$decision)) {
+              if ((Field $body 'source_return_request_receipt') -cne $requestId -or (Field $body 'source_head') -cne $head -or (Field $body 'target_control_generation') -cne $generation) { return $false }
+            }
+            return ((Field $decision 'source_ack_receipt') -ceq $ackId -and (Field $decision 'reread_receipts') -match '^43:\d+,81:\d+,88:\d+,\d+:\d+$' -and (Field $decision 'bounded_decision') -match '^(DISPATCH_FRESH_REVIEW|WAIT_FRESH_REVIEW|BOUNDED_REPAIR|CONTROL_REQUIRED|STALE|NO_OP_DUPLICATE)$' -and (Field $decision 'next_action_receipt') -match '^\d+$')
+          }
+          function Read-AllComments([int]$issue) {
+            $all=@()
+            for ($page=1; $page -le 100; $page++) {
+              $items=@(Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/$issue/comments?per_page=100&page=$page" -Headers $headers -TimeoutSec 30)
+              $all+=$items
+              if ($items.Count -lt 100) { return $all }
+            }
+            throw 'Comment pagination incomplete'
+          }
+          function Read-Active {
+            $switches=@(Read-AllComments 88 | Where-Object {
+              ($_.body.Trim() -split '\r?\n')[0] -ceq 'CONTROL_GENERATION_SWITCH_V1' -and (Field $_.body 'state') -ceq 'SWITCH_COMMITTED'
+            } | Sort-Object { [int64]$_.id })
+            if (-not $switches.Count) { throw 'No Control switch' }
+            $latest=$switches[-1]
+            if ((Field $latest.body 'new_generation_status') -cne 'ACTIVE') { throw 'Latest Control is not ACTIVE' }
+            return @{receipt=[string]$latest.id; generation=(Field $latest.body 'new_generation'); id=(Field $latest.body 'new_conversation_id'); url=(Field $latest.body 'new_conversation_url')}
+          }
+          # END REPAIR03 FUNCTIONS
+
+          # Save exactly these reviewed functions for the pre-send reread and ACK guard.
+          $library=Join-Path $env:RUNNER_TEMP "gbb-return-functions-$env:GITHUB_RUN_ID.ps1"
+          $scriptText=Get-Content -LiteralPath $PSCommandPath -Raw
+          $fragment=[regex]::Match($scriptText,'(?s)# BEGIN REPAIR03 FUNCTIONS\r?\n(.*?)# END REPAIR03 FUNCTIONS').Groups[1].Value
+          Set-Content -LiteralPath $library -Value $fragment -Encoding utf8
+          "RETURN_LIBRARY=$library" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
           if ($event.repository.full_name -cne 'D22977/gpt-browser-bridge') { throw 'Wrong repository' }
-          if ($event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong actor' }
-          $issue = [int]$event.issue.number
-          if ($issue -le 0) { throw 'Invalid source issue' }
-          $body = [string]$event.comment.body
-          if ($body -notmatch '(?m)^CONTROL_RETURN_REQUEST_V1\s*$') { throw 'Missing return protocol header' }
-
-          function Need([string]$pattern, [string]$name) {
-            $m = [regex]::Match($body, $pattern)
-            if (-not $m.Success) { throw "Malformed CONTROL_RETURN_REQUEST_V1 field: $name" }
-            return $m.Groups[1].Value
+          $internal=$env:GITHUB_EVENT_NAME -eq 'workflow_dispatch'
+          if ($internal) {
+            if ($env:GITHUB_ACTOR -notin @('D22977','github-actions[bot]')) { throw 'Wrong dispatch actor' }
+            $request=$event.inputs.request | ConvertFrom-Json -AsHashtable
+            $requestId=[string]$request.source_terminal_receipt
+          } else {
+            if ($env:GITHUB_EVENT_NAME -ne 'issue_comment' -or $event.comment.user.login -cne 'D22977' -or $event.comment.author_association -cne 'OWNER') { throw 'Wrong owner event' }
+            $body=[string]$event.comment.body
+            if (($body.Trim() -split '\r?\n')[0] -cne 'CONTROL_RETURN_REQUEST_V1') { throw 'Wrong return protocol' }
+            $request=@{}
+            foreach ($name in @('source_issue','source_card_id','source_terminal_receipt','source_head','target_control_generation','target_control_conversation_id','target_control_conversation_url','idempotency_key')) { $request[$name]=Field $body $name }
+            if ((Field $body 'target_control_status') -cne 'ACTIVE' -or $request.source_issue -cne [string]$event.issue.number) { throw 'Invalid owner issue/status' }
+            $requestId=[string]$event.comment.id
           }
-          $sourceIssue = [int](Need '(?m)^source_issue:\s*(\d+)\s*$' 'source_issue')
-          $sourceCard = Need '(?m)^source_card_id:\s*([A-Za-z0-9._:-]+)\s*$' 'source_card_id'
-          $terminalReceipt = Need '(?m)^source_terminal_receipt:\s*(\d+)\s*$' 'source_terminal_receipt'
-          $sourceHead = Need '(?m)^source_head:\s*([0-9a-f]{40})\s*$' 'source_head'
-          $targetGen = Need '(?m)^target_control_generation:\s*(\d{3})\s*$' 'target_control_generation'
-          $null = Need '(?m)^target_control_status:\s*(ACTIVE)\s*$' 'target_control_status'
-          $targetId = Need '(?m)^target_control_conversation_id:\s*([0-9a-f-]+)\s*$' 'target_control_conversation_id'
-          $targetUrl = Need '(?m)^target_control_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$' 'target_control_conversation_url'
-          $idem = Need '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
-          if ($sourceIssue -ne $issue) { throw "source_issue mismatch event=$issue request=$sourceIssue" }
-
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-control-return-bridge'; Accept = 'application/vnd.github+json' }
-          $terminal = Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$terminalReceipt" -Headers $headers -Method Get -TimeoutSec 30
-          if ([string]$terminal.issue_url -notmatch "/issues/$issue$") { throw 'Source terminal is not on source issue' }
-          if ([string]$terminal.body -notmatch [regex]::Escape($sourceHead)) { throw 'Source terminal does not bind source_head' }
-
-          $all = [System.Collections.Generic.List[object]]::new()
-          function Add-Flat([object]$value) {
-            if ($null -eq $value) { return }
-            if ($value -is [System.Array]) { foreach ($nested in $value) { Add-Flat $nested }; return }
-            [void]$all.Add($value)
+          $patterns=@{source_issue='^[1-9][0-9]*$'; source_card_id='^[A-Za-z0-9._:-]+$'; source_terminal_receipt='^[1-9][0-9]*$'; source_head='^[0-9a-f]{40}$'; target_control_generation='^\d{3}$'; target_control_conversation_id='^[0-9a-f-]{36}$'; target_control_conversation_url='^https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]{36}$'; idempotency_key='^[A-Za-z0-9._:-]+$'}
+          if ($internal) { $patterns.source_bootstrap_wake='^[1-9][0-9]*$' }
+          if ($request.Count -ne $patterns.Count) { throw 'Unexpected request fields' }
+          foreach ($name in $patterns.Keys) {
+            if ([string]$request[$name] -cnotmatch $patterns[$name]) { throw "Invalid request field $name" }
           }
-          for ($page = 1; $page -le 30; $page++) {
-            $before = $all.Count
-            Add-Flat (Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/88/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
-            if (($all.Count - $before) -lt 100) { break }
+          if (-not $request.target_control_conversation_url.EndsWith('/'+$request.target_control_conversation_id)) { throw 'URL/id mismatch' }
+          $issue=[int]$request.source_issue
+          $sourceCard=$request.source_card_id
+          $sourceHead=$request.source_head
+          $headers=@{Authorization="Bearer $env:GH_TOKEN"; 'User-Agent'='gbb-control-return-bridge'; Accept='application/vnd.github+json'}
+          $terminal=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($request.source_terminal_receipt)" -Headers $headers -TimeoutSec 30
+          $active=Read-Active
+          $validation=Test-ReturnBinding $request $terminal $active $internal
+          if ($validation -notin @('VALID','NO_OP_DUPLICATE')) { throw $validation }
+          if ($internal) {
+            $runId=Field $terminal.body 'workflow_run_id'
+            $run=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/actions/runs/$runId" -Headers $headers -TimeoutSec 30
+            if ($run.path -cne '.github/workflows/g11-issue124-repair02-fresh-worker-bootstrap-once.yml' -or $run.event -cne 'issue_comment' -or $run.head_sha -cne (Field $terminal.body 'source_default_head') -or $run.repository.full_name -cne 'D22977/gpt-browser-bridge') { throw 'Invalid launcher run binding' }
+            $wake=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($request.source_bootstrap_wake)" -Headers $headers -TimeoutSec 30
+            if ($wake.user.login -cne 'D22977' -or $wake.author_association -cne 'OWNER' -or $wake.issue_url -cne 'https://api.github.com/repos/D22977/gpt-browser-bridge/issues/124' -or ($wake.body.Trim() -split '\r?\n')[0] -cne 'REPAIR02_FRESH_WORKER_BOOTSTRAP_WAKE_V1' -or (Field $wake.body 'worker_base_sha') -cne $sourceHead) { throw 'Invalid source wake' }
+            if ($request.source_bootstrap_wake -eq '5570904521') { throw 'HISTORICAL_WAKE_NO_RETRY' }
+            $current=Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/branches/review-base%2Fgbb-gh-01' -Headers $headers -TimeoutSec 30
+            if ($current.commit.sha -cne (Field $terminal.body 'source_default_head')) { throw 'STALE_DEFAULT_HEAD' }
           }
-          $switches = @($all | Where-Object {
-            $_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
-            $_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
-            $_.body -match '(?m)^new_generation_status:\s*ACTIVE\s*$'
-          } | Sort-Object { [int64]$_.id })
-          if ($switches.Count -eq 0) { throw 'No ACTIVE Control switch found' }
-          $latest = $switches[-1]
-          $switchBody = [string]$latest.body
-          $activeGen = [regex]::Match($switchBody, '(?m)^new_generation:\s*(\d{3})\s*$')
-          $activeId = [regex]::Match($switchBody, '(?m)^new_conversation_id:\s*([0-9a-f-]+)\s*$')
-          $activeUrl = [regex]::Match($switchBody, '(?m)^new_conversation_url:\s*(https://chatgpt\.com/(?:g/[A-Za-z0-9._-]+/)?c/[0-9a-f-]+)\s*$')
-          if (-not ($activeGen.Success -and $activeId.Success -and $activeUrl.Success)) { throw 'Latest ACTIVE switch missing routing identity' }
-          if ($targetGen -cne $activeGen.Groups[1].Value) { throw "Stale target generation requested=$targetGen active=$($activeGen.Groups[1].Value)" }
-          if ($targetId -cne $activeId.Groups[1].Value) { throw 'Target conversation id mismatch' }
-          if ($targetUrl -cne $activeUrl.Groups[1].Value) { throw 'Target conversation URL mismatch' }
-
+          # A late terminal and a new return comment for the same wake share one key.
+          $logicalSource=Field $terminal.body 'source_bootstrap_wake'
+          if (-not $logicalSource) { $logicalSource=[string]$request.source_terminal_receipt }
+          $binding="$issue|$logicalSource|$sourceHead"
+          $key=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($binding))).ToLowerInvariant()
+          $requestFile=Join-Path $env:RUNNER_TEMP "gbb-return-request-$env:GITHUB_RUN_ID.json"
+          $request | ConvertTo-Json -Compress | Set-Content -LiteralPath $requestFile -Encoding utf8
+          "RETURN_REQUEST_FILE=$requestFile" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETURN_INTERNAL=$internal" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETURN_BINDING=$binding" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETURN_KEY=$key" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETURN_TERMINAL_HASH=$([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes([string]$terminal.body))))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETURN_VALIDATION=$validation" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           $whoami = (& whoami).Trim()
           $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
           $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -93,14 +168,14 @@ jobs:
           if (-not [Environment]::UserInteractive -or $sessionId -eq 0) { throw 'Bridge is not interactive' }
           if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01') { throw "Unexpected runner $env:RUNNER_NAME" }
 
-          "RETURN_COMMENT_ID=$($event.comment.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RETURN_COMMENT_ID=$requestId" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "RETURN_ISSUE=$issue" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "RETURN_CARD=$sourceCard" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "RETURN_HEAD=$sourceHead" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "ACTIVE_SWITCH_RECEIPT=$($latest.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "TARGET_GENERATION=$($activeGen.Groups[1].Value)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "TARGET_CONVERSATION_ID=$($activeId.Groups[1].Value)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "TARGET_CONVERSATION_URL=$($activeUrl.Groups[1].Value)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "ACTIVE_SWITCH_RECEIPT=$($active.receipt)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TARGET_GENERATION=$($active.generation)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TARGET_CONVERSATION_ID=$($active.id)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TARGET_CONVERSATION_URL=$($active.url)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Deliver exactly one Control doorbell
         id: deliver
@@ -116,14 +191,32 @@ jobs:
           $runtimeRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\github-event-control-return'
           $stateRoot = Join-Path $runtimeRoot 'state'
           New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
-          $statePath = Join-Path $stateRoot "$($env:RETURN_COMMENT_ID).json"
+          $statePath = Join-Path $stateRoot "$($env:RETURN_KEY).json"
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gbb-control-return-bridge'; Accept = 'application/vnd.github+json' }
 
+          . $env:RETURN_LIBRARY
+          $returnRequest=Get-Content -LiteralPath $env:RETURN_REQUEST_FILE -Raw | ConvertFrom-Json -AsHashtable
           function Publish-Receipt([string]$body) {
+            $common=@{source_issue=$env:RETURN_ISSUE; source_card_id=$env:RETURN_CARD; source_head=$env:RETURN_HEAD;
+              source_terminal_receipt=[string]$returnRequest.source_terminal_receipt; source_bootstrap_wake=[string]$returnRequest.source_bootstrap_wake;
+              target_control_generation=$env:TARGET_GENERATION; target_control_conversation_id=$env:TARGET_CONVERSATION_ID;
+              target_control_conversation_url=$env:TARGET_CONVERSATION_URL; return_binding=$env:RETURN_BINDING; return_key=$env:RETURN_KEY;
+              workflow_run_id=$env:GITHUB_RUN_ID; workflow_job=$env:GITHUB_JOB; owner_enter_count='0'; send_keys_used='false'; orca_used='false'; readback_verified='true'}
+            foreach ($key in $common.Keys) {
+              $existing=Field $body $key
+              if ($existing -and $existing -cne $common[$key]) { throw "Receipt field conflict: $key" }
+              if (-not $existing) { $body += "`n$($key): $($common[$key])" }
+            }
             $payload = @{ body = $body } | ConvertTo-Json -Compress
             $uri = "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/$($env:RETURN_ISSUE)/comments"
             $r = Invoke-RestMethod -Uri $uri -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $check=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($r.id)" -Headers $headers -TimeoutSec 30
+            if ($check.body -cne $body) { throw 'Doorbell readback mismatch; NO_BLIND_RETRY' }
             return [string]$r.id
+          }
+          if ($env:RETURN_VALIDATION -eq 'NO_OP_DUPLICATE') {
+            [void](Publish-Receipt (@('CONTROL_DOORBELL_V1','state: NO_OP_DUPLICATE',"source_return_request_receipt: $($env:RETURN_COMMENT_ID)",'physical_send_count: 0') -join "`n"))
+            exit 0
           }
           if (-not (Test-Path -LiteralPath $senderPath)) {
             $id = Publish-Receipt (@('CONTROL_DOORBELL_V1','state: CONTROL_REQUIRED_RUNTIME_UNAVAILABLE',"source_return_request_receipt: $($env:RETURN_COMMENT_ID)",'first_missing_capability: LOCAL_GPT_SEND_MODULE_MISSING',"workflow_run_id: $env:GITHUB_RUN_ID",'user_relay_count: 0') -join "`n")
@@ -135,36 +228,19 @@ jobs:
             throw "local sender blob mismatch; receipt=$id"
           }
 
-          $comments = [System.Collections.Generic.List[object]]::new()
-          function Add-C([object]$value) {
-            if ($null -eq $value) { return }
-            if ($value -is [System.Array]) { foreach ($nested in $value) { Add-C $nested }; return }
-            [void]$comments.Add($value)
-          }
-          for ($page = 1; $page -le 30; $page++) {
-            $before = $comments.Count
-            Add-C (Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/$($env:RETURN_ISSUE)/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
-            if (($comments.Count - $before) -lt 100) { break }
-          }
-          $prior = @($comments | Where-Object {
-            $_.body -match '(?m)^CONTROL_DOORBELL_V1\s*$' -and
-            $_.body -match '(?m)^state:\s*DELIVERED\s*$' -and
-            $_.body -match "(?m)^source_return_request_receipt:\s*$([regex]::Escape($env:RETURN_COMMENT_ID))\s*$"
+          $comments=@(Read-AllComments ([int]$env:RETURN_ISSUE))
+          $prior=@($comments | Where-Object {
+            $_.user.login -in @('D22977','github-actions[bot]') -and
+            ($_.body.Trim() -split '\r?\n')[0] -ceq 'CONTROL_DOORBELL_V1' -and
+            ((Field $_.body 'return_key') -ceq $env:RETURN_KEY -or (Field $_.body 'source_return_request_receipt') -ceq $env:RETURN_COMMENT_ID) -and
+            (Field $_.body 'state') -in @('SENDING','DELIVERED','UNCERTAIN_SEND')
           })
-          if ($prior.Count -gt 1) { throw 'Conflicting duplicate delivered doorbells' }
-          if ($prior.Count -eq 1) {
-            $id = Publish-Receipt (@('CONTROL_DOORBELL_V1','state: NO_OP_DUPLICATE',"source_return_request_receipt: $($env:RETURN_COMMENT_ID)",'second_physical_send: false',"workflow_run_id: $env:GITHUB_RUN_ID",'user_relay_count: 0') -join "`n")
+          if ($prior.Count -gt 0 -or (Test-Path -LiteralPath $statePath)) {
+            $delivered=@($prior | Where-Object { (Field $_.body 'state') -eq 'DELIVERED' })
+            $state=if ($delivered.Count -eq 1) { 'NO_OP_DUPLICATE' } else { 'CONTROL_REQUIRED_RECONCILE_NO_BLIND_RETRY' }
+            $id=Publish-Receipt (@('CONTROL_DOORBELL_V1',"state: $state","source_return_request_receipt: $($env:RETURN_COMMENT_ID)",'physical_send_count: 0','second_physical_send: false',"workflow_run_id: $env:GITHUB_RUN_ID",'user_relay_count: 0') -join "`n")
             "DOORBELL_RECEIPT_ID=$id" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
             exit 0
-          }
-          if (Test-Path -LiteralPath $statePath) {
-            $existing = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-            if ($existing.status -eq 'SENT') {
-              $id = Publish-Receipt (@('CONTROL_DOORBELL_V1','state: NO_OP_DUPLICATE',"source_return_request_receipt: $($env:RETURN_COMMENT_ID)",'second_physical_send: false',"workflow_run_id: $env:GITHUB_RUN_ID",'user_relay_count: 0') -join "`n")
-              "DOORBELL_RECEIPT_ID=$id" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-              exit 0
-            }
-            if ($existing.status -eq 'SENDING') { throw 'UNCERTAIN_SEND / NO_BLIND_RETRY' }
           }
 
           $playwright = 'C:\Users\Lupun\AppData\Roaming\npm\node_modules\@playwright\cli\node_modules\.bin\playwright.cmd'
@@ -252,8 +328,27 @@ jobs:
             Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
           }
 
-          @{ status='SENDING'; source_return_request_receipt=$env:RETURN_COMMENT_ID; source_issue=$env:RETURN_ISSUE; source_head=$env:RETURN_HEAD; workflow_run_id=$env:GITHUB_RUN_ID; started_at=(Get-Date).ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
-          $env:GBB_DOORBELL_PROMPT = "Read GitHub directly. D22977/gpt-browser-bridge Issue #$($env:RETURN_ISSUE) CONTROL_RETURN_REQUEST_V1 receipt $($env:RETURN_COMMENT_ID). Rehydrate current #88/#43/#81, bind source head $($env:RETURN_HEAD), and publish/read-back CONTROL_RETURN_ACK_V1 on the same issue bound to this return receipt and current ACTIVE generation. GitHub is authority."
+          # Revalidate after browser preflight, immediately before the exclusive
+          # physical-send claim. Never reroute a request to a newer ACTIVE target.
+          $request=Get-Content -LiteralPath $env:RETURN_REQUEST_FILE -Raw | ConvertFrom-Json -AsHashtable
+          $terminal=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($request.source_terminal_receipt)" -Headers $headers -TimeoutSec 30
+          $active=Read-Active
+          $currentHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes([string]$terminal.body)))
+          $validation=Test-ReturnBinding $request $terminal $active ($env:RETURN_INTERNAL -eq 'True')
+          if ($currentHash -cne $env:RETURN_TERMINAL_HASH -or $validation -cne 'VALID' -or $active.receipt -cne $env:ACTIVE_SWITCH_RECEIPT) { throw 'STALE_PRE_SEND_BINDING' }
+          if ($env:RETURN_INTERNAL -eq 'True') {
+            $current=Invoke-RestMethod -Uri 'https://api.github.com/repos/D22977/gpt-browser-bridge/branches/review-base%2Fgbb-gh-01' -Headers $headers -TimeoutSec 30
+            if ($current.commit.sha -cne (Field $terminal.body 'source_default_head')) { throw 'STALE_DEFAULT_HEAD' }
+          }
+          $claim=Claim-Delivery $statePath $env:RETURN_BINDING 'SENDING'
+          if ($claim -cne 'CLAIMED') {
+            [void](Publish-Receipt (@('CONTROL_DOORBELL_V1',"state: $claim","source_return_request_receipt: $($env:RETURN_COMMENT_ID)",'physical_send_count: 0') -join "`n"))
+            exit 0
+          }
+          # Durable SENDING survives loss of local state. Failure or process death
+          # after this point always requires reconciliation, never another send.
+          [void](Publish-Receipt (@('CONTROL_DOORBELL_V1','state: SENDING',"source_return_request_receipt: $($env:RETURN_COMMENT_ID)","source_head: $($env:RETURN_HEAD)","workflow_run_id: $env:GITHUB_RUN_ID") -join "`n"))
+          $env:GBB_DOORBELL_PROMPT = "Read GitHub directly. D22977/gpt-browser-bridge Issue #$($env:RETURN_ISSUE) source return/terminal receipt $($env:RETURN_COMMENT_ID), source card $($env:RETURN_CARD), exact head $($env:RETURN_HEAD). Rehydrate #88/#43/#81 and source issue. Publish/read-back CONTROL_RETURN_ACK_V1 with source_return_request_receipt, source_head and target_control_generation $($env:TARGET_GENERATION). ACK is not completion. Reread current authority and publish/read-back CONTROL_RETURN_CONTINUATION_V1 with those same bindings plus source_ack_receipt, reread_receipts in format 43:<id>,81:<id>,88:<id>,$($env:RETURN_ISSUE):<id>, bounded_decision (DISPATCH_FRESH_REVIEW|WAIT_FRESH_REVIEW|BOUNDED_REPAIR|CONTROL_REQUIRED|STALE|NO_OP_DUPLICATE) and next_action_receipt (the action receipt must itself bind source_head and source_return_request_receipt) pointing to your authorized bounded action or explicit hold. Execute only a currently authorized BEST_NEXT. No inferred merge, release or successor. GitHub is authority; user relay zero."
           $sendScript = @'
           import { pathToFileURL } from 'node:url';
           const mod = await import(pathToFileURL(process.env.GBB_SENDER_PATH).href);
@@ -276,12 +371,52 @@ jobs:
           } finally {
             Remove-Item -LiteralPath $sendPath -Force -ErrorAction SilentlyContinue
           }
-          $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+          $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -AsHashtable
           $state.status = 'SENT'; $state.sent_at = (Get-Date).ToString('o'); $state.sender_job_id = [string]$sent.job_id
           $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding utf8
           $receipt = @('CONTROL_DOORBELL_V1','state: DELIVERED','decision: PASS',"source_return_request_receipt: $($env:RETURN_COMMENT_ID)","source_issue: $($env:RETURN_ISSUE)","source_card_id: $($env:RETURN_CARD)","source_head: $($env:RETURN_HEAD)","active_switch_receipt: $($env:ACTIVE_SWITCH_RECEIPT)","target_control_generation: $($env:TARGET_GENERATION)","target_control_conversation_id: $($env:TARGET_CONVERSATION_ID)","target_control_conversation_url: $($env:TARGET_CONVERSATION_URL)","sender_module_blob: $expectedBlob","sender_session: $senderSession","sender_job_id: $($sent.job_id)","sender_prompt_hash: $($sent.prompt_hash)","workflow_run_id: $env:GITHUB_RUN_ID","runner_name: $env:RUNNER_NAME",'physical_send_count: 1','user_relay_count: 0','semantic_control_authority: false','readback_required: true') -join "`n"
           $id = Publish-Receipt $receipt
           "DOORBELL_RECEIPT_ID=$id" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          # Transport observes the Control-owned continuation; it never invents a
+          # decision or issues a second doorbell when ACK/continuation is missing.
+          $continuation=$null
+          for ($poll=0; $poll -lt 24; $poll++) {
+            $comments=@(Read-AllComments ([int]$env:RETURN_ISSUE))
+            $acks=@($comments | Where-Object {
+              $_.user.login -ceq 'D22977' -and ($_.body.Trim() -split '\r?\n')[0] -ceq 'CONTROL_RETURN_ACK_V1' -and
+              (Field $_.body 'source_return_request_receipt') -ceq $env:RETURN_COMMENT_ID -and
+              (Field $_.body 'source_head') -ceq $env:RETURN_HEAD -and
+              (Field $_.body 'target_control_generation') -ceq $env:TARGET_GENERATION
+            })
+            if ($acks.Count -gt 1) { throw 'Conflicting Control ACKs; reconciliation required' }
+            if ($acks.Count -eq 1) {
+              $decisions=@($comments | Where-Object {
+                $_.user.login -ceq 'D22977' -and (Test-ControlContinuation $acks[0].body $_.body $env:RETURN_COMMENT_ID ([string]$acks[0].id) $env:RETURN_HEAD $env:TARGET_GENERATION)
+              })
+              if ($decisions.Count -gt 1) { throw 'Conflicting Control continuations' }
+              if ($decisions.Count -eq 1) {
+                $candidate=$decisions[0]
+                # Resolve the declared reread and action receipts directly. This
+                # proves durable binding, not semantic approval of Control's choice.
+                foreach ($pair in (Field $candidate.body 'reread_receipts').Split(',')) {
+                  $parts=$pair.Split(':')
+                  $r=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($parts[1])" -Headers $headers -TimeoutSec 30
+                  if ($r.issue_url -cne "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/$($parts[0])") { throw 'Reread receipt issue mismatch' }
+                }
+                $actionId=Field $candidate.body 'next_action_receipt'
+                $action=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$actionId" -Headers $headers -TimeoutSec 30
+                if ($action.user.login -cne 'D22977' -or $action.issue_url -cne "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/$($env:RETURN_ISSUE)" -or (Field $action.body 'source_head') -cne $env:RETURN_HEAD -or (Field $action.body 'source_return_request_receipt') -cne $env:RETURN_COMMENT_ID) { throw 'Next action receipt binding mismatch' }
+                $active=Read-Active
+                if ($active.receipt -cne $env:ACTIVE_SWITCH_RECEIPT) { throw 'ACTIVE drift during continuation' }
+                $continuation=$candidate
+                break
+              }
+            }
+            Start-Sleep -Seconds 5
+          }
+          $continuationState=if ($continuation) { 'ACK_REREAD_BOUNDED_ACTION_OBSERVED' } else { 'CONTROL_REQUIRED_CONTINUATION_TIMEOUT' }
+          [void](Publish-Receipt (@('CONTROL_RETURN_CONTINUATION_OBSERVATION_V1',"state: $continuationState","source_return_request_receipt: $($env:RETURN_COMMENT_ID)","source_head: $($env:RETURN_HEAD)","continuation_receipt: $($continuation.id)",'ack_alone_is_completion: false','second_physical_send: false',"workflow_run_id: $env:GITHUB_RUN_ID",'user_relay_count: 0') -join "`n"))
 
       - name: Verify durable doorbell receipt read-back
         if: always()
@@ -295,3 +430,28 @@ jobs:
           if ([string]$r.body -notmatch '(?m)^CONTROL_DOORBELL_V1\s*$') { throw 'Doorbell receipt header mismatch' }
           if ([string]$r.body -notmatch "(?m)^source_return_request_receipt:\s*$([regex]::Escape($env:RETURN_COMMENT_ID))\s*$") { throw 'Doorbell receipt source mismatch' }
           Write-Output "doorbell receipt read-back PASS id=$($env:DOORBELL_RECEIPT_ID)"
+
+      - name: Publish typed failure without retrying delivery
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $event=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          # Admission can fail before exporting the validated request. Report only
+          # a syntactically bound source in this repository; never dispatch here.
+          if ($env:RETURN_ISSUE) {
+            $issue=$env:RETURN_ISSUE; $source=$env:RETURN_COMMENT_ID; $head=$env:RETURN_HEAD
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $request=$event.inputs.request | ConvertFrom-Json
+            $issue=[string]$request.source_issue; $source=[string]$request.source_terminal_receipt; $head=[string]$request.source_head
+          } else {
+            $issue=[string]$event.issue.number; $source=[string]$event.comment.id
+            $head=[regex]::Match([string]$event.comment.body,'(?m)^source_head:\s*([0-9a-f]{40})\s*$').Groups[1].Value
+          }
+          if ($issue -notmatch '^\d+$' -or $source -notmatch '^\d+$' -or $head -notmatch '^[0-9a-f]{40}$') { throw 'Malformed admission; no physical send, no routable receipt' }
+          $body=@('CONTROL_DOORBELL_FAILURE_V1','state: CONTROL_REQUIRED_RETURN_RECONCILIATION',"source_issue: $issue","source_return_request_receipt: $source","source_head: $head","workflow_run_id: $env:GITHUB_RUN_ID","workflow_job: $env:GITHUB_JOB",'requested_capability: VALIDATED_RETURN_RUNTIME_AND_BINDINGS','delivery_state: RECONCILE_WORKFLOW_AND_DURABLE_SENDING','no_blind_retry: true','owner_enter_count: 0','send_keys_used: false','orca_used: false','user_relay_count: 0','readback_verified: true') -join "`n"
+          $headers=@{Authorization="Bearer $env:GH_TOKEN"; 'User-Agent'='gbb-control-return-bridge'; Accept='application/vnd.github+json'}
+          $posted=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/$issue/comments" -Headers $headers -Method Post -Body (@{body=$body}|ConvertTo-Json -Compress) -ContentType 'application/json' -TimeoutSec 30
+          $read=Invoke-RestMethod -Uri "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/comments/$($posted.id)" -Headers $headers -TimeoutSec 30
+          if ($read.body -cne $body) { throw 'Failure receipt readback mismatch; no retry' }
