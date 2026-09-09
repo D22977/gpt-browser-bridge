@@ -7,20 +7,98 @@ on:
 permissions:
   contents: read
   issues: write
+  actions: write
 
 concurrency:
   group: g12-issue149-idle-r2-${{ github.event.comment.id }}
   cancel-in-progress: false
 
 jobs:
-  idle-gated-r2-and-return:
+  release-r1-guard:
     if: >-
       github.event.issue.number == 149 &&
       github.event.comment.user.login == 'D22977' &&
       github.event.comment.author_association == 'OWNER' &&
       startsWith(github.event.comment.body, 'G12_ISSUE149_IDLE_RECOVERY_WAKE_V1')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Release exact R1 terminal guard after durable terminal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo='D22977/gpt-browser-bridge'
+          issue='149'
+          source_terminal='5609874879'
+          source_wake='5609810233'
+          stale_run='34414168202'
+          authority='5609958835'
+
+          term_body="$(gh api "repos/$repo/issues/comments/$source_terminal" --jq .body)"
+          printf '%s\n' "$term_body" | grep -q '^GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_RESULT_V1$'
+          printf '%s\n' "$term_body" | grep -q '^decision: CONTROL_REQUIRED$'
+          printf '%s\n' "$term_body" | grep -q "^source_bootstrap_wake: $source_wake$"
+          auth_body="$(gh api "repos/$repo/issues/comments/$authority" --jq .body)"
+          printf '%s\n' "$auth_body" | grep -q '^CONTROL_G12_ISSUE149_R1_GUARD_RELEASE_AMENDMENT_V1$'
+
+          initial="$(gh api "repos/$repo/actions/runs/$stale_run" --jq .status)"
+          cancel_invoked='false'
+          if [[ "$initial" == 'queued' || "$initial" == 'in_progress' || "$initial" == 'waiting' || "$initial" == 'pending' || "$initial" == 'requested' ]]; then
+            if gh api --method POST "repos/$repo/actions/runs/$stale_run/cancel" >/dev/null 2>&1; then
+              cancel_invoked='true'
+            else
+              reread="$(gh api "repos/$repo/actions/runs/$stale_run" --jq .status)"
+              if [[ "$reread" == 'queued' || "$reread" == 'in_progress' || "$reread" == 'waiting' || "$reread" == 'pending' || "$reread" == 'requested' ]]; then
+                echo "exact stale run remained active after cancel failure: $reread" >&2
+                exit 1
+              fi
+            fi
+          fi
+
+          final=''
+          for _ in $(seq 1 60); do
+            final="$(gh api "repos/$repo/actions/runs/$stale_run" --jq .status)"
+            if [[ "$final" != 'queued' && "$final" != 'in_progress' && "$final" != 'waiting' && "$final" != 'pending' && "$final" != 'requested' ]]; then
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$final" == 'queued' || "$final" == 'in_progress' || "$final" == 'waiting' || "$final" == 'pending' || "$final" == 'requested' ]]; then
+            echo "stale R1 guard did not release: $final" >&2
+            exit 1
+          fi
+
+          body=$(cat <<EOF
+          G12_ISSUE149_R1_GUARD_RELEASE_V1
+          state: PASS
+          source_authority: $authority
+          source_worker_terminal: $source_terminal
+          source_worker_wake: $source_wake
+          stale_guard_run: $stale_run
+          initial_status: $initial
+          cancel_invoked: $cancel_invoked
+          final_status: $final
+          worker_prompt_retried: false
+          readback_verified: true
+          idempotency_key: G12-ISSUE149-R1-GUARD-RELEASE-$stale_run
+          EOF
+          )
+          posted="$(gh api --method POST "repos/$repo/issues/$issue/comments" -f body="$body" --jq .id)"
+          readback="$(gh api "repos/$repo/issues/comments/$posted" --jq .body)"
+          test "$readback" = "$body"
+
+  idle-gated-r2-and-return:
+    needs: release-r1-guard
+    if: >-
+      needs.release-r1-guard.result == 'success' &&
+      github.event.issue.number == 149 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'G12_ISSUE149_IDLE_RECOVERY_WAKE_V1')
     runs-on: [self-hosted, Windows, GBB-REVIEWER]
-    timeout-minutes: 180
+    timeout-minutes: 175
     defaults:
       run:
         shell: pwsh -NoProfile -File {0}
@@ -33,6 +111,7 @@ jobs:
           $repo = 'D22977/gpt-browser-bridge'
           $issue = 149
           $authority = '5609909884'
+          $guardReleaseAuthority = '5609958835'
           $sourceR1Terminal = '5609874879'
           $switchReceipt = '5601634172'
           $requiredBranch = 'worker/g12-control-doorbell-physical-submit-repair-01-r2'
@@ -84,11 +163,11 @@ jobs:
             }
             return $null
           }
-          function AssertCurrent012([string]$createdAt) {
+          function AssertCurrent012 {
             $sw = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$switchReceipt" -Headers $headers -Method Get -TimeoutSec 30
             $b = [string]$sw.body
             if (-not $b.StartsWith('CONTROL_GENERATION_SWITCH_V1') -or $b -notmatch '(?m)^state:\s*SWITCH_COMMITTED\s*$' -or $b -notmatch '(?m)^new_generation:\s*012\s*$' -or $b -notmatch '(?m)^new_generation_status:\s*ACTIVE\s*$') { throw 'generation012 exact ACTIVE switch mismatch' }
-            $sinceSwitch = [uri]::EscapeDataString($createdAt)
+            $sinceSwitch = [uri]::EscapeDataString([string]$sw.created_at)
             for ($page=1; $page -le 10; $page++) {
               $rows = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=$sinceSwitch&per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
               foreach ($row in $rows) {
@@ -133,17 +212,13 @@ jobs:
           $phase = 'PREFLIGHT'
           $workerPromptCount = 0
           $returnPromptCount = 0
-          $workerDeliveryReceipt = ''
           $workerTerminalReceipt = ''
           $workerConsumedReceipt = ''
-          $returnAgent = ''
-          $returnWorkspace = ''
-          $returnPane = ''
+          $profilePath = ''
           $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
           $body = [string]$event.comment.body
           $wake = [string]$event.comment.id
           $since = [uri]::EscapeDataString([string]$event.comment.created_at)
-          $wakeCreatedAt = [string]$event.comment.created_at
           $stateRoot = "D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\issue149-idle-r2\$wake"
           $statePath = Join-Path $stateRoot 'transport.json'
           New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
@@ -177,13 +252,19 @@ jobs:
             }
             @{status='PREPARING';phase=$phase;wake=$wake;worker_prompt_count=0;return_prompt_count=0}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
 
+            foreach ($rid in @($authority,$guardReleaseAuthority,$sourceR1Terminal)) {
+              $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$rid" -Headers $headers -Method Get -TimeoutSec 30
+              if ([string]::IsNullOrWhiteSpace([string]$r.body)) { throw "unreadable authority receipt=$rid" }
+            }
             $auth = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$authority" -Headers $headers -Method Get -TimeoutSec 30
             if (-not ([string]$auth.body).StartsWith('CONTROL_G12_ISSUE149_IDLE_GATED_RECOVERY_AND_RETURN_AUTHORITY_V1')) { throw 'wrong R2 recovery authority receipt' }
             $r1 = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$sourceR1Terminal" -Headers $headers -Method Get -TimeoutSec 30
             if (-not ([string]$r1.body).StartsWith('GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_RESULT_V1') -or [string]$r1.body -notmatch '(?m)^decision:\s*CONTROL_REQUIRED\s*$') { throw 'R1 source terminal mismatch' }
+            $release = FindRecoveryReceipt 'G12_ISSUE149_R1_GUARD_RELEASE_V1' $wake $since
+            if ($null -eq $release) { throw 'exact R1 guard release receipt missing for recovery wake' }
             $card = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue" -Headers $headers -Method Get -TimeoutSec 30
             if (-not ([string]$card.body).StartsWith('DISPATCH_CARD_V1') -or [string]$card.body -notmatch '(?m)^card_id:\s*GBB-G12-CONTROL-DOORBELL-PHYSICAL-SUBMIT-REPAIR-01\s*$') { throw 'Issue149 card mismatch' }
-            $sw = AssertCurrent012 '2026-09-09T20:00:00Z'
+            [void](AssertCurrent012)
 
             $ref = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
             if ([string]$ref.object.sha -cne $workerBase) { throw "default head drift expected=$workerBase actual=$([string]$ref.object.sha)" }
@@ -245,16 +326,17 @@ jobs:
             $cmd = "codex --profile $profile --approve-for-me"
             $run = ((& $herdr --session $named pane run $workerPane $cmd 2>&1) | Out-String).Trim()
             if ($LASTEXITCODE -ne 0) { throw "R2 Codex launch failed: $(Safe $run)" }
-            $workerObj = WaitAgentReady $named $workerPane 100
+            [void](WaitAgentReady $named $workerPane 100)
             $rn = ((& $herdr --session $named agent rename $workerPane $workerAgent 2>&1) | Out-String).Trim()
             if ($LASTEXITCODE -ne 0) { throw "R2 agent rename failed: $(Safe $rn)" }
             $workerObj = WaitAgentReady $named $workerAgent 30
             $workerNative = [string]$workerObj.result.agent.agent_session.value
             if ([string]::IsNullOrWhiteSpace($workerNative)) { $workerNative='UNREPORTED_NATIVE_SESSION' }
             Remove-Item -LiteralPath $profilePath -Force
+            $profilePath = ''
 
             $phase = 'FINAL_R2_PRESEND_ADMISSION'
-            AssertCurrent012 '2026-09-09T20:00:00Z' | Out-Null
+            [void](AssertCurrent012)
             $ref2 = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
             if ([string]$ref2.object.sha -cne $workerBase) { throw 'default drift before R2 prompt' }
             if (RemoteBranchExists $requiredBranch) { throw 'R2 Worker branch appeared before prompt' }
@@ -264,7 +346,7 @@ jobs:
 
             $phase = 'R2_WORKER_SENDING'
             @{status='R2_WORKER_SENDING';wake=$wake;worker_prompt_count=0;return_prompt_count=0;worker_base=$workerBase}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
-            $prompt = "Read GitHub directly. You are the ONE fresh WORKER for D22977/gpt-browser-bridge Issue #149 recovery generation R2. Rehydrate authority $authority, source R1 terminal $sourceR1Terminal, source_bootstrap_wake $wake, and card GBB-G12-CONTROL-DOORBELL-PHYSICAL-SUBMIT-REPAIR-01. Work from exact clean base $workerBase and create only branch $requiredBranch. Before tracked mutation publish/read-back GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_CONSUMED_STARTED_V1 with source_bootstrap_wake: $wake, fresh identity/cwd/base/branch. CRITICAL IDLE GATE: the R1 blocker occurred because Control-012 was generating and exposed stop-button. Before R1, repeatedly inspect the exact ACTIVE Control conversation read-only. While Stop/停止回應 is present or no deterministic actionable Send target exists, WAIT and poll read-only; this is expected, not a reason to retry the Worker prompt. During this gate do not fill, clear, click, press, stop, send, restart any browser, or mutate tracked files. If Control generation changes, return STALE. Once the exact Control is idle and a deterministic actionable Send target is proven, perform the card's live NO-SEND R1 and continue R2-R9. Mutate only src/gpt_send.mjs, .github/workflows/herdr-control-comment-bridge.yml, tests/baseline.test.mjs. Run all required tests/checks, push exact branch, publish/read-back GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_RESULT_V1 with source_bootstrap_wake: $wake. Do not run live Control canary, merge, release, retry 5602620127, or reuse R1 Worker. Stop at terminal."
+            $prompt = "Read GitHub directly. You are the ONE fresh WORKER for D22977/gpt-browser-bridge Issue #149 recovery generation R2. Rehydrate authority $authority, source R1 terminal $sourceR1Terminal, source_bootstrap_wake $wake, and card GBB-G12-CONTROL-DOORBELL-PHYSICAL-SUBMIT-REPAIR-01. Work from exact clean base $workerBase and create only branch $requiredBranch. Before tracked mutation publish/read-back GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_CONSUMED_STARTED_V1 with source_bootstrap_wake: $wake, fresh identity/cwd/base/branch. CRITICAL IDLE GATE: R1 stopped only because Control-012 was generating and exposed stop-button. Before R1, repeatedly inspect the exact ACTIVE Control conversation read-only. While Stop/停止回應 is present or no deterministic actionable Send target exists, WAIT and poll read-only. During this gate do not fill, clear, click, press, stop, send, restart any browser, or mutate tracked files. Do not return CONTROL_REQUIRED merely because the current Control turn is still generating; wait until it becomes idle. If Control generation changes, return STALE. Once exact Control is idle and deterministic actionable Send is proven, perform the card's live NO-SEND R1 and continue R2-R9. Mutate only src/gpt_send.mjs, .github/workflows/herdr-control-comment-bridge.yml, tests/baseline.test.mjs. Run all required tests/checks, push exact branch, publish/read-back GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_RESULT_V1 with source_bootstrap_wake: $wake. Do not run live Control canary, merge, release, retry 5602620127, or reuse R1 Worker. Stop at terminal."
             $workerPromptCount = 1
             $raw = ((& $herdr --session $named agent prompt $workerAgent $prompt 2>&1) | Out-String).Trim()
             $workerPromptExit = $LASTEXITCODE
@@ -354,7 +436,7 @@ jobs:
             if ([string]::IsNullOrWhiteSpace($workerTerminalReceipt)) { throw 'R2 Worker terminal guard timeout without durable terminal' }
 
             $phase = 'START_FRESH_CONTROL_RETURN_TRANSPORT'
-            AssertCurrent012 '2026-09-09T20:00:00Z' | Out-Null
+            [void](AssertCurrent012)
             $retCreate = ((& $herdr --session $named workspace create --cwd 'C:\WINDOWS\system32' --label "g149-return-$wake" --no-focus 2>&1) | Out-String).Trim()
             if ($LASTEXITCODE -ne 0) { throw "return workspace create failed: $(Safe $retCreate)" }
             $retObj = $retCreate | ConvertFrom-Json
@@ -369,7 +451,7 @@ jobs:
             if ([string]::IsNullOrWhiteSpace($returnNative)) { $returnNative='UNREPORTED_NATIVE_SESSION' }
 
             $phase = 'CONTROL_RETURN_TRANSPORT_SENDING'
-            $returnPrompt = "Read GitHub directly. You are a NEW/fresh TRANSPORT-ONLY agent, not Control, Worker, or Reviewer. Rehydrate D22977/gpt-browser-bridge Issue #87 canonical terminal-to-same-Control PASS 5254417022, Issue #88 newest legal ACTIVE Control switch, Issue #149 recovery authority $authority, source_recovery_wake $wake, and source terminal receipt $workerTerminalReceipt. Do not make semantic project decisions and do not mutate repository files. First publish/read-back G12_ISSUE149_CONTROL_RETURN_EVENT_V1 on Issue #149 with source_recovery_wake: $wake, source_terminal_receipt: $workerTerminalReceipt, exact target generation/conversation id/url resolved from the newest ACTIVE switch, required_ack_protocol: CONTROL_G12_ISSUE149_RETURN_ACK_V1, and an exactly-once wake_id. Then wait read-only until that exact existing Control conversation is idle. Deliver exactly ONE minimal wake to that exact existing Control conversation using the proven #87 browser automation route, not src/gpt_send.mjs and not the old DB01 sender: `Read GitHub directly. Rehydrate D22977/gpt-browser-bridge Issue #149 latest durable return event and terminal, then execute only the current legal Control action.` Do not create a fresh conversation. Do not press Stop. No second send. If the physical send boundary is ambiguous, publish UNCERTAIN_SEND_NO_BLIND_RETRY and do not retry. After confirmed single delivery, wait for exactly one durable CONTROL_G12_ISSUE149_RETURN_ACK_V1 matching the return event/wake_id. Publish/read-back exactly one G12_ISSUE149_CONTROL_RETURN_TRANSPORT_RESULT_V1 with source_recovery_wake: $wake, source_terminal_receipt: $workerTerminalReceipt, event receipt, target identity, physical_send_count, second_physical_send=false, ack receipt/count, user_relay_count=0, and final state ACK_CONFIRMED or typed failure."
+            $returnPrompt = "Read GitHub directly. You are a NEW/fresh TRANSPORT-ONLY agent, not Control, Worker, or Reviewer. Rehydrate D22977/gpt-browser-bridge Issue #87 canonical terminal-to-same-Control PASS 5254417022, Issue #88 newest legal ACTIVE Control switch, Issue #149 recovery authority $authority, source_recovery_wake $wake, and source terminal receipt $workerTerminalReceipt. Do not make semantic project decisions and do not mutate repository files. First publish/read-back G12_ISSUE149_CONTROL_RETURN_EVENT_V1 on Issue #149 with source_recovery_wake: $wake, source_terminal_receipt: $workerTerminalReceipt, exact target generation/conversation id/url resolved from newest ACTIVE switch, required_ack_protocol: CONTROL_G12_ISSUE149_RETURN_ACK_V1, and an exactly-once wake_id. Then wait read-only until that exact existing Control conversation is idle. Deliver exactly ONE minimal wake to that exact existing Control conversation using the proven #87 browser automation route, not src/gpt_send.mjs and not the old DB01 sender: `Read GitHub directly. Rehydrate D22977/gpt-browser-bridge Issue #149 latest durable return event and terminal, then execute only the current legal Control action.` Do not create a fresh conversation. Do not press Stop. No second send. If the physical send boundary is ambiguous, publish UNCERTAIN_SEND_NO_BLIND_RETRY and do not retry. After confirmed single delivery, wait for exactly one durable CONTROL_G12_ISSUE149_RETURN_ACK_V1 matching the return event/wake_id. Publish/read-back exactly one G12_ISSUE149_CONTROL_RETURN_TRANSPORT_RESULT_V1 with source_recovery_wake: $wake, source_terminal_receipt: $workerTerminalReceipt, event receipt, target identity, physical_send_count, second_physical_send=false, ack receipt/count, user_relay_count=0, and final state ACK_CONFIRMED or typed failure."
             $returnPromptCount = 1
             $retPromptRaw = ((& $herdr --session $named agent prompt $returnAgent $returnPrompt 2>&1) | Out-String).Trim()
             $returnPromptExit = $LASTEXITCODE
@@ -425,10 +507,11 @@ jobs:
             [void](Publish $final)
           }
           catch {
+            if (-not [string]::IsNullOrWhiteSpace($profilePath) -and (Test-Path -LiteralPath $profilePath)) {
+              try { Remove-Item -LiteralPath $profilePath -Force -ErrorAction Stop } catch {}
+            }
             $diag = Safe $_.Exception.Message
-            $postWorkerBoundary = $workerPromptCount -gt 0
-            $postReturnBoundary = $returnPromptCount -gt 0
-            $state = if ($postReturnBoundary) { 'CONTROL_REQUIRED_RETURN_TRANSPORT_NO_BLIND_RETRY' } elseif ($postWorkerBoundary) { 'CONTROL_REQUIRED_AFTER_WORKER_PROMPT_NO_BLIND_RETRY' } else { 'CONTROL_REQUIRED_PRE_WORKER_NO_SEND' }
+            $state = if ($returnPromptCount -gt 0) { 'CONTROL_REQUIRED_RETURN_TRANSPORT_NO_BLIND_RETRY' } elseif ($workerPromptCount -gt 0) { 'CONTROL_REQUIRED_AFTER_WORKER_PROMPT_NO_BLIND_RETRY' } else { 'CONTROL_REQUIRED_PRE_WORKER_NO_SEND' }
             try {
               $fail = @(
                 'G12_ISSUE149_IDLE_R2_AND_RETURN_RESULT_V1'
