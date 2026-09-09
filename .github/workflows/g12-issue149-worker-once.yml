@@ -33,6 +33,7 @@ jobs:
           issue='149'
           source_terminal='5609874879'
           source_wake='5609810233'
+          recovery_wake='${{ github.event.comment.id }}'
           stale_run='34414168202'
           authority='5609958835'
 
@@ -74,6 +75,7 @@ jobs:
           G12_ISSUE149_R1_GUARD_RELEASE_V1
           state: PASS
           source_authority: $authority
+          source_recovery_wake: $recovery_wake
           source_worker_terminal: $source_terminal
           source_worker_wake: $source_wake
           stale_guard_run: $stale_run
@@ -82,7 +84,7 @@ jobs:
           final_status: $final
           worker_prompt_retried: false
           readback_verified: true
-          idempotency_key: G12-ISSUE149-R1-GUARD-RELEASE-$stale_run
+          idempotency_key: G12-ISSUE149-R1-GUARD-RELEASE-$stale_run-$recovery_wake
           EOF
           )
           posted="$(gh api --method POST "repos/$repo/issues/$issue/comments" -f body="$body" --jq .id)"
