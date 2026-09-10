@@ -1,0 +1,227 @@
+name: G12 Issue149 R2 Readonly Reconcile Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g12-issue149-r2-readonly-reconcile-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: >-
+      github.event.issue.number == 149 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'G12_ISSUE149_R2_RECONCILE_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Reconcile exact old R2 runtime without send or mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D22977/gpt-browser-bridge'
+          $issue = 149
+          $transportAuthority = '5618481097'
+          $finitePlan = '5618456636'
+          $adjudication = '5618170777'
+          $sourceWake = '5614662449'
+          $switchReceipt = '5601634172'
+          $expectedOldBase = '0b24d58ddc5d971d47b0c977585f47db975a1d76'
+          $named = 'g149-r2-14662449'
+          $agent = 'g149r2w14662449'
+          $runtimeRoot = 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\issue149-idle-r2\5614662449'
+          $runtimeRepo = Join-Path $runtimeRoot 'repo'
+          $requiredRemoteBranch = 'worker/g12-control-doorbell-physical-submit-repair-01-r2'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            'User-Agent' = 'g12-issue149-r2-readonly-reconcile'
+            Accept = 'application/vnd.github+json'
+          }
+
+          function Need([string]$body,[string]$pattern,[string]$name) {
+            $m = [regex]::Match($body,$pattern)
+            if (-not $m.Success) { throw "Malformed field: $name" }
+            return $m.Groups[1].Value
+          }
+          function Safe([string]$text,[int]$max=1200) {
+            if ($null -eq $text) { return '' }
+            $v = ($text -replace '[\r\n]+',' | ' -replace '[\x00-\x1F]',' ').Trim()
+            if ($v.Length -gt $max) { return $v.Substring(0,$max) }
+            return $v
+          }
+          function Hash([string]$text) {
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try {
+              $bytes = [Text.Encoding]::UTF8.GetBytes($(if($null -eq $text){''}else{$text}))
+              return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()
+            } finally { $sha.Dispose() }
+          }
+          function Publish([string]$text) {
+            $payload = @{ body = $text } | ConvertTo-Json -Compress
+            $posted = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $rb = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$($posted.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$rb.body -cne $text) { throw "readback mismatch receipt=$($posted.id)" }
+            return [string]$posted.id
+          }
+          function FindBound([string]$protocol,[string]$wake) {
+            for ($page=1; $page -le 10; $page++) {
+              $rows = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+              foreach ($row in $rows) {
+                $b = [string]$row.body
+                if ($b.StartsWith($protocol) -and $b -match "(?m)^source_bootstrap_wake:\s*$wake\s*$") { return $row }
+              }
+              if ($rows.Count -lt 100) { break }
+            }
+            return $null
+          }
+
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $body = [string]$event.comment.body
+          $reconcileWake = [string]$event.comment.id
+          $wakeAuthority = Need $body '(?m)^transport_authority:\s*(\d+)\s*$' 'transport_authority'
+          $wakeSource = Need $body '(?m)^source_r2_wake:\s*(\d+)\s*$' 'source_r2_wake'
+          $launcherHead = Need $body '(?m)^launcher_integration_head:\s*([0-9a-f]{40})\s*$' 'launcher_integration_head'
+          $idem = Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
+          if ($wakeAuthority -cne $transportAuthority -or $wakeSource -cne $sourceWake) { throw 'reconcile wake authority mismatch' }
+
+          foreach ($rid in @($transportAuthority,$finitePlan,$adjudication,$switchReceipt)) {
+            $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$rid" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]::IsNullOrWhiteSpace([string]$r.body)) { throw "unreadable authority receipt=$rid" }
+          }
+          $auth = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$transportAuthority" -Headers $headers -Method Get -TimeoutSec 30
+          if (-not ([string]$auth.body).StartsWith('CONTROL_G12_ISSUE149_STAGE0_RECONCILIATION_TRANSPORT_AUTHORITY_V1')) { throw 'wrong Stage0 authority' }
+          $plan = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$finitePlan" -Headers $headers -Method Get -TimeoutSec 30
+          if (-not ([string]$plan.body).StartsWith('CONTROL_G12_ISSUE149_FINITE_COMPLETION_PLAN_V1')) { throw 'wrong finite plan' }
+
+          $sw = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$switchReceipt" -Headers $headers -Method Get -TimeoutSec 30
+          $swBody = [string]$sw.body
+          if ($swBody -notmatch '(?m)^state:\s*SWITCH_COMMITTED\s*$' -or $swBody -notmatch '(?m)^new_generation:\s*012\s*$' -or $swBody -notmatch '(?m)^new_generation_status:\s*ACTIVE\s*$') { throw 'generation012 not ACTIVE' }
+          $sinceSwitch = [uri]::EscapeDataString([string]$sw.created_at)
+          $newSwitches = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/88/comments?since=$sinceSwitch&per_page=100" -Headers $headers -Method Get -TimeoutSec 30 | Where-Object {
+            [string]$_.id -ne $switchReceipt -and [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
+          })
+          if ($newSwitches.Count -gt 0) { throw 'newer committed Control switch exists' }
+
+          $defaultRef = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
+          $currentDefault = [string]$defaultRef.object.sha
+          if ($currentDefault -cne $launcherHead) { throw "launcher/default drift expected=$launcherHead actual=$currentDefault" }
+          if ($env:RUNNER_NAME -cne 'gbb-reviewer-win-01' -or -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { throw 'self-hosted interactive runner admission failed' }
+          if (-not (Test-Path -LiteralPath $herdr -PathType Leaf)) { throw 'Herdr CLI missing' }
+
+          $serverState = 'DEAD_OR_UNREACHABLE'
+          $serverRaw = ((& $herdr --session $named status server 2>&1) | Out-String).Trim()
+          if ($LASTEXITCODE -eq 0) { $serverState = 'ALIVE' }
+
+          $agentExists = 'false'
+          $agentStatus = 'UNAVAILABLE'
+          $agentRaw = ''
+          $agentRead = ''
+          if ($serverState -eq 'ALIVE') {
+            $agentRaw = ((& $herdr --session $named agent get $agent 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -eq 0) {
+              $agentExists = 'true'
+              try {
+                $obj = $agentRaw | ConvertFrom-Json
+                $agentStatus = [string]$obj.result.agent.agent_status
+              } catch { $agentStatus = 'UNPARSEABLE' }
+              $agentRead = ((& $herdr --session $named agent read $agent --source recent-unwrapped --lines 120 2>&1) | Out-String).Trim()
+              if ($LASTEXITCODE -ne 0) { $agentRead = "READ_FAILED: $agentRead" }
+            }
+          }
+
+          $runtimeRepoExists = Test-Path -LiteralPath $runtimeRepo -PathType Container
+          $localHead = 'ABSENT'
+          $localBranch = 'ABSENT'
+          $localStatus = ''
+          $localDiffPaths = ''
+          $localCachedPaths = ''
+          if ($runtimeRepoExists) {
+            $localHead = ((& git -C $runtimeRepo rev-parse HEAD 2>&1) | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { $localHead = 'UNREADABLE' }
+            $localBranch = ((& git -C $runtimeRepo symbolic-ref -q --short HEAD 2>&1) | Out-String).Trim()
+            if ([string]::IsNullOrWhiteSpace($localBranch)) { $localBranch = 'DETACHED' }
+            $localStatus = ((& git -C $runtimeRepo status --porcelain=v1 --untracked-files=all 2>&1) | Out-String).Trim()
+            $localDiffPaths = ((& git -C $runtimeRepo diff --name-only 2>&1) | Out-String).Trim()
+            $localCachedPaths = ((& git -C $runtimeRepo diff --cached --name-only 2>&1) | Out-String).Trim()
+          }
+
+          $consumed = FindBound 'GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_CONSUMED_STARTED_V1' $sourceWake
+          $terminal = FindBound 'GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_RESULT_V1' $sourceWake
+
+          $remoteBranchExists = 'false'
+          try {
+            $escaped = [uri]::EscapeDataString($requiredRemoteBranch)
+            $null = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/git/ref/heads/$escaped" -Headers $headers -Method Get -TimeoutSec 30
+            $remoteBranchExists = 'true'
+          } catch {
+            $code = 0
+            try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+            if ($code -ne 404 -and $_.Exception.Message -notmatch '404') { throw }
+          }
+
+          $localSideEffects = $false
+          if ($runtimeRepoExists) {
+            if ($localHead -cne $expectedOldBase -or $localBranch -cne 'DETACHED' -or -not [string]::IsNullOrWhiteSpace($localStatus) -or -not [string]::IsNullOrWhiteSpace($localDiffPaths) -or -not [string]::IsNullOrWhiteSpace($localCachedPaths)) { $localSideEffects = $true }
+          }
+
+          $classification = 'AMBIGUOUS_CONTROL_REQUIRED'
+          if ($null -ne $consumed -or $null -ne $terminal -or $remoteBranchExists -eq 'true') {
+            $classification = 'DURABLE_OR_REMOTE_SIDE_EFFECT_PRESENT'
+          } elseif ($serverState -eq 'ALIVE' -or $agentExists -eq 'true') {
+            $classification = 'LIVE_RUNTIME_PRESERVE'
+          } elseif ($localSideEffects) {
+            $classification = 'LOCAL_SIDE_EFFECTS_PRESENT'
+          } elseif (-not $runtimeRepoExists) {
+            $classification = 'DEAD_NO_LOCAL_RUNTIME_NO_DURABLE_CONSUMPTION'
+          } elseif ($localHead -ceq $expectedOldBase -and $localBranch -ceq 'DETACHED' -and [string]::IsNullOrWhiteSpace($localStatus)) {
+            $classification = 'DEAD_CLEAN_NO_DURABLE_CONSUMPTION'
+          }
+
+          $result = @(
+            'G12_ISSUE149_R2_RECONCILIATION_RESULT_V1'
+            "state: $classification"
+            "source_reconciliation_wake: $reconcileWake"
+            "transport_authority: $transportAuthority"
+            "source_finite_plan: $finitePlan"
+            "source_r2_wake: $sourceWake"
+            "current_default: $currentDefault"
+            "named_session: $named"
+            "agent: $agent"
+            "server_state: $serverState"
+            "server_readback: $(Safe $serverRaw 500)"
+            "agent_exists: $agentExists"
+            "agent_status: $agentStatus"
+            "agent_get_hash: $(Hash $agentRaw)"
+            "agent_read_hash: $(Hash $agentRead)"
+            "agent_readback: $(Safe $agentRead 1200)"
+            "runtime_repo_exists: $($runtimeRepoExists.ToString().ToLowerInvariant())"
+            "runtime_repo_head: $(Safe $localHead 120)"
+            "runtime_repo_branch: $(Safe $localBranch 120)"
+            "runtime_repo_status: $(Safe $localStatus 1200)"
+            "runtime_diff_paths: $(Safe $localDiffPaths 800)"
+            "runtime_cached_paths: $(Safe $localCachedPaths 800)"
+            "durable_consumed_receipt: $(if($null -eq $consumed){'NONE'}else{[string]$consumed.id})"
+            "durable_terminal_receipt: $(if($null -eq $terminal){'NONE'}else{[string]$terminal.id})"
+            "remote_worker_branch_exists: $remoteBranchExists"
+            'herdr_agent_prompt_count: 0'
+            'browser_send_count: 0'
+            'tracked_mutation_count: 0'
+            'cleanup_count: 0'
+            'old_wake_retry_count: 0'
+            'user_task_result_relay_count: 0'
+            'readback_verified: true'
+            "idempotency_key: $idem"
+          ) -join "`n"
+          [void](Publish $result)
