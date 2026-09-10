@@ -1,0 +1,419 @@
+name: G12 Issue149 R3 Worker Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g12-issue149-r3-worker-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  run-r3-worker:
+    if: >-
+      github.event.issue.number == 149 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'G12_ISSUE149_R3_WORKER_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Launch one fresh R3 Worker from proven trust-recovery route
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $repo='D22977/gpt-browser-bridge'
+          $issue=149
+          $authority='5618575433'
+          $finitePlan='5618456636'
+          $stage0='5618554789'
+          $switch='5601634172'
+          $cardId='GBB-G12-CONTROL-DOORBELL-PHYSICAL-SUBMIT-REPAIR-01'
+          $requiredBranch='worker/g12-control-doorbell-physical-submit-repair-01-r3'
+          $baseRepo='D:\AIWORK\GPT_BROWSER_BRIDGE'
+          $herdr='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g12-issue149-r3-worker';Accept='application/vnd.github+json'}
+
+          function Need([string]$b,[string]$p,[string]$n){
+            $m=[regex]::Match($b,$p)
+            if(-not $m.Success){throw "Malformed $n"}
+            return $m.Groups[1].Value
+          }
+          function Safe([string]$x,[int]$max=1200){
+            if($null -eq $x){return ''}
+            $x=($x -replace '[\r\n]+',' | ' -replace '[\x00-\x1F]',' ').Trim()
+            if($x.Length -gt $max){$x=$x.Substring(0,$max)}
+            return $x
+          }
+          function Publish([string]$text){
+            $payload=@{body=$text}|ConvertTo-Json -Compress
+            $r=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $rb=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if([string]$rb.body -cne $text){throw "readback mismatch receipt=$($r.id)"}
+            return [string]$r.id
+          }
+          function FindReceipt([string]$proto,[string]$wake,[string]$since){
+            for($p=1;$p-le 12;$p++){
+              $a=@(Invoke-RestMethod "https://api.github.com/repos/$repo/issues/$issue/comments?since=$since&per_page=100&page=$p" -Headers $headers -Method Get -TimeoutSec 30)
+              foreach($i in $a){
+                $b=[string]$i.body
+                if($b.StartsWith($proto) -and $b -match "(?m)^source_bootstrap_wake:\s*$wake\s*$"){return $i}
+              }
+              if($a.Count -lt 100){break}
+            }
+            return $null
+          }
+          function RemoveProfile([string]$path){
+            if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Force -ErrorAction Stop}
+            if(Test-Path -LiteralPath $path){throw 'ephemeral Codex profile cleanup failed'}
+          }
+          function BranchExists([string]$branch){
+            try{
+              $null=Invoke-RestMethod "https://api.github.com/repos/$repo/git/ref/heads/$branch" -Headers $headers -Method Get -TimeoutSec 30
+              return $true
+            }catch{
+              $code=0
+              try{$code=[int]$_.Exception.Response.StatusCode}catch{}
+              if($code -eq 404 -or $_.Exception.Message -match '404'){return $false}
+              throw
+            }
+          }
+          function AssertCurrent012([string]$expectedDefault){
+            $sw=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/comments/$switch" -Headers $headers -Method Get -TimeoutSec 30
+            $sb=[string]$sw.body
+            if($sb -notmatch '(?m)^state:\s*SWITCH_COMMITTED\s*$' -or $sb -notmatch '(?m)^new_generation:\s*012\s*$' -or $sb -notmatch '(?m)^new_generation_status:\s*ACTIVE\s*$'){throw 'generation012 not ACTIVE'}
+            $newSwitch=@(Invoke-RestMethod "https://api.github.com/repos/$repo/issues/88/comments?since=$([uri]::EscapeDataString([string]$sw.created_at))&per_page=100" -Headers $headers -Method Get -TimeoutSec 30 | Where-Object{
+              [string]$_.id -ne $switch -and [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
+            })
+            if($newSwitch.Count -gt 0){throw 'newer committed Control switch exists'}
+            $ref=Invoke-RestMethod "https://api.github.com/repos/$repo/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
+            if([string]$ref.object.sha -cne $expectedDefault){throw "default drift expected=$expectedDefault actual=$([string]$ref.object.sha)"}
+          }
+          function PublishTransportFailure([string]$state,[string]$wake,[string]$idem,[string]$delivery,[string]$consumed,[string]$agentStatus,[string]$readback,[int]$promptCount){
+            $text=@(
+              'G12_ISSUE149_R3_LAUNCH_RESULT_V1',
+              "state: $state",
+              "source_bootstrap_wake: $wake",
+              "r3_authority: $authority",
+              "worker_delivery_receipt: $(if([string]::IsNullOrWhiteSpace($delivery)){'NONE'}else{$delivery})",
+              "consumed_receipt: $(if([string]::IsNullOrWhiteSpace($consumed)){'NONE'}else{$consumed})",
+              "agent_status: $(Safe $agentStatus 200)",
+              "agent_readback: $(Safe $readback 1200)",
+              "physical_prompt_count: $promptCount",
+              'second_physical_prompt: false',
+              'owner_enter_count: 0',
+              'manual_enter_used: false',
+              'send_keys_used: false',
+              'orca_used: false',
+              'user_task_result_relay_count: 0',
+              'readback_verified: true',
+              "idempotency_key: $idem"
+            ) -join "`n"
+            [void](Publish $text)
+          }
+
+          $ev=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json
+          $body=[string]$ev.comment.body
+          $wake=[string]$ev.comment.id
+          $since=[uri]::EscapeDataString([string]$ev.comment.created_at)
+          $wakeAuthority=Need $body '(?m)^r3_authority:\s*(\d+)\s*$' r3_authority
+          $wakeStage0=Need $body '(?m)^source_stage0_adjudication:\s*(\d+)\s*$' source_stage0_adjudication
+          $workerBase=Need $body '(?m)^worker_base_sha:\s*([0-9a-f]{40})\s*$' worker_base_sha
+          $launcherHead=Need $body '(?m)^launcher_integration_head:\s*([0-9a-f]{40})\s*$' launcher_integration_head
+          $wakeBranch=Need $body '(?m)^required_worker_branch:\s*([^\r\n]+)$' required_worker_branch
+          $idem=Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' idempotency_key
+          if($wakeAuthority -cne $authority -or $wakeStage0 -cne $stage0 -or $workerBase -cne $launcherHead -or $wakeBranch.Trim() -cne $requiredBranch){throw 'R3 wake binding mismatch'}
+
+          $runtimeRoot="D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\issue149-r3\$wake"
+          $statePath=Join-Path $runtimeRoot 'transport.json'
+          New-Item -Force -ItemType Directory -Path $runtimeRoot|Out-Null
+          if(Test-Path -LiteralPath $statePath){
+            $old=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json
+            $dup=@(
+              'G12_ISSUE149_R3_LAUNCH_RESULT_V1',
+              'state: NO_OP_DUPLICATE',
+              "source_bootstrap_wake: $wake",
+              "r3_authority: $authority",
+              "prior_state: $([string]$old.status)",
+              'physical_prompt_count: 0',
+              'second_physical_prompt: false',
+              'user_task_result_relay_count: 0',
+              'readback_verified: true',
+              "idempotency_key: $idem"
+            ) -join "`n"
+            [void](Publish $dup)
+            exit 0
+          }
+          @{status='PREPARING';wake=$wake;prompt_count=0}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+
+          foreach($rid in @($authority,$finitePlan,$stage0,$switch)){
+            $r=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/comments/$rid" -Headers $headers -Method Get -TimeoutSec 30
+            if([string]::IsNullOrWhiteSpace([string]$r.body)){throw "unreadable authority $rid"}
+          }
+          $auth=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/comments/$authority" -Headers $headers -Method Get -TimeoutSec 30
+          if(-not ([string]$auth.body).StartsWith('CONTROL_G12_ISSUE149_STAGE1_R3_WORKER_AUTHORITY_V1') -or [string]$auth.body -notmatch '(?m)^state:\s*AUTHORIZED_ONE_FRESH_R3_WORKER_BINDING_AND_ACTIVATION\s*$'){throw 'wrong R3 authority'}
+          $s0=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/comments/$stage0" -Headers $headers -Method Get -TimeoutSec 30
+          if(-not ([string]$s0.body).StartsWith('CONTROL_G12_ISSUE149_STAGE0_RECONCILIATION_ADJUDICATION_V1') -or [string]$s0.body -notmatch '(?m)^state:\s*STAGE0_PASS_DEAD_CLEAN_NO_DURABLE_CONSUMPTION\s*$'){throw 'Stage0 adjudication mismatch'}
+          $card=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/$issue" -Headers $headers -Method Get -TimeoutSec 30
+          if(-not ([string]$card.body).StartsWith('DISPATCH_CARD_V1') -or [string]$card.body -notmatch "(?m)^card_id:\s*$cardId\s*$"){throw 'Issue149 card mismatch'}
+
+          [void](AssertCurrent012 $launcherHead)
+          if(BranchExists $requiredBranch){throw 'R3 Worker branch exists before activation'}
+          if($env:RUNNER_NAME -cne 'gbb-reviewer-win-01' -or -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0){throw 'runner admission failed'}
+          if(-not(Test-Path -LiteralPath $herdr -PathType Leaf)){throw 'Herdr missing'}
+          if(-not(Test-Path -LiteralPath $baseRepo -PathType Container)){throw 'local base repo missing'}
+          $origin=((& git -C $baseRepo remote get-url origin 2>&1)|Out-String).Trim()
+          if($origin -notmatch 'D22977/gpt-browser-bridge(\.git)?$'){throw "local repo origin mismatch $(Safe $origin)"}
+          $hv=((& $herdr --version 2>&1)|Out-String).Trim()
+          if($LASTEXITCODE -ne 0 -or $hv -notmatch '0\.8\.2'){throw "Herdr version mismatch $(Safe $hv)"}
+          $cv=((& codex --version 2>&1)|Out-String).Trim()
+          if($LASTEXITCODE -ne 0){throw "Codex version failed $(Safe $cv)"}
+          $ch=((& codex --help 2>&1)|Out-String)
+          if($LASTEXITCODE -ne 0 -or $ch -notmatch '(?m)--profile'){throw 'Codex --profile unsupported'}
+
+          & git -C $baseRepo fetch origin $workerBase --quiet
+          if($LASTEXITCODE -ne 0){throw 'git fetch exact R3 base failed'}
+          $runtimeRepo=Join-Path $runtimeRoot 'repo'
+          $wt=((& git -C $baseRepo worktree add --detach $runtimeRepo $workerBase 2>&1)|Out-String).Trim()
+          if($LASTEXITCODE -ne 0){throw "R3 worktree add failed $(Safe $wt)"}
+          $head=((& git -C $runtimeRepo rev-parse HEAD 2>&1)|Out-String).Trim()
+          $dirty=((& git -C $runtimeRepo status --porcelain=v1 --untracked-files=all 2>&1)|Out-String)
+          $branch=((& git -C $runtimeRepo symbolic-ref -q --short HEAD 2>&1)|Out-String).Trim()
+          if($head -cne $workerBase -or -not [string]::IsNullOrWhiteSpace($dirty) -or -not [string]::IsNullOrWhiteSpace($branch)){throw 'R3 worktree not pristine detached exact base'}
+
+          $suffix=$wake.Substring([Math]::Max(0,$wake.Length-8))
+          $profile="g149r3$suffix"
+          $named="g149-r3-$suffix"
+          $agent="g149r3w$suffix"
+          if($agent.Length -gt 32){$agent=$agent.Substring(0,32)}
+          $codexHome=if(-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)){$env:CODEX_HOME}else{Join-Path $HOME '.codex'}
+          if(-not(Test-Path -LiteralPath $codexHome -PathType Container)){throw 'CODEX_HOME missing'}
+          $profilePath=Join-Path $codexHome "$profile.config.toml"
+          if(Test-Path -LiteralPath $profilePath){throw 'R3 task Codex profile already exists'}
+          if($runtimeRepo.Contains("'")){throw 'runtime repo path cannot be represented as TOML literal key'}
+          Set-Content -LiteralPath $profilePath -Value "[projects.'$runtimeRepo']`ntrust_level = `"trusted`"`n" -Encoding utf8 -NoNewline
+          if(-not(Test-Path -LiteralPath $profilePath -PathType Leaf)){throw 'R3 task profile creation failed'}
+
+          $hout=Join-Path $runtimeRoot 'herdr.out'
+          $herr=Join-Path $runtimeRoot 'herdr.err'
+          $server=Start-Process $herdr -ArgumentList @('--session',$named,'server') -PassThru -WindowStyle Hidden -RedirectStandardOutput $hout -RedirectStandardError $herr
+          $serverReady=$false
+          for($i=0;$i-lt 40;$i++){
+            Start-Sleep -Milliseconds 500
+            try{
+              $sr=((& $herdr --session $named status server 2>&1)|Out-String).Trim()
+              if($LASTEXITCODE -eq 0 -and $sr -notmatch '(?i)not running|protocol_mismatch|protocol 19'){$serverReady=$true;break}
+            }catch{}
+            if($server.HasExited){break}
+          }
+          if(-not $serverReady){RemoveProfile $profilePath; throw 'fresh R3 named Herdr server unavailable'}
+
+          $cr=((& $herdr --session $named workspace create --cwd $runtimeRepo --label "g149-r3-$wake" --no-focus 2>&1)|Out-String).Trim()
+          if($LASTEXITCODE -ne 0){RemoveProfile $profilePath; throw "R3 workspace create failed $(Safe $cr)"}
+          $wo=$cr|ConvertFrom-Json
+          $ws=[string]$wo.result.workspace.workspace_id
+          $pane=[string]$wo.result.root_pane.pane_id
+          $cmd="codex --profile $profile --approve-for-me"
+          $run=((& $herdr --session $named pane run $pane $cmd 2>&1)|Out-String).Trim()
+          if($LASTEXITCODE -ne 0){RemoveProfile $profilePath; throw "R3 Codex launch failed $(Safe $run)"}
+
+          $agentObj=$null
+          for($i=0;$i-lt 75;$i++){
+            Start-Sleep -Seconds 1
+            $gr=((& $herdr --session $named agent get $pane 2>&1)|Out-String).Trim()
+            if($LASTEXITCODE -eq 0){
+              try{$go=$gr|ConvertFrom-Json;if([string]$go.result.agent.pane_id -ceq $pane){$agentObj=$go;break}}catch{}
+            }
+          }
+          if($null -eq $agentObj){RemoveProfile $profilePath; throw 'R3 Codex agent detection timeout'}
+
+          $settled=$false
+          $agentStatus=''
+          $lastRead=''
+          for($i=0;$i-lt 45;$i++){
+            $gr=((& $herdr --session $named agent get $pane 2>&1)|Out-String).Trim()
+            if($LASTEXITCODE -eq 0){
+              $go=$gr|ConvertFrom-Json
+              $agentStatus=[string]$go.result.agent.agent_status
+              if($agentStatus -in @('idle','done','blocked')){$settled=$true;break}
+            }
+            Start-Sleep -Seconds 1
+          }
+          if(-not $settled -or $agentStatus -eq 'blocked'){
+            $lastRead=((& $herdr --session $named agent read $pane --source recent-unwrapped --lines 120 2>&1)|Out-String).Trim()
+            RemoveProfile $profilePath
+            PublishTransportFailure 'CONTROL_REQUIRED_PREPROMPT_AGENT_NOT_READY' $wake $idem '' '' $agentStatus $lastRead 0
+            exit 0
+          }
+
+          $rn=((& $herdr --session $named agent rename $pane $agent 2>&1)|Out-String).Trim()
+          if($LASTEXITCODE -ne 0){RemoveProfile $profilePath; throw "R3 agent rename failed $(Safe $rn)"}
+          $gr=((& $herdr --session $named agent get $agent 2>&1)|Out-String).Trim()
+          if($LASTEXITCODE -ne 0){RemoveProfile $profilePath; throw 'R3 renamed agent lookup failed'}
+          $go=$gr|ConvertFrom-Json
+          if([string]$go.result.agent.name -cne $agent -or [string]$go.result.agent.pane_id -cne $pane){RemoveProfile $profilePath; throw 'R3 renamed agent identity mismatch'}
+          $native=[string]$go.result.agent.agent_session.value
+          if([string]::IsNullOrWhiteSpace($native)){$native='UNREPORTED_NATIVE_SESSION'}
+          RemoveProfile $profilePath
+
+          [void](AssertCurrent012 $launcherHead)
+          $head2=((& git -C $runtimeRepo rev-parse HEAD 2>&1)|Out-String).Trim()
+          $dirty2=((& git -C $runtimeRepo status --porcelain=v1 --untracked-files=all 2>&1)|Out-String)
+          if($head2 -cne $workerBase -or -not [string]::IsNullOrWhiteSpace($dirty2)){throw 'R3 repo changed before prompt'}
+          if(BranchExists $requiredBranch){throw 'R3 Worker branch appeared before prompt'}
+
+          @{status='SENDING';wake=$wake;named=$named;workspace=$ws;pane=$pane;agent=$agent;prompt_count=0}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+          $prompt="Read GitHub directly. You are the ONE fresh WORKER for D22977/gpt-browser-bridge Issue #149 Stage1 R3. Rehydrate card $cardId, R3 authority $authority, Stage0 adjudication $stage0, and source_bootstrap_wake $wake. Work from exact clean base $workerBase and create only branch $requiredBranch. Before any tracked mutation publish/read-back GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_CONSUMED_STARTED_V1 bound to source_bootstrap_wake: $wake with fresh identity/cwd/base/branch. Then execute only Issue #149 R1-R9 and its three allowed paths, run required verification, push exact branch/read back remote head/blobs, publish/read-back GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_RESULT_V1, and stop. No live canary, review, merge, release, old wake retry, second prompt, or scope expansion."
+          $raw=((& $herdr --session $named agent prompt $agent $prompt 2>&1)|Out-String).Trim()
+          $pe=$LASTEXITCODE
+          @{status='SENT';wake=$wake;named=$named;workspace=$ws;pane=$pane;agent=$agent;prompt_count=1;prompt_exit=$pe}|ConvertTo-Json|Set-Content -LiteralPath $statePath -Encoding utf8
+
+          $delivery=@(
+            'G12_ISSUE149_R3_WORKER_DELIVERY_V1',
+            'state: PROMPT_SUBMITTED_WAIT_CONSUMED',
+            "source_bootstrap_wake: $wake",
+            "r3_authority: $authority",
+            "worker_base_sha: $workerBase",
+            "required_worker_branch: $requiredBranch",
+            "runtime_repo: $runtimeRepo",
+            "codex_version: $(Safe $cv 300)",
+            "named_session: $named",
+            "fresh_workspace: $ws",
+            "fresh_pane: $pane",
+            "fresh_agent: $agent",
+            "fresh_agent_session: $native",
+            'physical_prompt_count: 1',
+            "prompt_exit: $pe",
+            'second_physical_prompt: false',
+            'owner_enter_count: 0',
+            'manual_enter_used: false',
+            'send_keys_used: false',
+            'orca_used: false',
+            "workflow_run_id: $env:GITHUB_RUN_ID",
+            'user_task_result_relay_count: 0',
+            'readback_verified: true',
+            "idempotency_key: $idem"
+          ) -join "`n"
+          $deliveryReceipt=Publish $delivery
+          if($pe -ne 0){
+            PublishTransportFailure 'CONTROL_REQUIRED_PROMPT_CALL_ERROR_NO_BLIND_RETRY' $wake $idem $deliveryReceipt '' 'UNKNOWN' $raw 1
+            exit 0
+          }
+
+          $consumed=$null
+          $terminal=$null
+          $earlyIdle=0
+          for($i=0;$i-lt 72;$i++){
+            if($null -eq $consumed){$consumed=FindReceipt 'GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_CONSUMED_STARTED_V1' $wake $since}
+            $terminal=FindReceipt 'GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_RESULT_V1' $wake $since
+            if($null -ne $consumed -or $null -ne $terminal){break}
+            $graw=((& $herdr --session $named agent get $agent 2>&1)|Out-String).Trim()
+            if($LASTEXITCODE -ne 0){PublishTransportFailure 'CONTROL_REQUIRED_AGENT_LOST_BEFORE_CONSUMED' $wake $idem $deliveryReceipt '' 'LOST' $graw 1; exit 0}
+            $g=$graw|ConvertFrom-Json
+            $as=[string]$g.result.agent.agent_status
+            if($as -eq 'blocked'){
+              $rr=((& $herdr --session $named agent read $agent --source recent-unwrapped --lines 120 2>&1)|Out-String).Trim()
+              PublishTransportFailure 'CONTROL_REQUIRED_WORKER_BLOCKED_BEFORE_CONSUMED' $wake $idem $deliveryReceipt '' $as $rr 1
+              exit 0
+            }
+            if($as -in @('idle','done')){$earlyIdle++}else{$earlyIdle=0}
+            if($earlyIdle -ge 12){
+              $rr=((& $herdr --session $named agent read $agent --source recent-unwrapped --lines 120 2>&1)|Out-String).Trim()
+              PublishTransportFailure 'CONTROL_REQUIRED_NO_DURABLE_CONSUMPTION' $wake $idem $deliveryReceipt '' $as $rr 1
+              exit 0
+            }
+            Start-Sleep -Seconds 5
+          }
+
+          if($null -eq $consumed -and $null -eq $terminal){
+            $gr=((& $herdr --session $named agent get $agent 2>&1)|Out-String).Trim()
+            $as='UNKNOWN'
+            if($LASTEXITCODE -eq 0){try{$as=[string](($gr|ConvertFrom-Json).result.agent.agent_status)}catch{}}
+            $rr=((& $herdr --session $named agent read $agent --source recent-unwrapped --lines 120 2>&1)|Out-String).Trim()
+            PublishTransportFailure 'CONTROL_REQUIRED_NO_DURABLE_CONSUMPTION' $wake $idem $deliveryReceipt '' $as $rr 1
+            exit 0
+          }
+
+          $consumedReceipt=if($null -eq $consumed){''}else{[string]$consumed.id}
+          if($null -ne $consumed){
+            $observed=@(
+              'G12_ISSUE149_R3_CONSUMPTION_OBSERVED_V1',
+              'state: CONSUMED_STARTED_OBSERVED',
+              "source_bootstrap_wake: $wake",
+              "r3_authority: $authority",
+              "worker_delivery_receipt: $deliveryReceipt",
+              "consumed_receipt: $consumedReceipt",
+              'physical_prompt_count: 1',
+              'second_physical_prompt: false',
+              'user_task_result_relay_count: 0',
+              'readback_verified: true',
+              "idempotency_key: $idem"
+            ) -join "`n"
+            [void](Publish $observed)
+          }
+
+          if($null -eq $terminal){
+            $terminalIdle=0
+            for($i=0;$i-lt 1080;$i++){
+              $terminal=FindReceipt 'GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_RESULT_V1' $wake $since
+              if($null -ne $terminal){break}
+              $graw=((& $herdr --session $named agent get $agent 2>&1)|Out-String).Trim()
+              if($LASTEXITCODE -ne 0){PublishTransportFailure 'CONTROL_REQUIRED_AGENT_LOST_AFTER_CONSUMED' $wake $idem $deliveryReceipt $consumedReceipt 'LOST' $graw 1; exit 0}
+              $g=$graw|ConvertFrom-Json
+              $as=[string]$g.result.agent.agent_status
+              if($as -eq 'blocked'){
+                $rr=((& $herdr --session $named agent read $agent --source recent-unwrapped --lines 120 2>&1)|Out-String).Trim()
+                PublishTransportFailure 'CONTROL_REQUIRED_WORKER_BLOCKED_AFTER_CONSUMED' $wake $idem $deliveryReceipt $consumedReceipt $as $rr 1
+                exit 0
+              }
+              if($as -in @('idle','done')){$terminalIdle++}else{$terminalIdle=0}
+              if($terminalIdle -ge 12){
+                $rr=((& $herdr --session $named agent read $agent --source recent-unwrapped --lines 120 2>&1)|Out-String).Trim()
+                PublishTransportFailure 'CONTROL_REQUIRED_WORKER_IDLE_WITHOUT_TERMINAL' $wake $idem $deliveryReceipt $consumedReceipt $as $rr 1
+                exit 0
+              }
+              Start-Sleep -Seconds 5
+            }
+          }
+
+          if($null -eq $terminal){
+            $rr=((& $herdr --session $named agent read $agent --source recent-unwrapped --lines 120 2>&1)|Out-String).Trim()
+            PublishTransportFailure 'CONTROL_REQUIRED_TERMINAL_GUARD_TIMEOUT' $wake $idem $deliveryReceipt $consumedReceipt 'TIMEOUT' $rr 1
+            exit 0
+          }
+
+          $tb=[string]$terminal.body
+          $decision='UNPARSED'
+          $dm=[regex]::Match($tb,'(?m)^(?:state|decision):\s*([A-Z0-9_]+)\s*$')
+          if($dm.Success){$decision=$dm.Groups[1].Value}
+          $result=@(
+            'G12_ISSUE149_R3_LAUNCH_RESULT_V1',
+            "state: WORKER_TERMINAL_OBSERVED_$decision",
+            "source_bootstrap_wake: $wake",
+            "r3_authority: $authority",
+            "worker_delivery_receipt: $deliveryReceipt",
+            "consumed_receipt: $(if([string]::IsNullOrWhiteSpace($consumedReceipt)){'NONE'}else{$consumedReceipt})",
+            "worker_terminal_receipt: $($terminal.id)",
+            "worker_base_sha: $workerBase",
+            "required_worker_branch: $requiredBranch",
+            "named_session: $named",
+            "fresh_workspace: $ws",
+            "fresh_pane: $pane",
+            "fresh_agent: $agent",
+            "fresh_agent_session: $native",
+            'physical_prompt_count: 1',
+            'second_physical_prompt: false',
+            'worker_left_parked: true',
+            'user_task_result_relay_count: 0',
+            'readback_verified: true',
+            "idempotency_key: $idem"
+          ) -join "`n"
+          [void](Publish $result)
