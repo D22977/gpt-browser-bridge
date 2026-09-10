@@ -199,7 +199,7 @@ jobs:
           $profilePath=Join-Path $codexHome "$profile.config.toml"
           if(Test-Path -LiteralPath $profilePath){throw 'R3 task Codex profile already exists'}
           if($runtimeRepo.Contains("'")){throw 'runtime repo path cannot be represented as TOML literal key'}
-          Set-Content -LiteralPath $profilePath -Value "[projects.'$runtimeRepo']`ntrust_level = `"trusted`"`n" -Encoding utf8 -NoNewline
+          Set-Content -LiteralPath $profilePath -Value "check_for_update_on_startup = false`n[projects.'$runtimeRepo']`ntrust_level = `"trusted`"`n" -Encoding utf8 -NoNewline
           if(-not(Test-Path -LiteralPath $profilePath -PathType Leaf)){throw 'R3 task profile creation failed'}
 
           $hout=Join-Path $runtimeRoot 'herdr.out'
