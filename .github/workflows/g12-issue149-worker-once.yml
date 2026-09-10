@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release-r1-guard:
+  release_r1_guard:
     if: >-
       github.event.issue.number == 149 &&
       github.event.comment.user.login == 'D22977' &&
@@ -22,8 +22,11 @@ jobs:
       startsWith(github.event.comment.body, 'G12_ISSUE149_IDLE_RECOVERY_WAKE_V1')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      release_receipt: ${{ steps.release.outputs.release_receipt }}
     steps:
       - name: Release exact R1 terminal guard after durable terminal
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -90,11 +93,12 @@ jobs:
           posted="$(gh api --method POST "repos/$repo/issues/$issue/comments" -f body="$body" --jq .id)"
           readback="$(gh api "repos/$repo/issues/comments/$posted" --jq .body)"
           test "$readback" = "$body"
+          echo "release_receipt=$posted" >> "$GITHUB_OUTPUT"
 
   idle-gated-r2-and-return:
-    needs: release-r1-guard
+    needs: release_r1_guard
     if: >-
-      needs.release-r1-guard.result == 'success' &&
+      needs.release_r1_guard.result == 'success' &&
       github.event.issue.number == 149 &&
       github.event.comment.user.login == 'D22977' &&
       github.event.comment.author_association == 'OWNER' &&
@@ -108,6 +112,7 @@ jobs:
       - name: Idle-gated fresh Worker then canonical same-Control return
         env:
           GH_TOKEN: ${{ github.token }}
+          R1_GUARD_RELEASE_RECEIPT: ${{ needs.release_r1_guard.outputs.release_receipt }}
         run: |
           $ErrorActionPreference = 'Stop'
           $repo = 'D22977/gpt-browser-bridge'
@@ -262,8 +267,11 @@ jobs:
             if (-not ([string]$auth.body).StartsWith('CONTROL_G12_ISSUE149_IDLE_GATED_RECOVERY_AND_RETURN_AUTHORITY_V1')) { throw 'wrong R2 recovery authority receipt' }
             $r1 = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$sourceR1Terminal" -Headers $headers -Method Get -TimeoutSec 30
             if (-not ([string]$r1.body).StartsWith('GBB_G12_CONTROL_DOORBELL_PHYSICAL_SUBMIT_REPAIR_RESULT_V1') -or [string]$r1.body -notmatch '(?m)^decision:\s*CONTROL_REQUIRED\s*$') { throw 'R1 source terminal mismatch' }
-            $release = FindRecoveryReceipt 'G12_ISSUE149_R1_GUARD_RELEASE_V1' $wake $since
-            if ($null -eq $release) { throw 'exact R1 guard release receipt missing for recovery wake' }
+            $releaseReceiptId = [string]$env:R1_GUARD_RELEASE_RECEIPT
+            if ([string]::IsNullOrWhiteSpace($releaseReceiptId) -or $releaseReceiptId -notmatch '^\d+$') { throw 'exact R1 guard release job output missing' }
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/comments/$releaseReceiptId" -Headers $headers -Method Get -TimeoutSec 30
+            $releaseBody = [string]$release.body
+            if (-not $releaseBody.StartsWith('G12_ISSUE149_R1_GUARD_RELEASE_V1') -or $releaseBody -notmatch '(?m)^state:\s*PASS\s*$' -or $releaseBody -notmatch "(?m)^source_recovery_wake:\s*$wake\s*$" -or $releaseBody -notmatch "(?m)^source_authority:\s*$guardReleaseAuthority\s*$") { throw 'exact R1 guard release output receipt binding mismatch' }
             $card = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/issues/$issue" -Headers $headers -Method Get -TimeoutSec 30
             if (-not ([string]$card.body).StartsWith('DISPATCH_CARD_V1') -or [string]$card.body -notmatch '(?m)^card_id:\s*GBB-G12-CONTROL-DOORBELL-PHYSICAL-SUBMIT-REPAIR-01\s*$') { throw 'Issue149 card mismatch' }
             [void](AssertCurrent012)
