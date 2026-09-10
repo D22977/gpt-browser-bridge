@@ -25,6 +25,8 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $h='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $ev=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $wake=[string]$ev.comment.id
           $list=(& $h agent list 2>&1 | Out-String | ConvertFrom-Json).result.agents
           $eligible=@($list | Where-Object { $_.agent -eq 'codex' -and $_.agent_status -in @('idle','done') -and [string]::IsNullOrWhiteSpace([string]$_.name) -and [string]$_.cwd -eq 'C:\WINDOWS\system32' })
           if($eligible.Count -ne 1){ throw "VISIBLE_HERDR_CONTROLLER_COUNT_$($eligible.Count)" }
@@ -32,9 +34,9 @@ jobs:
           $session=[string]$eligible[0].agent_session.value
           if(!$pane -or !$session){ throw 'VISIBLE_HERDR_CONTROLLER_BINDING_MISSING' }
           $before=@($list | ForEach-Object { [string]$_.pane_id })
-          $prompt=@'
-Read GitHub directly. You are TRANSPORT/COORDINATOR only, not the Issue #149 Worker. Read D22977/gpt-browser-bridge Issue #149 current authority, especially visible-route receipts 5619885786 and 5619925872. In the visible Herdr control console, create exactly one NEW visible/focused workspace/pane and start exactly one fresh Codex child agent for Issue #149. Do not implement the repair yourself. Dispatch the exact current #149 DISPATCH_CARD_V1 to that fresh child; child must work from current default d310987a0062c1010352bba4a5305d495c55bfb8 on branch worker/g12-control-doorbell-physical-submit-visible-01, publish/read-back CONSUMED_STARTED before tracked mutation, modify only the three card paths, test, push/read-back, publish the required Worker terminal, and stop. Keep the child visible in Herdr. No hidden server, no --no-focus, no old wake retry, no Control/Reviewer role, no merge/release/live canary.
-'@
+          $prompt=@"
+Read GitHub directly. You are TRANSPORT/COORDINATOR only, not the Issue #149 Worker. Read D22977/gpt-browser-bridge Issue #149 current authority, especially visible-route receipts 5619885786 and 5619925872 and source_bootstrap_wake $wake. In the visible Herdr control console, create exactly one NEW visible/focused workspace/pane and start exactly one fresh Codex child agent for Issue #149. Do not implement the repair yourself. Dispatch the exact current #149 DISPATCH_CARD_V1 to that fresh child; child must work from current default d310987a0062c1010352bba4a5305d495c55bfb8 on branch worker/g12-control-doorbell-physical-submit-visible-01, publish/read-back CONSUMED_STARTED before tracked mutation, modify only the three card paths, test, push/read-back, publish the required Worker terminal, and stop. Keep the child visible in Herdr. No hidden server, no --no-focus, no old wake retry, no Control/Reviewer role, no merge/release/live canary.
+"@
           $sent=& $h agent prompt $pane $prompt 2>&1 | Out-String
           if($LASTEXITCODE -ne 0){ throw "VISIBLE_HERDR_CONTROLLER_PROMPT_FAILED $sent" }
           $new=@();$controllerWorking=$false
@@ -48,7 +50,7 @@ Read GitHub directly. You are TRANSPORT/COORDINATOR only, not the Issue #149 Wor
           }
           if(!$controllerWorking -and $new.Count -eq 0){ throw 'VISIBLE_HERDR_WORK_NOT_OBSERVED' }
           $childSummary=if($new.Count){ ($new | ForEach-Object { "pane=$($_.pane_id),name=$($_.name),status=$($_.agent_status),cwd=$($_.cwd)" }) -join ';' } else { 'PENDING_CHILD_CREATION_CONTROLLER_WORKING' }
-          $body="G12_ISSUE149_VISIBLE_HERDR_DISPATCH_V1`nstate: VISIBLE_CONTROLLER_WORKING`nsource_bootstrap_wake: $($env:GITHUB_EVENT_PATH)`nvisible_route_authority: 5619885786`nvisible_binding_authority: 5619925872`ncontroller_pane: $pane`ncontroller_session: $session`ncontroller_working_observed: $controllerWorking`nchild_agents: $childSummary`nhidden_server_started: false`nno_focus_used: false`nphysical_controller_prompt_count: 1`nuser_task_result_relay_count: 0`nworkflow_run_id: $env:GITHUB_RUN_ID`nreadback_required: true"
+          $body="G12_ISSUE149_VISIBLE_HERDR_DISPATCH_V1`nstate: VISIBLE_CONTROLLER_WORKING`nsource_bootstrap_wake: $wake`nvisible_route_authority: 5619885786`nvisible_binding_authority: 5619925872`ncontroller_pane: $pane`ncontroller_session: $session`ncontroller_working_observed: $controllerWorking`nchild_agents: $childSummary`nhidden_server_started: false`nno_focus_used: false`nphysical_controller_prompt_count: 1`nuser_task_result_relay_count: 0`nworkflow_run_id: $env:GITHUB_RUN_ID`nreadback_required: true"
           $id=gh api repos/D22977/gpt-browser-bridge/issues/149/comments --method POST --raw-field body="$body" --jq .id
           $rb=gh api repos/D22977/gpt-browser-bridge/issues/comments/$id --jq .body
           if($rb -ne $body){ throw 'VISIBLE_DISPATCH_RECEIPT_READBACK_MISMATCH' }
