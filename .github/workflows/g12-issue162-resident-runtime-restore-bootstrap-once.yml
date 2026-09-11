@@ -1,0 +1,185 @@
+name: G12 Issue162 Resident Runtime Restore Bootstrap Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g12-issue162-resident-restore-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    if: >-
+      github.event.issue.number == 162 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'ISSUE162_RESIDENT_RUNTIME_RESTORE_BOOTSTRAP_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Restore existing historical resident runtime only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $repo='D22977/gpt-browser-bridge'
+          $issue=162
+          $authority='5633904767'
+          $expectedBase='9e6fa38f779d27807c473435b3160ce025d436eb'
+          $switch='5601634172'
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g12-issue162-resident-restore';Accept='application/vnd.github+json'}
+
+          function Need([string]$b,[string]$p,[string]$n){
+            $m=[regex]::Match($b,$p)
+            if(-not $m.Success){throw "Malformed $n"}
+            return $m.Groups[1].Value
+          }
+          function Safe([string]$x){
+            if($null -eq $x){return ''}
+            $x=($x -replace '[\r\n]+',' | ').Trim()
+            $x=$x -replace '(?i)(token|secret|password|authorization)=[^\s|]+','$1=REDACTED'
+            if($x.Length -gt 1800){$x=$x.Substring(0,1800)}
+            return $x
+          }
+          function Publish([string]$text){
+            $payload=@{body=$text}|ConvertTo-Json -Compress
+            $r=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $rb=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if([string]$rb.body -cne $text){throw 'REPORT_READBACK_MISMATCH'}
+            return [string]$r.id
+          }
+          function RootInfo([string]$path){
+            if(-not(Test-Path -LiteralPath $path -PathType Container)){return "path=$path;present=false"}
+            $items=@(Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue | Select-Object -First 40)
+            $names=($items|ForEach-Object{$_.Name}) -join ','
+            return "path=$path;present=true;children=$(Safe $names)"
+          }
+          function TaskSnapshot([string]$name){
+            $t=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            if($null -eq $t){return [pscustomobject]@{name=$name;present=$false;trusted=$false;state='NONE';triggers=0;execute='';arguments='';lastResult='';lastRun='';nextRun=''}}
+            $i=Get-ScheduledTaskInfo -TaskName $name -ErrorAction SilentlyContinue
+            $a=@($t.Actions)
+            $exec=if($a.Count -gt 0){[string]$a[0].Execute}else{''}
+            $args=if($a.Count -gt 0){[string]$a[0].Arguments}else{''}
+            $joined="$exec $args"
+            $trusted=($joined -match '(?i)AIWORK_RUNTIME[\\/]GPT_BROWSER_BRIDGE' -or $joined -match '(?i)desktop-wake|codex-luna-wake|overnight-resume|resume\.ps1')
+            return [pscustomobject]@{
+              name=$name;present=$true;trusted=$trusted;state=[string]$t.State;triggers=@($t.Triggers).Count;
+              execute=(Safe $exec);arguments=(Safe $args);lastResult=if($i){[string]$i.LastTaskResult}else{''};
+              lastRun=if($i){[string]$i.LastRunTime}else{''};nextRun=if($i){[string]$i.NextRunTime}else{''}
+            }
+          }
+
+          $ev=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json
+          $body=[string]$ev.comment.body
+          $wake=[string]$ev.comment.id
+          $wakeAuthority=Need $body '(?m)^authority_receipt:\s*(\d+)\s*$' authority_receipt
+          $wakeBase=Need $body '(?m)^default_head:\s*([0-9a-f]{40})\s*$' default_head
+          $idem=Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' idempotency_key
+          if($wakeAuthority -cne $authority -or $wakeBase -cne $expectedBase){throw 'WAKE_BINDING_MISMATCH'}
+
+          $auth=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/comments/$authority" -Headers $headers -Method Get -TimeoutSec 30
+          if(-not([string]$auth.body).StartsWith('CONTROL_G12_ISSUE162_RUNTIME_RESTORE_BOOTSTRAP_AUTHORITY_V1')){throw 'WRONG_AUTHORITY'}
+
+          $sw=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/comments/$switch" -Headers $headers -Method Get -TimeoutSec 30
+          $sb=[string]$sw.body
+          if($sb -notmatch '(?m)^state:\s*SWITCH_COMMITTED\s*$' -or $sb -notmatch '(?m)^new_generation:\s*012\s*$' -or $sb -notmatch '(?m)^new_generation_status:\s*ACTIVE\s*$'){throw 'CONTROL012_NOT_ACTIVE'}
+          $newer=@(Invoke-RestMethod "https://api.github.com/repos/$repo/issues/88/comments?since=$([uri]::EscapeDataString([string]$sw.created_at))&per_page=100" -Headers $headers -Method Get -TimeoutSec 30 | Where-Object{
+            [string]$_.id -ne $switch -and [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
+          })
+          if($newer.Count -gt 0){throw 'NEWER_CONTROL_SWITCH_EXISTS'}
+
+          $ref=Invoke-RestMethod "https://api.github.com/repos/$repo/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
+          if([string]$ref.object.sha -cne $wakeBase){throw "DEFAULT_HEAD_DRIFT $([string]$ref.object.sha)"}
+          if($env:RUNNER_NAME -cne 'gbb-reviewer-win-01' -or -not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0){throw 'RUNNER_ADMISSION_FAILED'}
+
+          $roots=@(
+            'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\desktop-wake',
+            'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\codex-luna-wake',
+            'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\overnight-resume',
+            'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell'
+          )
+          $rootInfo=@($roots|ForEach-Object{RootInfo $_})
+          $knownFiles=@(
+            'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\desktop-wake\entrypoint.mjs',
+            'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\desktop-wake\resume.ps1',
+            'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\codex-luna-wake\resume.ps1',
+            'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\control-doorbell\watcher.mjs'
+          )
+          $fileInfo=@($knownFiles|ForEach-Object{"path=$_;present=$((Test-Path -LiteralPath $_ -PathType Leaf).ToString().ToLowerInvariant())"})
+
+          $taskNames=@('GPT_BROWSER_BRIDGE_RESUME','GBB_TEMP_CONTROL_DOORBELL','GBB_REVIEWER_RUNNER_00')
+          $before=@($taskNames|ForEach-Object{TaskSnapshot $_})
+
+          $herdr='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $herdrVersion='MISSING';$herdrBefore='MISSING';$herdrAfter='MISSING'
+          if(Test-Path -LiteralPath $herdr -PathType Leaf){
+            $herdrVersion=Safe (((& $herdr --version 2>&1)|Out-String).Trim())
+            $herdrBefore=Safe (((& $herdr status server 2>&1)|Out-String).Trim())
+          }
+
+          $resume=$before|Where-Object{$_.name -ceq 'GPT_BROWSER_BRIDGE_RESUME'}|Select-Object -First 1
+          $startAttempted=$false;$startSucceeded=$false;$startError='';$state='RESTORE_GAP_NO_PROVEN_EXISTING_CONSUMER'
+          if($resume -and $resume.present -and $resume.trusted -and $resume.triggers -gt 0){
+            $startAttempted=$true
+            try{
+              if($resume.state -ne 'Running'){Start-ScheduledTask -TaskName 'GPT_BROWSER_BRIDGE_RESUME' -ErrorAction Stop}
+              Start-Sleep -Seconds 8
+              $startSucceeded=$true
+            }catch{$startError=Safe $_.Exception.Message}
+          }
+
+          $after=@($taskNames|ForEach-Object{TaskSnapshot $_})
+          if(Test-Path -LiteralPath $herdr -PathType Leaf){$herdrAfter=Safe (((& $herdr status server 2>&1)|Out-String).Trim())}
+          $resumeAfter=$after|Where-Object{$_.name -ceq 'GPT_BROWSER_BRIDGE_RESUME'}|Select-Object -First 1
+
+          if($startSucceeded -and $resumeAfter.present -and $resumeAfter.trusted -and $resumeAfter.triggers -gt 0){
+            if($resumeAfter.state -in @('Ready','Running')){$state='PASS_BOOTSTRAP_EXISTING_RESTARTABLE_CONSUMER_RESTORED'}
+            else{$state='RESTORE_GAP_EXISTING_CONSUMER_NOT_HEALTHY'}
+          }elseif($resume -and $resume.present -and -not $resume.trusted){
+            $state='RESTORE_GAP_SCHEDULED_TASK_NOT_HISTORICAL_RUNTIME'
+          }elseif($resume -and $resume.present -and $resume.triggers -eq 0){
+            $state='RESTORE_GAP_EXISTING_TASK_NOT_RESTARTABLE'
+          }
+
+          $taskLinesBefore=@($before|ForEach-Object{"name=$($_.name);present=$($_.present);trusted=$($_.trusted);state=$($_.state);triggers=$($_.triggers);execute=$($_.execute);arguments=$($_.arguments);lastResult=$($_.lastResult);lastRun=$($_.lastRun);nextRun=$($_.nextRun)"})
+          $taskLinesAfter=@($after|ForEach-Object{"name=$($_.name);present=$($_.present);trusted=$($_.trusted);state=$($_.state);triggers=$($_.triggers);lastResult=$($_.lastResult);lastRun=$($_.lastRun);nextRun=$($_.nextRun)"})
+
+          $text=@(
+            'GBB_RESTORE_PROVEN_UNATTENDED_RUNTIME_BOOTSTRAP_RESULT_V1',
+            "state: $state",
+            "source_bootstrap_wake: $wake",
+            "authority_receipt: $authority",
+            "control_generation: 012",
+            "default_head: $wakeBase",
+            "runner: $env:RUNNER_NAME",
+            'normal_loop_uses_actions: false',
+            "resume_task_start_attempted: $($startAttempted.ToString().ToLowerInvariant())",
+            "resume_task_start_succeeded: $($startSucceeded.ToString().ToLowerInvariant())",
+            "resume_task_start_error: $(Safe $startError)",
+            "herdr_version: $herdrVersion",
+            "herdr_status_before: $herdrBefore",
+            "herdr_status_after: $herdrAfter",
+            'runtime_roots: '+(Safe ($rootInfo -join ' || ')),
+            'known_runtime_files: '+(Safe ($fileInfo -join ' || ')),
+            'scheduled_tasks_before: '+(Safe ($taskLinesBefore -join ' || ')),
+            'scheduled_tasks_after: '+(Safe ($taskLinesAfter -join ' || ')),
+            'new_scheduler_created: false',
+            'new_service_created: false',
+            'new_daemon_created: false',
+            'tracked_product_mutation: false',
+            'user_relay_count: 0',
+            'readback_verified: true',
+            "idempotency_key: $idem"
+          ) -join "`n"
+          [void](Publish $text)
+
+          if($state -notlike 'PASS_BOOTSTRAP*'){exit 2}
