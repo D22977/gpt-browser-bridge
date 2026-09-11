@@ -1,0 +1,68 @@
+name: G12 Herdr Morning Progress Query Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  query:
+    if: >-
+      github.event.issue.number == 160 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'HERDR_MORNING_PROGRESS_QUERY_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 5
+    steps:
+      - name: Ask existing visible Herdr coordinator for status only
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $h='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          function OneLine([string]$s){ if($null -eq $s){return ''}; return (($s -replace "`r?`n",' | ') -replace '\s+',' ').Trim() }
+          function Publish([string]$body){ $id=gh api repos/D22977/gpt-browser-bridge/issues/160/comments --method POST --raw-field body="$body" --jq .id; $rb=gh api repos/D22977/gpt-browser-bridge/issues/comments/$id --jq .body; if($rb -ne $body){throw 'REPORT_READBACK_MISMATCH'}; return $id }
+          if(-not(Test-Path -LiteralPath $h -PathType Leaf)){ throw 'HERDR_EXE_MISSING' }
+          $raw=((& $h agent list 2>&1)|Out-String).Trim()
+          if($LASTEXITCODE -ne 0){ throw "HERDR_AGENT_LIST_FAILED $(OneLine $raw)" }
+          $obj=$raw|ConvertFrom-Json
+          $agents=@($obj.result.agents)
+          $inventory=@($agents|ForEach-Object{ "pane=$($_.pane_id);name=$($_.name);agent=$($_.agent);status=$($_.agent_status);cwd=$($_.cwd);session=$($_.agent_session.value)" })
+          $eligible=@($agents|Where-Object{ [string]$_.agent -ceq 'codex' -and [string]::IsNullOrWhiteSpace([string]$_.name) -and [string]$_.cwd -ceq 'C:\WINDOWS\system32' })
+          if($eligible.Count -ne 1){
+            $body=@('HERDR_MORNING_TASK_PROGRESS_REPORT_V1','state: AMBIGUOUS_AGENT_NO_PROMPT',"eligible_generic_coordinator_count: $($eligible.Count)",'morning_task_identified: false','prompt_sent_count: 0','mutation_performed: false','agent_inventory: '+(OneLine ($inventory -join "`n")),'readback_verified: true') -join "`n"
+            Publish $body | Out-Null
+            exit 0
+          }
+          $a=$eligible[0]
+          $pane=[string]$a.pane_id
+          $session=[string]$a.agent_session.value
+          $status=[string]$a.agent_status
+          $before=''
+          try{ $before=((& $h agent read $pane --source recent-unwrapped --lines 120 2>&1)|Out-String).Trim() }catch{}
+          if($status -in @('working','blocked')){
+            $body=@('HERDR_MORNING_TASK_PROGRESS_REPORT_V1','state: BUSY_SNAPSHOT_NO_PROMPT',"target_pane: $pane","target_session: $session","target_status: $status",'morning_task_identified: unknown','prompt_sent_count: 0','mutation_performed: false','agent_inventory: '+(OneLine ($inventory -join "`n")),'recent_output_snapshot: '+(OneLine $before),'readback_verified: true') -join "`n"
+            Publish $body | Out-Null
+            exit 0
+          }
+          if($status -notin @('idle','done')){
+            $body=@('HERDR_MORNING_TASK_PROGRESS_REPORT_V1','state: UNSUPPORTED_TARGET_STATE_NO_PROMPT',"target_pane: $pane","target_session: $session","target_status: $status",'morning_task_identified: false','prompt_sent_count: 0','mutation_performed: false','agent_inventory: '+(OneLine ($inventory -join "`n")),'readback_verified: true') -join "`n"
+            Publish $body | Out-Null
+            exit 0
+          }
+          $prompt='STATUS INQUIRY ONLY. Do not modify files, continue or restart work, create/stop agents, create workspaces, dispatch new work, or change any task. Please identify from your current Herdr context and visible child/split agents the task the owner gave Herdr on the morning of 2026-09-11, and report status only. Reply beginning HERDR_MORNING_PROGRESS_REPLY_V1 and include: morning_task_identified true/false; task_summary; current_status; completed_work; current_activity; blockers; child_agents; next_step_existing_plan; owner_intervention_needed true/false. Do not perform the next step.'
+          $promptExit=0
+          $promptRaw=''
+          try{ $promptRaw=((& $h agent prompt $pane $prompt --wait --timeout 90000 2>&1)|Out-String).Trim(); $promptExit=$LASTEXITCODE }catch{ $promptExit=1; $promptRaw=$_.Exception.Message }
+          Start-Sleep -Seconds 2
+          $after=''
+          try{ $after=((& $h agent read $pane --source recent-unwrapped --lines 180 2>&1)|Out-String).Trim() }catch{}
+          $markerSeen=($after -match 'HERDR_MORNING_PROGRESS_REPLY_V1')
+          $state=if($markerSeen){'REPORT_OBSERVED'}elseif($promptExit -eq 0){'PROMPT_SENT_REPORT_NOT_OBSERVED'}else{'PROMPT_OUTCOME_UNCERTAIN_NO_RETRY'}
+          $body=@('HERDR_MORNING_TASK_PROGRESS_REPORT_V1',"state: $state","target_pane: $pane","target_session: $session","target_status_before: $status","prompt_exit: $promptExit",'prompt_sent_count: 1',"report_marker_observed: $($markerSeen.ToString().ToLowerInvariant())",'mutation_performed: false','agent_inventory: '+(OneLine ($inventory -join "`n")),'herdr_reply_snapshot: '+(OneLine $after),'readback_verified: true') -join "`n"
+          Publish $body | Out-Null
