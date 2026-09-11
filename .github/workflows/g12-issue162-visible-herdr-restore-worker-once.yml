@@ -1,0 +1,87 @@
+name: G12 Issue162 Visible Herdr Restore Worker Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g12-issue162-visible-herdr-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.issue.number == 162 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'ISSUE162_VISIBLE_HERDR_RESTORE_WORKER_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Dispatch one visible fresh child through existing Herdr runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $h='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $repo='D22977/gpt-browser-bridge'
+          $issue=162
+          $workerDispatch='5634122585'
+          $transportAuthority='5634127848'
+          $ev=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $wake=[string]$ev.comment.id
+          $wakeBody=[string]$ev.comment.body
+          $m=[regex]::Match($wakeBody,'(?m)^worker_base_sha:\s*([0-9a-f]{40})\s*$')
+          if(-not $m.Success){throw 'WORKER_BASE_MISSING'}
+          $workerBase=$m.Groups[1].Value
+          if($workerBase -cne '959962c1e275658aad97710dbb79d2d72c01ece8'){throw 'WORKER_BASE_MISMATCH'}
+          if(-not(Test-Path -LiteralPath $h -PathType Leaf)){throw 'HERDR_EXE_MISSING'}
+          $status=(& $h status server 2>&1 | Out-String)
+          if($LASTEXITCODE -ne 0 -or $status -notmatch '(?m)^status:\s*running\s*$'){throw "HERDR_SERVER_NOT_RUNNING $status"}
+
+          $listRaw=(& $h agent list 2>&1 | Out-String)
+          if($LASTEXITCODE -ne 0){throw "HERDR_AGENT_LIST_FAILED $listRaw"}
+          $list=($listRaw | ConvertFrom-Json).result.agents
+          $eligible=@($list | Where-Object {
+            $_.agent -eq 'codex' -and
+            $_.agent_status -in @('idle','done') -and
+            [string]::IsNullOrWhiteSpace([string]$_.name) -and
+            [string]$_.cwd -eq 'C:\WINDOWS\system32'
+          })
+          if($eligible.Count -ne 1){throw "VISIBLE_HERDR_CONTROLLER_COUNT_$($eligible.Count)"}
+          $pane=[string]$eligible[0].pane_id
+          $session=[string]$eligible[0].agent_session.value
+          if(!$pane -or !$session){throw 'VISIBLE_CONTROLLER_BINDING_MISSING'}
+          $before=@($list | ForEach-Object {[string]$_.pane_id})
+
+          $prompt="Read GitHub directly. You are TRANSPORT/COORDINATOR only, not Worker/Reviewer/Control. Rehydrate D22977/gpt-browser-bridge Issue #162, especially Worker dispatch receipt $workerDispatch and transport authority $transportAuthority, source wake $wake. In the existing VISIBLE Herdr console create exactly one NEW visible/focused workspace/pane and start exactly one fresh Codex child Worker. Do not implement yourself. Hand the child the current #162 Worker card. Child exact base is $workerBase; required branch worker/g12-restore-proven-unattended-resident-loop-01. Child must publish/read-back GBB_RESTORE_PROVEN_UNATTENDED_WORKER_CONSUMED_STARTED_V1 before tracked mutation, use only card-authorized paths/runtime reads, reuse #62 resident semantics plus #103 exact Herdr adapter, test, push/read-back candidate, publish GBB_RESTORE_PROVEN_UNATTENDED_WORKER_RESULT_V1, then park on READY. Do not create/modify permanent Scheduled Tasks before fresh review PASS and later Control deployment authority. No hidden server, no --no-focus, no merge/release, no MEP mutation. Keep child visible in Herdr."
+          $sent=(& $h agent prompt $pane $prompt 2>&1 | Out-String)
+          if($LASTEXITCODE -ne 0){throw "VISIBLE_CONTROLLER_PROMPT_FAILED $sent"}
+
+          $controllerWorking=$false
+          $new=@()
+          for($i=0;$i-lt 60;$i++){
+            Start-Sleep -Seconds 1
+            $nowRaw=(& $h agent list 2>&1 | Out-String)
+            if($LASTEXITCODE -ne 0){continue}
+            $now=($nowRaw | ConvertFrom-Json).result.agents
+            $controller=@($now | Where-Object {[string]$_.pane_id -eq $pane -and [string]$_.agent_session.value -eq $session})
+            if($controller.Count -eq 1 -and [string]$controller[0].agent_status -eq 'working'){$controllerWorking=$true}
+            $new=@($now | Where-Object {$before -notcontains [string]$_.pane_id -and $_.agent -eq 'codex'})
+            if($new.Count -ge 1){break}
+          }
+          if(!$controllerWorking -and $new.Count -eq 0){throw 'VISIBLE_HERDR_WORK_NOT_OBSERVED'}
+          $child=if($new.Count){($new | ForEach-Object {"pane=$($_.pane_id),name=$($_.name),status=$($_.agent_status),cwd=$($_.cwd),session=$($_.agent_session.value)"}) -join ';'}else{'PENDING_CHILD_CREATION_CONTROLLER_WORKING'}
+          $body="GBB_ISSUE162_VISIBLE_HERDR_RESTORE_DISPATCH_V1`nstate: VISIBLE_CONTROLLER_WORKING`nsource_wake: $wake`nworker_dispatch_receipt: $workerDispatch`ntransport_authority: $transportAuthority`nworker_base_sha: $workerBase`ncontroller_pane: $pane`ncontroller_session: $session`ncontroller_working_observed: $controllerWorking`nchild_agents: $child`nhidden_server_started: false`nno_focus_used: false`nphysical_controller_prompt_count: 1`nnormal_loop_uses_actions: false`nuser_relay_count: 0`nworkflow_run_id: $env:GITHUB_RUN_ID`nreadback_verified: true"
+          $payload=@{body=$body}|ConvertTo-Json -Compress
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g12-issue162-visible-dispatch';Accept='application/vnd.github+json'}
+          $r=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+          $rb=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/comments/$($r.id)" -Headers $headers -Method Get -TimeoutSec 30
+          if([string]$rb.body -cne $body){throw 'VISIBLE_DISPATCH_READBACK_MISMATCH'}
