@@ -194,3 +194,180 @@ jobs:
             "idempotency_key: $idem"
           ) -join "`n"
           [void](Publish $result)
+
+  g13_w4p1_readonly_transport:
+    if: >-
+      github.event.issue.number == 162 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'ISSUE162_G13_W4P1_PANE_READONLY_TRANSPORT_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Run exact G13 w4:p1 read-only transport diagnostic
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $repo='D22977/gpt-browser-bridge'
+          $issue=162
+          $adapterAuthority='5646011204'
+          $controlSwitch='5645732538'
+          $currentStart='5645736288'
+          $sourceBlocker='5645790077'
+          $sourceProbe='5645810295'
+          $sourcePaneBlocked='5645865060'
+          $sourceExecutorBoundary='5645917362'
+          $expectedRunner='gbb-reviewer-win-01'
+          $targetPane='w4:p1'
+          $h='C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";'User-Agent'='g13-issue162-w4p1-readonly-transport';Accept='application/vnd.github+json'}
+
+          function Safe([string]$s,[int]$max=2600){
+            if($null -eq $s){return ''}
+            $v=(($s -replace '[\r\n]+',' | ') -replace '[\x00-\x1F]',' ').Trim()
+            if($v.Length -gt $max){return $v.Substring(0,$max)}
+            return $v
+          }
+          function Need([string]$body,[string]$pattern,[string]$name){
+            $m=[regex]::Match($body,$pattern)
+            if(-not $m.Success){throw "MALFORMED_WAKE_$name"}
+            return $m.Groups[1].Value
+          }
+          function GetComment([string]$id){
+            return Invoke-RestMethod "https://api.github.com/repos/$repo/issues/comments/$id" -Headers $headers -Method Get -TimeoutSec 30
+          }
+          function Publish([string]$body){
+            $payload=@{body=$body}|ConvertTo-Json -Compress
+            $p=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $rb=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/comments/$($p.id)" -Headers $headers -Method Get -TimeoutSec 30
+            if([string]$rb.body -cne $body){throw 'G13_W4P1_RESULT_READBACK_MISMATCH'}
+            return [string]$p.id
+          }
+
+          $ev=Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw|ConvertFrom-Json
+          $wake=[string]$ev.comment.id
+          $body=[string]$ev.comment.body
+          $adapter=Need $body '(?m)^source_adapter_authority:\s*(\d+)\s*$' 'ADAPTER_AUTHORITY'
+          $activation=Need $body '(?m)^source_diagnostic_activation:\s*(\d+)\s*$' 'DIAGNOSTIC_ACTIVATION'
+          $swWake=Need $body '(?m)^source_control_switch:\s*(\d+)\s*$' 'CONTROL_SWITCH'
+          $csWake=Need $body '(?m)^source_current_start:\s*(\d+)\s*$' 'CURRENT_START'
+          $bWake=Need $body '(?m)^source_blocker:\s*(\d+)\s*$' 'BLOCKER'
+          $pWake=Need $body '(?m)^source_probe_result:\s*(\d+)\s*$' 'PROBE_RESULT'
+          $pdWake=Need $body '(?m)^source_pane_diagnostic_blocked:\s*(\d+)\s*$' 'PANE_DIAGNOSTIC_BLOCKED'
+          $ebWake=Need $body '(?m)^source_executor_boundary_blocked:\s*(\d+)\s*$' 'EXECUTOR_BOUNDARY_BLOCKED'
+          $launcher=Need $body '(?m)^launcher_head_sha:\s*([0-9a-f]{40})\s*$' 'LAUNCHER_HEAD'
+          $pane=Need $body '(?m)^target_pane:\s*([^\s]+)\s*$' 'TARGET_PANE'
+          $idem=Need $body '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'IDEMPOTENCY'
+
+          $runnerName=[string]$env:RUNNER_NAME
+          $runnerUser=[System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+          $runnerSessionId=[string](Get-Process -Id $PID).SessionId
+          $paneGetExit=-1; $processInfoExit=-1; $paneReadExit=-1
+          $paneGet=''; $processInfo=''; $paneRead=''
+          $paneGetCount=0; $processInfoCount=0; $paneReadCount=0
+          $state='BLOCKED'; $classification='TRANSPORT_IDENTITY_MISMATCH'
+          $foregroundOwnership='UNOBSERVED'; $processIdentity='UNOBSERVED'
+
+          $priorRows=@(Invoke-RestMethod "https://api.github.com/repos/$repo/issues/$issue/comments?per_page=100" -Headers $headers -Method Get -TimeoutSec 30)
+          $prior=@($priorRows|Where-Object{[string]$_.body -match '(?m)^GBB_ISSUE162_G13_W4P1_PANE_READONLY_TRANSPORT_RESULT_V1\s*$' -and ([string]$_.body -match "(?m)^wake_comment_id:\s*$wake\s*$" -or [string]$_.body -match "(?m)^idempotency_key:\s*$([regex]::Escape($idem))\s*$")})
+          if($prior.Count -gt 0){
+            $state='NO_OP_DUPLICATE'; $classification='NO_OP_DUPLICATE';
+          }else{
+            try{
+              if($adapter -cne $adapterAuthority -or $swWake -cne $controlSwitch -or $csWake -cne $currentStart -or $bWake -cne $sourceBlocker -or $pWake -cne $sourceProbe -or $pdWake -cne $sourcePaneBlocked -or $ebWake -cne $sourceExecutorBoundary -or $pane -cne $targetPane){throw 'WAKE_BINDING_MISMATCH'}
+              if($launcher -cne $env:GITHUB_SHA){throw 'LAUNCHER_HEAD_MISMATCH'}
+              if($runnerName -cne $expectedRunner){throw 'RUNNER_NAME_MISMATCH'}
+
+              $authBody=[string](GetComment $adapterAuthority).body
+              if(-not $authBody.StartsWith('CONTROL_G13_ISSUE162_SELF_HOSTED_W4P1_READONLY_TRANSPORT_ADAPTER_AUTHORITY_V1') -or $authBody -notmatch '(?m)^control_generation:\s*013\s*$'){throw 'ADAPTER_AUTHORITY_INVALID'}
+              $activationBody=[string](GetComment $activation).body
+              if(-not $activationBody.StartsWith('CONTROL_G13_ISSUE162_W4P1_PANE_READONLY_DIAGNOSTIC_ACTIVATION_V1') -or $activationBody -notmatch '(?m)^state:\s*EXECUTE_ONCE\s*$' -or $activationBody -notmatch '(?m)^source_adapter_authority:\s*5646011204\s*$' -or $activationBody -notmatch '(?m)^control_generation:\s*013\s*$' -or $activationBody -notmatch '(?m)^target_pane:\s*w4:p1\s*$' -or $activationBody -notmatch '(?m)^diagnostic_execution_authorized:\s*true\s*$'){throw 'ACTIVATION_AUTHORITY_INVALID'}
+
+              $switchObj=GetComment $controlSwitch; $switchBody=[string]$switchObj.body
+              if(-not $switchBody.StartsWith('CONTROL_GENERATION_SWITCH_V1') -or $switchBody -notmatch '(?m)^state:\s*SWITCH_COMMITTED\s*$' -or $switchBody -notmatch '(?m)^new_generation:\s*013\s*$' -or $switchBody -notmatch '(?m)^new_status:\s*ACTIVE\s*$'){throw 'CONTROL013_NOT_ACTIVE'}
+              $since=[uri]::EscapeDataString([string]$switchObj.created_at)
+              $switchRows=@(Invoke-RestMethod "https://api.github.com/repos/$repo/issues/88/comments?since=$since&per_page=100" -Headers $headers -Method Get -TimeoutSec 30)
+              $newerSwitch=@($switchRows|Where-Object{[int64]$_.id -gt [int64]$controlSwitch -and [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'})
+              if($newerSwitch.Count -gt 0){$state='STALE'; throw 'NEWER_CONTROL_SWITCH_EXISTS'}
+
+              $currentBody=[string](GetComment $currentStart).body
+              if(-not $currentBody.StartsWith('CURRENT_REHYDRATION_INDEX_V117') -or $currentBody -notmatch '(?m)^state:\s*CURRENT_START_HERE\s*$' -or $currentBody -notmatch '(?m)^control_generation:\s*013\s*$' -or $currentBody -notmatch '(?m)^control_status:\s*ACTIVE\s*$'){throw 'CURRENT_START_INVALID'}
+              $blkBody=[string](GetComment $sourceBlocker).body
+              if(-not $blkBody.StartsWith('GBB_ISSUE162_EXISTING_WORKSPACE_AGENT_START_RECOVERY_RESULT_V1') -or $blkBody -notmatch '(?m)^state:\s*BLOCKED\s*$'){throw 'SOURCE_BLOCKER_INVALID'}
+              $probeBody=[string](GetComment $sourceProbe).body
+              if(-not $probeBody.StartsWith('GBB_ISSUE162_AGENT_START_TIMEOUT_READONLY_PROBE_RESULT_V1') -or $probeBody -notmatch '(?m)^classification:\s*NO_NAMED_AGENT_EXACT_WORKSPACE_PRESENT\s*$'){throw 'SOURCE_PROBE_INVALID'}
+              $paneBlockedBody=[string](GetComment $sourcePaneBlocked).body
+              if(-not $paneBlockedBody.StartsWith('GBB_ISSUE162_PANE_LEVEL_READONLY_DIAGNOSTIC_RESULT_V1') -or $paneBlockedBody -notmatch '(?m)^state:\s*BLOCKED\s*$'){throw 'SOURCE_PANE_BLOCKED_INVALID'}
+              $boundaryBody=[string](GetComment $sourceExecutorBoundary).body
+              if(-not $boundaryBody.StartsWith('CONTROL_G13_ISSUE162_EXECUTOR_ADMISSION_BOUNDARY_DECISION_V1') -or $boundaryBody -notmatch '(?m)^state:\s*BLOCKED\s*$'){throw 'SOURCE_EXECUTOR_BOUNDARY_INVALID'}
+
+              if(-not(Test-Path -LiteralPath $h -PathType Leaf)){throw 'HERDR_EXE_MISSING'}
+              $paneGetCount=1
+              $paneGet=((& $h pane get $targetPane 2>&1)|Out-String).Trim(); $paneGetExit=$LASTEXITCODE
+              $processInfoCount=1
+              $processInfo=((& $h pane process-info --pane $targetPane 2>&1)|Out-String).Trim(); $processInfoExit=$LASTEXITCODE
+              $paneReadCount=1
+              $paneRead=((& $h pane read $targetPane --source recent-unwrapped 2>&1)|Out-String).Trim(); $paneReadExit=$LASTEXITCODE
+
+              if($paneGetExit -ne 0){$classification='PANE_ABSENT_OR_UNREADABLE'}
+              elseif($processInfoExit -ne 0 -or $paneReadExit -ne 0){$classification='HERDR_READONLY_COMMAND_FAILED'}
+              else{$classification='PROCESS_IDENTITY_AMBIGUOUS'}
+              $state='READONLY_DIAGNOSTIC_COMPLETE'
+              $foregroundOwnership='UNRESOLVED_FROM_RAW_OUTPUT'
+              $processIdentity=(Safe $processInfo 1800)
+            }catch{
+              if($state -ne 'STALE'){$state='BLOCKED'}
+              if($classification -eq 'TRANSPORT_IDENTITY_MISMATCH'){$classification='TRANSPORT_IDENTITY_MISMATCH'}
+              if($paneGetCount -gt 0 -and ($paneGetExit -ne 0 -or $processInfoExit -ne 0 -or $paneReadExit -ne 0)){$classification='HERDR_READONLY_COMMAND_FAILED'}
+            }
+          }
+
+          $result=@(
+            'GBB_ISSUE162_G13_W4P1_PANE_READONLY_TRANSPORT_RESULT_V1'
+            "state: $state"
+            "classification: $classification"
+            "authority_receipt: $activation"
+            "wake_comment_id: $wake"
+            "idempotency_key: $idem"
+            'control_generation: 013'
+            "source_control_switch: $controlSwitch"
+            "source_current_start: $currentStart"
+            "source_blocker: $sourceBlocker"
+            "source_probe_result: $sourceProbe"
+            "source_pane_diagnostic_blocked: $sourcePaneBlocked"
+            "source_executor_boundary_blocked: $sourceExecutorBoundary"
+            "source_adapter_authority: $adapterAuthority"
+            "launcher_head_sha: $launcher"
+            "runner_name: $(Safe $runnerName 200)"
+            "runner_user: $(Safe $runnerUser 300)"
+            "runner_session_id: $(Safe $runnerSessionId 100)"
+            'target_pane: w4:p1'
+            "pane_get_exit: $paneGetExit"
+            "pane_get_output: $(Safe $paneGet 2600)"
+            "process_info_exit: $processInfoExit"
+            "process_info_output: $(Safe $processInfo 2600)"
+            "pane_read_exit: $paneReadExit"
+            "recent_output: $(Safe $paneRead 2600)"
+            "pane_foreground_interactive_ownership: $(Safe $foregroundOwnership 400)"
+            "process_identity: $(Safe $processIdentity 1800)"
+            "herdr_pane_get_count: $paneGetCount"
+            "herdr_pane_process_info_count: $processInfoCount"
+            "herdr_pane_read_count: $paneReadCount"
+            'forbidden_herdr_command_count: 0'
+            'agent_start_count: 0'
+            'agent_prompt_count: 0'
+            'workspace_mutation_count: 0'
+            'pane_mutation_count: 0'
+            'git_mutation_count: 0'
+            'file_mutation_count: 0'
+            'worker_product_mutation_count: 0'
+            'scheduled_task_mutation_count: 0'
+            'workflow_dispatch_count: 0'
+            'old_wake_retry_count: 0'
+            'readback_verified: true'
+          ) -join "`n"
+          [void](Publish $result)
