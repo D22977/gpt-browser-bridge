@@ -1,26 +1,23 @@
 # GPT Browser Bridge (GBB)
 
-A Windows-local automation infrastructure project that lets ORCA and multiple CLI
-agents (OpenCode / Claude Code / Codex) coordinate a single ChatGPT web conversation
-for review jobs — with durable checkpoints, role separation, and overnight crash
-recovery.
+A Windows-local automation project connecting GitHub work orders, Web GPT Control,
+Herdr/CLI executors and independent reviewers. Roles remain separate; each physical
+route requires current admission and each phase requires its own durable evidence.
 
-The authoritative requirements live in `plans/GBB_PARENT_WORK_ORDER.md`. This repo
-implements them one work order (card) at a time, each with its own worker worktree
-and a fresh-context reviewer.
+Start at [AGENTS.md](AGENTS.md) and the [shared handoff contract](docs/HANDOFF_CONTRACT.md).
+Web Control uses [its runbook](docs/WEB_CONTROL_RUNBOOK.md); desktop Herdr uses
+[its runbook](docs/HERDR_RUNBOOK.md). These are role views of one contract, not
+separate authority stores. The original parent plan preserves historical design.
 
 ## Current status
 
-| Card | Purpose | State |
-| ---- | ------- | ----- |
-| GBB-001 | Bootstrap, governance & skills | In progress (this card) |
-| GBB-002 | Playwright CLI compatibility spike | Not started |
-| GBB-003 | Durable ChatGPT watcher MVP | Not started |
-| GBB-004 | Overnight supervisor & crash recovery | Skeleton present |
-| GBB-005 | Pilot, shadow review & final gate | Not started |
-
-Project state (the single source of truth for progress) lives outside Git in the
-runtime tree, see `docs/ARCHITECTURE.md`.
+Read the latest applicable receipts, with complete pagination, in
+[#43](https://github.com/D22977/gpt-browser-bridge/issues/43),
+[#81](https://github.com/D22977/gpt-browser-bridge/issues/81),
+[#88](https://github.com/D22977/gpt-browser-bridge/issues/88), then the current work
+order. Do not infer current status from this README or a historical card table.
+GitHub is durable semantic authority. Local runtime state is execution/recovery
+evidence and cache; it must be reconciled before sending or resuming work.
 
 ## Quick start
 
@@ -33,7 +30,7 @@ npm test
 
 ```text
 README.md
-AGENTS.md                build-agent rules for this repo
+AGENTS.md                shared role entry and GitHub rehydration pointers
 package.json             only playwright-core / write-file-atomic / zod
 THIRD_PARTY_NOTICES.md   third-party usage & license record
 plans/                   parent work order + per-card plans
@@ -59,4 +56,7 @@ Runtime versions, CLI availability and how each agent loads skills are recorded 
 
 - `docs/ARCHITECTURE.md` — architecture, environment inventory, skill loading matrix
 - `docs/SECURITY.md` — security policy
-- `plans/GBB_PARENT_WORK_ORDER.md` — authoritative parent work order
+- `docs/HANDOFF_CONTRACT.md` — common authority, lifecycle, failure and continuation rules
+- `docs/WEB_CONTROL_RUNBOOK.md` — Web Control reading and decision procedure
+- `docs/HERDR_RUNBOOK.md` — desktop transport admission, execution and terminal guard
+- `plans/GBB_PARENT_WORK_ORDER.md` — historical parent requirements and execution records
