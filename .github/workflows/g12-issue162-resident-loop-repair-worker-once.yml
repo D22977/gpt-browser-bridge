@@ -122,6 +122,7 @@ jobs:
           })
           if($again.Count -ne 1){throw 'HERDR_NAMED_TARGET_STALE'}
 
+          $observeSince=[Uri]::EscapeDataString((Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o'))
           $prompt="Read GitHub directly. You are the bounded WORKER for D22977/gpt-browser-bridge Issue #162 card receipt $card (GBB-G12-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-REPAIR-02). Rehydrate #43, #81, #88 and #162, but execute only that current card. Exact base $workerBase; required branch $workerBranch; your current worktree is $worktree. BEFORE any tracked mutation publish and read back exactly one GBB_ISSUE162_RESIDENT_LOOP_REPAIR_WORKER_CONSUMED_STARTED_V1 bound to card $card, exact base/branch and your current Herdr name/pane/session. Then implement only the allowed paths and requirements: port minimum #103 herdr_resume seam, restore #62 resident/restart-safe consumer semantics, named Herdr target resolution at send time with revalidation, Actions not normal poller, no semantic Control, no formal review, no permanent Scheduled Task deployment. Run focused + relevant regression tests, push/read-back exact candidate, publish/read-back GBB_ISSUE162_RESIDENT_LOOP_REPAIR_WORKER_RESULT_V1 as READY_FOR_FRESH_REVIEW, BLOCKED or CONTROL_REQUIRED, then park. No merge/release/MEP/product mutation."
           $sent=(& $h agent prompt $agentName $prompt 2>&1 | Out-String)
           if($LASTEXITCODE -ne 0){throw "HERDR_WORKER_PROMPT_FAILED $sent"}
@@ -130,7 +131,7 @@ jobs:
           $started=$null
           for($i=0;$i-lt 120;$i++){
             Start-Sleep -Seconds 3
-            $comments=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/$issue/comments?per_page=100&page=1" -Headers $headers -Method Get -TimeoutSec 30
+            $comments=Invoke-RestMethod "https://api.github.com/repos/$repo/issues/$issue/comments?per_page=100&since=$observeSince" -Headers $headers -Method Get -TimeoutSec 30
             $started=@($comments | Where-Object {
               [string]$_.body -match '(?m)^GBB_ISSUE162_RESIDENT_LOOP_REPAIR_WORKER_CONSUMED_STARTED_V1\s*$' -and
               [string]$_.body -match "(?m)^source_card_receipt:\s*$card\s*$" -and
