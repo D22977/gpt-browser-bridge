@@ -272,10 +272,122 @@ jobs:
           $state='BLOCKED'; $classification='TRANSPORT_IDENTITY_MISMATCH'
           $foregroundOwnership='UNOBSERVED'; $processIdentity='UNOBSERVED'
 
-          $priorRows=@(Invoke-RestMethod "https://api.github.com/repos/$repo/issues/$issue/comments?per_page=100" -Headers $headers -Method Get -TimeoutSec 30)
-          $prior=@($priorRows|Where-Object{[string]$_.body -match '(?m)^GBB_ISSUE162_G13_W4P1_PANE_READONLY_TRANSPORT_RESULT_V1\s*$' -and ([string]$_.body -match "(?m)^wake_comment_id:\s*$wake\s*$" -or [string]$_.body -match "(?m)^idempotency_key:\s*$([regex]::Escape($idem))\s*$")})
-          if($prior.Count -gt 0){
-            $state='NO_OP_DUPLICATE'; $classification='NO_OP_DUPLICATE';
+            $priorRows=@(Invoke-RestMethod "https://api.github.com/repos/$repo/issues/$issue/comments?per_page=100" -Headers $headers -Method Get -TimeoutSec 30)
+            $prior=@($priorRows|Where-Object{[string]$_.body -match '(?m)^GBB_ISSUE162_G13_W4P1_PANE_READONLY_TRANSPORT_RESULT_V1\s*$' -and ([string]$_.body -match "(?m)^wake_comment_id:\s*$wake\s*$" -or [string]$_.body -match "(?m)^idempotency_key:\s*$([regex]::Escape($idem))\s*$")})
+
+            function Normalize-IdentityValue([object]$value){
+              if($null -eq $value){return ''}
+              return ([string]$value).Trim()
+            }
+            function Same-IdentityValue([object]$left,[object]$right){
+              return ((Normalize-IdentityValue $left) -ieq (Normalize-IdentityValue $right))
+            }
+            function Classify-ProcessIdentity([string]$PaneJson,[string]$ProcessInfoJson,[int]$RunnerSessionId,[object[]]$NativeRows=@()){
+              $evidence=[ordered]@{
+                native_query='Get-CimInstance Win32_Process + Get-Process'
+                pane_id=''
+                foreground_group_id=''
+                shell_pid=''
+                foreground_pid=''
+                foreground_count=0
+                native_shell_present=$false
+                native_foreground_present=$false
+                native_name_match=$false
+                native_path_match=$false
+                native_cmdline_match=$false
+                native_parent_match=$false
+                native_session_match=$false
+                cwd_match_to_pane=$false
+              }
+              try{
+                $paneObject=$PaneJson|ConvertFrom-Json -ErrorAction Stop
+                $infoObject=$ProcessInfoJson|ConvertFrom-Json -ErrorAction Stop
+                $paneNode=$paneObject.result.pane
+                $infoNode=$infoObject.result.process_info
+                if($null -eq $paneNode -or $null -eq $infoNode){throw 'PROCESS_INFO_SCHEMA_INVALID'}
+                $paneId=Normalize-IdentityValue $paneNode.pane_id
+                $paneCwd=Normalize-IdentityValue $paneNode.cwd
+                if($paneId -cne 'w4:p1' -or [string]::IsNullOrWhiteSpace($paneCwd)){throw 'PANE_ID_OR_CWD_INVALID'}
+                $evidence.pane_id=$paneId
+                $groupPid=[int64]0; $shellPid=[int64]0
+                if(-not [int64]::TryParse((Normalize-IdentityValue $infoNode.foreground_process_group_id),[ref]$groupPid)){throw 'FOREGROUND_GROUP_ID_INVALID'}
+                if(-not [int64]::TryParse((Normalize-IdentityValue $infoNode.shell_pid),[ref]$shellPid)){throw 'SHELL_PID_INVALID'}
+                if($groupPid -ne $shellPid){throw 'CONSOLE_GROUP_SHELL_MISMATCH'}
+                $foreground=@($infoNode.foreground_processes)
+                $evidence.foreground_group_id=[string]$groupPid
+                $evidence.shell_pid=[string]$shellPid
+                $evidence.foreground_count=$foreground.Count
+                if($foreground.Count -ne 1){throw 'FOREGROUND_PROCESS_COUNT_NOT_ONE'}
+                $row=$foreground[0]
+                $foregroundPid=[int64]0
+                if(-not [int64]::TryParse((Normalize-IdentityValue $row.pid),[ref]$foregroundPid)){throw 'FOREGROUND_PID_INVALID'}
+                $rowName=Normalize-IdentityValue $row.name
+                $rowPath=Normalize-IdentityValue $row.argv0
+                $rowCommandLine=Normalize-IdentityValue $row.cmdline
+                $rowCwd=Normalize-IdentityValue $row.cwd
+                if([string]::IsNullOrWhiteSpace($rowName) -or [string]::IsNullOrWhiteSpace($rowPath) -or [string]::IsNullOrWhiteSpace($rowCommandLine) -or [string]::IsNullOrWhiteSpace($rowCwd)){throw 'FOREGROUND_IDENTITY_FIELDS_MISSING'}
+                if(-not (Same-IdentityValue $rowCwd $paneCwd)){throw 'FOREGROUND_CWD_MISMATCH'}
+                $evidence.foreground_pid=[string]$foregroundPid
+                $evidence.cwd_match_to_pane=$true
+                if($NativeRows.Count -eq 0){
+                  $NativeRows=@(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop|Select-Object ProcessId,Name,ExecutablePath,CommandLine,ParentProcessId,SessionId)
+                  $shellProcess=Get-Process -Id ([int]$shellPid) -ErrorAction Stop
+                  $foregroundProcess=Get-Process -Id ([int]$foregroundPid) -ErrorAction Stop
+                  $evidence.get_process_shell_session=[string]$shellProcess.SessionId
+                  $evidence.get_process_foreground_session=[string]$foregroundProcess.SessionId
+                }
+                $nativeForeground=@($NativeRows|Where-Object{[int64]$_.ProcessId -eq $foregroundPid})
+                $nativeShell=@($NativeRows|Where-Object{[int64]$_.ProcessId -eq $shellPid})
+                if($nativeForeground.Count -ne 1 -or $nativeShell.Count -ne 1){throw 'NATIVE_PROCESS_ROW_MISSING_OR_DUPLICATE'}
+                $nativeForegroundRow=$nativeForeground[0]
+                $nativeShellRow=$nativeShell[0]
+                $evidence.native_foreground_present=$true
+                $evidence.native_shell_present=$true
+                $evidence.native_name_match=(Same-IdentityValue $rowName $nativeForegroundRow.Name)
+                $evidence.native_path_match=(Same-IdentityValue $rowPath $nativeForegroundRow.ExecutablePath)
+                $evidence.native_cmdline_match=(Same-IdentityValue $rowCommandLine $nativeForegroundRow.CommandLine)
+                $nativeParentPid=[int64]0
+                $nativeParentValid=[int64]::TryParse((Normalize-IdentityValue $nativeForegroundRow.ParentProcessId),[ref]$nativeParentPid)
+                $nativeSessionId=[int64]0
+                $nativeSessionValid=[int64]::TryParse((Normalize-IdentityValue $nativeForegroundRow.SessionId),[ref]$nativeSessionId)
+                $evidence.native_parent_pid=if($nativeParentValid){[string]$nativeParentPid}else{''}
+                $evidence.native_session_id=if($nativeSessionValid){[string]$nativeSessionId}else{''}
+                $evidence.native_parent_match=($nativeParentValid -and (($foregroundPid -eq $shellPid) -or ($nativeParentPid -eq $shellPid)))
+                $evidence.native_session_match=($nativeSessionValid -and $nativeSessionId -eq [int64]$RunnerSessionId)
+                if(-not $evidence.native_name_match -or -not $evidence.native_path_match -or -not $evidence.native_cmdline_match -or -not $evidence.native_session_match){throw 'NATIVE_PROCESS_IDENTITY_MISMATCH'}
+                if($foregroundPid -eq $shellPid){
+                  if(-not $evidence.native_parent_match){throw 'SHELL_PARENT_EVIDENCE_MISSING'}
+                  return [pscustomobject]@{state='CORROBORATED';classification='SHELL_OWNS_FOREGROUND';evidence=$evidence}
+                }
+                if(-not $evidence.native_parent_match){throw 'CHILD_PARENT_MISMATCH'}
+                return [pscustomobject]@{state='CORROBORATED';classification='CHILD_OWNS_FOREGROUND';evidence=$evidence}
+              }catch{
+                $evidence.error=$_.Exception.Message
+                return [pscustomobject]@{state='FAIL_CLOSED';classification='PROCESS_IDENTITY_CORROBORATION_FAILED';evidence=$evidence}
+              }
+            }
+            function Invoke-OfflineIdentityFixtures{
+              $fixturePane=@{result=@{pane=@{pane_id='w4:p1';cwd='D:\fixture'}}}|ConvertTo-Json -Depth 8 -Compress
+              $fixtureNative=@(
+                [pscustomobject]@{ProcessId=1234;Name='powershell.exe';ExecutablePath='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe';CommandLine='powershell.exe -NoExit';ParentProcessId=100;SessionId=1}
+                [pscustomobject]@{ProcessId=2345;Name='codex.exe';ExecutablePath='D:\fixture\codex.exe';CommandLine='D:\fixture\codex.exe --probe';ParentProcessId=1234;SessionId=1}
+              )
+              $shellInfo=@{result=@{process_info=@{foreground_process_group_id=1234;shell_pid=1234;foreground_processes=@(@{pid=1234;name='powershell.exe';argv0='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe';cmdline='powershell.exe -NoExit';cwd='D:\fixture'})}}}|ConvertTo-Json -Depth 10 -Compress
+              $childInfo=@{result=@{process_info=@{foreground_process_group_id=1234;shell_pid=1234;foreground_processes=@(@{pid=2345;name='codex.exe';argv0='D:\fixture\codex.exe';cmdline='D:\fixture\codex.exe --probe';cwd='D:\fixture'})}}}|ConvertTo-Json -Depth 10 -Compress
+              $shell=Classify-ProcessIdentity $fixturePane $shellInfo 1 $fixtureNative
+              $child=Classify-ProcessIdentity $fixturePane $childInfo 1 $fixtureNative
+              $malformed=Classify-ProcessIdentity $fixturePane '{"result":{}}' 1 $fixtureNative
+              $multipleInfo=@{result=@{process_info=@{foreground_process_group_id=1234;shell_pid=1234;foreground_processes=@(@{pid=1234;name='powershell.exe';argv0='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe';cmdline='powershell.exe -NoExit';cwd='D:\fixture'},@{pid=2345;name='codex.exe';argv0='D:\fixture\codex.exe';cmdline='D:\fixture\codex.exe --probe';cwd='D:\fixture'})}}}|ConvertTo-Json -Depth 10 -Compress
+              $multiple=Classify-ProcessIdentity $fixturePane $multipleInfo 1 $fixtureNative
+              if($shell.classification -cne 'SHELL_OWNS_FOREGROUND'){throw 'OFFLINE_FIXTURE_SHELL_FAILED'}
+              if($child.classification -cne 'CHILD_OWNS_FOREGROUND'){throw 'OFFLINE_FIXTURE_CHILD_FAILED'}
+              if($malformed.classification -cne 'PROCESS_IDENTITY_CORROBORATION_FAILED'){throw 'OFFLINE_FIXTURE_MALFORMED_FAILED'}
+              if($multiple.classification -cne 'PROCESS_IDENTITY_CORROBORATION_FAILED'){throw 'OFFLINE_FIXTURE_MULTIPLE_FAILED'}
+              return 'PASS:shell,child,malformed,multiple-fail-closed'
+            }
+            $offlineFixtureResult=Invoke-OfflineIdentityFixtures
+            if($prior.Count -gt 0){
+              $state='NO_OP_DUPLICATE'; $classification='NO_OP_DUPLICATE';
           }else{
             try{
               if($adapter -cne $adapterAuthority -or $swWake -cne $controlSwitch -or $csWake -cne $currentStart -or $bWake -cne $sourceBlocker -or $pWake -cne $sourceProbe -or $pdWake -cne $sourcePaneBlocked -or $ebWake -cne $sourceExecutorBoundary -or $pane -cne $targetPane){throw 'WAKE_BINDING_MISMATCH'}
@@ -313,13 +425,16 @@ jobs:
               $paneReadCount=1
               $paneRead=((& $h pane read $targetPane --source recent-unwrapped 2>&1)|Out-String).Trim(); $paneReadExit=$LASTEXITCODE
 
-              if($paneGetExit -ne 0){$classification='PANE_ABSENT_OR_UNREADABLE'}
-              elseif($processInfoExit -ne 0 -or $paneReadExit -ne 0){$classification='HERDR_READONLY_COMMAND_FAILED'}
-              else{$classification='PROCESS_IDENTITY_AMBIGUOUS'}
-              $state='READONLY_DIAGNOSTIC_COMPLETE'
-              $foregroundOwnership='UNRESOLVED_FROM_RAW_OUTPUT'
-              $processIdentity=(Safe $processInfo 1800)
-            }catch{
+               if($paneGetExit -ne 0){$classification='PANE_ABSENT_OR_UNREADABLE'}
+               elseif($processInfoExit -ne 0 -or $paneReadExit -ne 0){$classification='HERDR_READONLY_COMMAND_FAILED'}
+               else{
+                 $identity=Classify-ProcessIdentity $paneGet $processInfo ([int]$runnerSessionId)
+                 $classification=[string]$identity.classification
+                 $foregroundOwnership=$classification
+                 $processIdentity=($identity|ConvertTo-Json -Depth 10 -Compress)
+               }
+               $state='READONLY_DIAGNOSTIC_COMPLETE'
+             }catch{
               if($state -ne 'STALE'){$state='BLOCKED'}
               if($classification -eq 'TRANSPORT_IDENTITY_MISMATCH'){$classification='TRANSPORT_IDENTITY_MISMATCH'}
               if($paneGetCount -gt 0 -and ($paneGetExit -ne 0 -or $processInfoExit -ne 0 -or $paneReadExit -ne 0)){$classification='HERDR_READONLY_COMMAND_FAILED'}
