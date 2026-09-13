@@ -33,7 +33,6 @@ jobs:
           $repo = 'D22977/gpt-browser-bridge'
           $issue = 162
           $workflowPath = '.github/workflows/g13-handoff-pointer-consumer-once.yml'
-          $expectedRunner = 'gbb-reviewer-win-01'
           $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
           $api = "https://api.github.com/repos/$repo"
           $headers = @{
@@ -63,7 +62,7 @@ jobs:
             $matches = [regex]::Matches($body, $pattern)
             if ($matches.Count -eq 0) { throw "MISSING_FIELD_$name" }
             if ($matches.Count -gt 1) { throw "DUPLICATE_FIELD_$name" }
-            return $matches[0].Groups[1].Value.Trim()
+            return $matches[0].Groups[1].Value
           }
 
           function Require-FirstLine([string]$body, [string]$protocol, [string]$label) {
@@ -129,19 +128,6 @@ jobs:
             $exit = $LASTEXITCODE
             if ($exit -ne 0) { throw "HERDR_READ_FAILED_$exit" }
             try { return ($raw | ConvertFrom-Json) } catch { throw 'HERDR_JSON_INVALID' }
-          }
-
-          function Find-TargetAgent([object]$agents, [string]$name, [string]$kind, [string]$pane, [string]$cwd, [string]$workspace, [string]$branch, [string]$headSha, [string]$requiredStatus) {
-            return @($agents | Where-Object {
-              [string]$_.name -ceq $name -and
-              [string]$_.agent_kind -ceq $kind -and
-              [string]$_.pane_id -ceq $pane -and
-              [string]$_.cwd -ceq $cwd -and
-              [string]$_.workspace -ceq $workspace -and
-              [string]$_.branch -ceq $branch -and
-              [string]$_.head_sha -ceq $headSha -and
-              [string]$_.agent_status -ceq $requiredStatus
-            })
           }
 
           $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
@@ -247,6 +233,7 @@ jobs:
           $acceptanceFirstChar = [int][char]$acceptanceFirstLine[0]
           if ($acceptanceFirstChar -eq 0xFEFF) { throw 'BOM_DETECTED_IN_ACCEPTANCE' }
           if ($acceptanceFirstLine -cne 'GBB_G13_HANDOFF_AUTOMATION_TEST_ACCEPTANCE_V1') { throw 'SOURCE_ACCEPTANCE_PROTOCOL_NOT_EXACT' }
+          if ($acceptanceBody -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'SOURCE_ACCEPTANCE_RECORDED_BY_ROLE_INVALID' }
           if ($acceptanceBody -notmatch '(?m)^state:\s*PASS\s*$') { throw 'SOURCE_ACCEPTANCE_STATE_INVALID' }
           if ($acceptanceBody -notmatch '(?m)^card_id:\s*GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01\s*$') { throw 'SOURCE_ACCEPTANCE_CARD_ID_MISMATCH' }
           if ($acceptanceBody -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'SOURCE_ACCEPTANCE_GENERATION_MISMATCH' }
@@ -281,6 +268,18 @@ jobs:
           Require-Exact-FirstLine ([string]$switch.body) 'CONTROL_GENERATION_SWITCH_V1' 'SWITCH'
           if ([string]$switch.body -notmatch '(?m)^new_generation:\s*013\s*$') { throw 'SWITCH_NOT_GEN013' }
           if ([string]$switch.body -notmatch '(?m)^new_status:\s*ACTIVE\s*$') { throw 'SWITCH_NOT_ACTIVE' }
+          if ([string]$switch.body -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'SWITCH_RECORDED_BY_ROLE_INVALID' }
+          $allowedSwitchKeys = @('state','new_generation','new_status','recorded_by_role')
+          $switchLines = [string]$switch.body -split "`r?`n"
+          $seenSwitchKeys = @{}
+          for ($si = 1; $si -lt $switchLines.Count; $si++) {
+            $sline = $switchLines[$si].Trim()
+            if ([string]::IsNullOrWhiteSpace($sline)) { continue }
+            if ($sline -notmatch '^(?<sk>[a-z0-9_]+):\s*(?<sv>.+)$') { throw "SWITCH_BODY_NOT_POINTER_ONLY_LINE_$si" }
+            if ($allowedSwitchKeys -notcontains $Matches.sk) { throw "SWITCH_UNKNOWN_FIELD_$($Matches.sk)" }
+            if ($seenSwitchKeys.ContainsKey($Matches.sk)) { throw "SWITCH_DUPLICATE_FIELD_$($Matches.sk)" }
+            $seenSwitchKeys[$Matches.sk] = $true
+          }
           $newerSwitchesAfterLatest = @($issue88 | Where-Object {
             [int64]$_.id -gt [int64]$switch.id -and
             [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
@@ -323,6 +322,14 @@ jobs:
           }
           if ([string]$currentStart.body -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'CURRENT_START_GEN_MISMATCH' }
           if ([string]$currentStart.body -notmatch '(?m)^control_status:\s*ACTIVE\s*$') { throw 'CURRENT_START_NOT_ACTIVE' }
+          if ([string]$currentStart.body -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'CURRENT_START_RECORDED_BY_ROLE_INVALID' }
+          $allowedCSKeys = @('state','control_generation','control_status','recorded_by_role')
+          for ($csLi = 1; $csLi -lt $csBodyLines.Count; $csLi++) {
+            $csLine = $csBodyLines[$csLi].Trim()
+            if ([string]::IsNullOrWhiteSpace($csLine)) { continue }
+            if ($csLine -notmatch '^(?<ck>[a-z0-9_]+):\s*(?<cv>.+)$') { throw "CURRENT_START_BODY_NOT_POINTER_ONLY_LINE_$csLi" }
+            if ($allowedCSKeys -notcontains $Matches.ck) { throw "CURRENT_START_UNKNOWN_FIELD_$($Matches.ck)" }
+          }
           $newerCurrentStartsAfterLatest = @($issue43 | Where-Object {
             [int64]$_.id -gt [int64]$currentStart.id -and
             [string]$_.body -match '(?m)^CURRENT_REHYDRATION_INDEX_V\d+\s*$' -and
@@ -335,7 +342,7 @@ jobs:
           $issue162Eof = $issue162Result.eof
           if (-not $issue162Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_162' }
 
-          $logicalKey = "${cardReceipt}:${idempotency}:${cardId}:${generation}:${launcherHead}:${workerBase}:${workflowPath}:${targetRef}"
+          $logicalKey = "${cardReceipt}:${idempotency}:${cardId}:${generation}:${launcherHead}:${workerBase}:${workflowPath}:${targetRef}:${targetHead}:${consumerBlob}"
           $priorLiveObs = @($comments | Where-Object {
             [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_LIVE_CONSUMER_OBSERVES_V1\s*$' -and
             [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
@@ -389,10 +396,6 @@ jobs:
 
           $runnerUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
           $runnerSession = (Get-Process -Id $PID).SessionId
-          if ([string]$env:RUNNER_NAME -cne $expectedRunner) {
-            Publish-Blocker 'RUNNER_NAME_MISMATCH' "Expected $expectedRunner" $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
 
           $liveBody = @(
             'GBB_G13_HANDOFF_AUTOMATION_LIVE_CONSUMER_OBSERVES_V1'
@@ -418,12 +421,10 @@ jobs:
           [void](Publish $liveBody)
 
           $before = Invoke-HerdrJson @('agent', 'list')
-          $workerBranchName = 'worker/g13-handoff-pointer-consumer-repair-01'
           $beforeMatches = @($before.result.agents | Where-Object {
             [string]$_.name -ceq $targetAgentName -and
             [string]$_.pane_id -ceq $targetPane -and
             [string]$_.cwd -ceq $targetCwd -and
-            [string]$_.branch -ceq $workerBranchName -and
             [string]$_.head_sha -ceq $workerBase -and
             [string]$_.agent_status -ceq $targetStatus
           })
@@ -437,8 +438,9 @@ jobs:
             Publish-Blocker 'EXECUTOR_SESSION_MISSING' 'Selected executor has no session identity.' $dispatchId $cardReceipt $cardId $idempotency 0
             exit 0
           }
-          if ([string]$selected.branch -cne $workerBranchName) {
-            Publish-Blocker 'EXECUTOR_BRANCH_MISMATCH' "expected=$workerBranchName actual=$([string]$selected.branch)" $dispatchId $cardReceipt $cardId $idempotency 0
+          $workerBranchName = [string]$selected.branch
+          if ([string]::IsNullOrWhiteSpace($workerBranchName)) {
+            Publish-Blocker 'EXECUTOR_BRANCH_MISSING' 'Selected executor has no branch.' $dispatchId $cardReceipt $cardId $idempotency 0
             exit 0
           }
           if ([string]$selected.head_sha -cne $workerBase) {
@@ -504,6 +506,7 @@ jobs:
           $preSendAccBody = [string]$preSendAcceptance.body
           if ([string]$preSendAcceptance.user.login -cne 'D22977') { throw 'PRE_SEND_ACCEPTANCE_AUTHOR_INVALID' }
           if ([string]$preSendAcceptance.author_association -cne 'OWNER') { throw 'PRE_SEND_ACCEPTANCE_ASSOCIATION_INVALID' }
+          if ($preSendAccBody -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'PRE_SEND_ACCEPTANCE_RECORDED_BY_ROLE_INVALID' }
           if ($preSendAccBody -notmatch '(?m)^state:\s*PASS\s*$') { throw 'PRE_SEND_ACCEPTANCE_STATE_INVALID' }
           if ($preSendAccBody -notmatch "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$") { throw 'PRE_SEND_ACCEPTANCE_CARD_ID_MISMATCH' }
 
@@ -539,6 +542,24 @@ jobs:
           })
           if ($preSendLiveObs.Count -gt 1) {
             Publish-Blocker 'BLOCKED_PRE_SEND_DUPLICATE_LIVE_OBSERVATION' 'Multiple live observations exist for this logical event; no duplicate dispatch.' $dispatchId $cardReceipt $cardId $idempotency 0
+            exit 0
+          }
+
+          $reservationKey = "${cardReceipt}:${idempotency}:${cardId}:${generation}:${launcherHead}:${workerBase}:${workflowPath}:${targetRef}:${targetHead}:${consumerBlob}"
+          if ($reservationKey -cne $logicalKey) { throw 'RESERVATION_KEY_DIVERGENCE' }
+          $preSendReservation = @($preSendComments | Where-Object {
+            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1\s*$' -and
+            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
+            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
+            [string]$_.body -match "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$" -and
+            [string]$_.body -match "(?m)^control_generation:\s*$([regex]::Escape($generation))\s*$" -and
+            [string]$_.body -match "(?m)^launcher_head_sha:\s*$([regex]::Escape($launcherHead))\s*$" -and
+            [string]$_.body -match "(?m)^worker_base_sha:\s*$([regex]::Escape($workerBase))\s*$" -and
+            [string]$_.body -match "(?m)^consumer_workflow_path_exact:\s*$([regex]::Escape($workflowPath))\s*$" -and
+            [string]$_.body -match "(?m)^target_ref_exact:\s*$([regex]::Escape($targetRef))\s*$"
+          })
+          if ($preSendReservation.Count -gt 0) {
+            Publish-Blocker 'BLOCKED_PRE_SEND_RESERVATION_CONFLICT' 'A prior consumption exists for this exact logical reservation; no duplicate dispatch.' $dispatchId $cardReceipt $cardId $idempotency 0
             exit 0
           }
 
@@ -587,7 +608,7 @@ jobs:
           if ([string]$consumedReadback.author_association -cne 'OWNER') { throw 'CONSUMED_STARTED_ASSOCIATION_INVALID' }
           if ((Get-Field $consumedReadbackBody 'source_card_receipt') -cne $cardReceipt) { throw 'CONSUMED_STARTED_READBACK_CARD_RECEIPT_MISMATCH' }
           if ((Get-Field $consumedReadbackBody 'dispatch_idempotency_key') -cne $idempotency) { throw 'CONSUMED_STARTED_READBACK_IDEMPOTENCY_MISMATCH' }
-          $admittedExecutorIdentity = 'opencode/mimo-v2.5-free'
+          $admittedExecutorIdentity = [string]$selected.agent
           $admittedSession = $targetSession
           $admittedControlGeneration = $generation
           function Validate-ConsumedStarted([string]$body, [string]$expectedExecutor, [string]$expectedSession, [string]$expectedGeneration) {
