@@ -1,0 +1,351 @@
+name: G13 Pointer-only Handoff Consumer Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g13-handoff-pointer-consumer-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  consume:
+    if: >-
+      github.event.issue.number == 162 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'GBB_G13_HANDOFF_POINTER_DISPATCH_REQUEST_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Rehydrate card, admit exact consumer, and forward one pointer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'D22977/gpt-browser-bridge'
+          $issue = 162
+          $workflowPath = '.github/workflows/g13-handoff-pointer-consumer-once.yml'
+          $expectedRunner = 'gbb-reviewer-win-01'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $api = "https://api.github.com/repos/$repo"
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            'User-Agent' = 'g13-pointer-only-handoff-consumer'
+            Accept = 'application/vnd.github+json'
+          }
+
+          function Get-Comment([string]$id) {
+            return Invoke-RestMethod "$api/issues/comments/$id" -Headers $headers -Method Get -TimeoutSec 30
+          }
+
+          function Get-AllComments([int]$number) {
+            $all = @()
+            for ($page = 1; $page -le 20; $page++) {
+              $rows = @(Invoke-RestMethod "$api/issues/$number/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+              $all += $rows
+              if ($rows.Count -lt 100) { break }
+            }
+            return @($all)
+          }
+
+          function Get-Field([string]$body, [string]$name) {
+            $pattern = '(?m)^' + [regex]::Escape($name) + ':\s*(.+)\s*$'
+            $match = [regex]::Match($body, $pattern)
+            if (-not $match.Success) { throw "MISSING_FIELD_$name" }
+            return $match.Groups[1].Value.Trim()
+          }
+
+          function Require-FirstLine([string]$body, [string]$protocol, [string]$label) {
+            $first = (($body -split "`r?`n")[0]).Trim()
+            if ($first -cne $protocol) { throw "WRONG_$label_PROTOCOL" }
+          }
+
+          function Require-Sha([string]$value, [string]$label) {
+            if ($value -notmatch '^[0-9a-f]{40}$') { throw "MALFORMED_$label" }
+          }
+
+          function Publish([string]$body) {
+            $payload = @{ body = $body } | ConvertTo-Json -Compress
+            $created = Invoke-RestMethod "$api/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $readback = Get-Comment ([string]$created.id)
+            if ([string]$readback.body -cne $body) { throw 'PUBLISHED_RECEIPT_READBACK_MISMATCH' }
+            return [string]$created.id
+          }
+
+          function Publish-Blocker([string]$classification, [string]$detail, [string]$dispatchId, [string]$cardReceipt, [string]$cardId, [string]$idempotency, [int]$promptCount) {
+            $body = @(
+              'GBB_G13_HANDOFF_AUTOMATION_CONSUMER_BLOCKED_V1'
+              'state: BLOCKED'
+              "classification: $classification"
+              'recorded_by_role: G13_HANDOFF_CONSUMER_WORKFLOW'
+              'control_generation: 013'
+              "source_dispatch_comment: $dispatchId"
+              "source_card_receipt: $cardReceipt"
+              "card_id: $cardId"
+              "dispatch_idempotency_key: $idempotency"
+              "detail: $detail"
+              "runner_name: $env:RUNNER_NAME"
+              "runner_user: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+              "workflow_run_id: $env:GITHUB_RUN_ID"
+              "consumer_workflow_path_exact: $workflowPath"
+              "launcher_head_sha_observed: $env:GITHUB_SHA"
+              "physical_prompt_count: $promptCount"
+              'second_prompt_count: 0'
+              'blind_retry: false'
+              'handoff_dispatch_count: 1'
+              'runtime_run_count: 0'
+              'herdr_mutation_count: 0'
+              'product_mutation_count: 0'
+              'file_mutation_count: 0'
+              'readback_verified: true'
+            ) -join "`n"
+            [void](Publish $body)
+          }
+
+          function Invoke-HerdrJson([string[]]$arguments) {
+            if (-not (Test-Path -LiteralPath $herdr -PathType Leaf)) { throw 'HERDR_EXE_MISSING' }
+            $raw = (& $herdr @arguments 2>&1 | Out-String).Trim()
+            $exit = $LASTEXITCODE
+            if ($exit -ne 0) { throw "HERDR_READ_FAILED_$exit" }
+            try { return ($raw | ConvertFrom-Json) } catch { throw 'HERDR_JSON_INVALID' }
+          }
+
+          function Find-TargetAgent([object]$agents, [string]$name, [string]$pane, [string]$cwd, [string]$requiredStatus) {
+            return @($agents | Where-Object {
+              [string]$_.name -ceq $name -and
+              [string]$_.pane_id -ceq $pane -and
+              [string]$_.cwd -ceq $cwd -and
+              [string]$_.agent_status -ceq $requiredStatus
+            })
+          }
+
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          if ([int]$event.issue.number -ne $issue) { throw 'ISSUE_NUMBER_MISMATCH' }
+          if ([string]$event.comment.user.login -cne 'D22977' -or [string]$event.comment.author_association -cne 'OWNER') { throw 'DISPATCH_AUTHOR_NOT_OWNER' }
+          $dispatchId = [string]$event.comment.id
+          $dispatchBody = [string]$event.comment.body
+          Require-FirstLine $dispatchBody 'GBB_G13_HANDOFF_POINTER_DISPATCH_REQUEST_V1' 'DISPATCH'
+
+          $allowedDispatchKeys = @('card_receipt', 'card_id', 'control_generation', 'launcher_head_sha', 'worker_base_sha', 'dispatch_idempotency_key')
+          $dispatchLines = $dispatchBody -split "`r?`n"
+          for ($i = 1; $i -lt $dispatchLines.Count; $i++) {
+            $line = $dispatchLines[$i].Trim()
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            if ($line -notmatch '^(?<key>[a-z0-9_]+):\s*(?<value>.+)$') { throw 'DISPATCH_BODY_NOT_POINTER_ONLY' }
+            if ($allowedDispatchKeys -notcontains $Matches.key) { throw 'DISPATCH_BODY_CONTAINS_TASK_BODY' }
+          }
+
+          $cardReceipt = Get-Field $dispatchBody 'card_receipt'
+          $cardId = Get-Field $dispatchBody 'card_id'
+          $generation = Get-Field $dispatchBody 'control_generation'
+          $launcherHead = Get-Field $dispatchBody 'launcher_head_sha'
+          $workerBase = Get-Field $dispatchBody 'worker_base_sha'
+          $idempotency = Get-Field $dispatchBody 'dispatch_idempotency_key'
+          Require-Sha $launcherHead 'LAUNCHER_HEAD'
+          Require-Sha $workerBase 'WORKER_BASE'
+          if ($generation -cne '013') { throw 'CONTROL_GENERATION_MISMATCH' }
+          if ($idempotency -cne 'GBB-G13-HANDOFF-AUTOMATION-TEST-01-DISPATCH-01') { throw 'DISPATCH_IDEMPOTENCY_MISMATCH' }
+
+          $card = Get-Comment $cardReceipt
+          $cardBody = [string]$card.body
+          if ([string]$card.issue_url -notmatch '/issues/162$') { throw 'CARD_ISSUE_MISMATCH' }
+          Require-FirstLine $cardBody 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1' 'CARD'
+          $cardState = Get-Field $cardBody 'state'
+          $cardProtocol = Get-Field $cardBody 'card_protocol'
+          $cardIdFromCard = Get-Field $cardBody 'card_id'
+          $cardGeneration = Get-Field $cardBody 'control_generation'
+          $sourceAcceptance = Get-Field $cardBody 'source_consumer_acceptance'
+          $targetRef = Get-Field $cardBody 'target_ref_exact'
+          $targetHead = Get-Field $cardBody 'target_ref_head_exact'
+          $cardLauncher = Get-Field $cardBody 'launcher_head_sha'
+          $cardWorkerBase = Get-Field $cardBody 'worker_base_sha'
+          $executorRole = Get-Field $cardBody 'executor_role'
+          $requestedAction = Get-Field $cardBody 'requested_action'
+          $allowedActions = Get-Field $cardBody 'allowed_actions'
+          $forbiddenActions = Get-Field $cardBody 'forbidden_actions'
+          $logicalMax = Get-Field $cardBody 'logical_handoff_count_max'
+          $cardIdempotency = Get-Field $cardBody 'dispatch_idempotency_key'
+          $cardReadback = Get-Field $cardBody 'readback_verified'
+          $consumerPath = Get-Field $cardBody 'consumer_workflow_path_exact'
+          $consumerBlob = Get-Field $cardBody 'consumer_workflow_blob_exact'
+          $targetAgentName = Get-Field $cardBody 'target_agent_name'
+          $targetPane = Get-Field $cardBody 'target_pane'
+          $targetCwd = Get-Field $cardBody 'target_cwd_exact'
+          $targetStatus = Get-Field $cardBody 'target_agent_status_required'
+
+          Require-Sha $targetHead 'TARGET_HEAD'
+          Require-Sha $cardLauncher 'CARD_LAUNCHER_HEAD'
+          Require-Sha $cardWorkerBase 'CARD_WORKER_BASE'
+          if ($cardState -cne 'READY_FOR_POINTER_DISPATCH' -or $cardProtocol -cne 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1') { throw 'CARD_NOT_READY_FOR_POINTER_DISPATCH' }
+          if ($cardIdFromCard -cne $cardId -or $cardGeneration -cne '013' -or $sourceAcceptance -notmatch '^\d+$') { throw 'CARD_IDENTITY_MISMATCH' }
+          if ($targetRef -cne 'refs/heads/review-base/gbb-gh-01' -or $targetHead -cne $env:GITHUB_SHA -or $cardLauncher -cne $launcherHead -or $cardWorkerBase -cne $workerBase) { throw 'CARD_HEAD_BINDING_MISMATCH' }
+          if ($requestedAction -cne 'SYNTHETIC_POINTER_ONLY_HANDOFF_CANARY' -or $executorRole -cne 'LOCAL_EXECUTOR') { throw 'CARD_ACTION_OR_ROLE_INVALID' }
+          if ($logicalMax -ne '1' -or $cardIdempotency -cne $idempotency -or $cardReadback -cne 'true') { throw 'CARD_IDEMPOTENCY_OR_READBACK_INVALID' }
+          if ($consumerPath -cne $workflowPath -or $consumerBlob -notmatch '^[0-9a-f]{40}$') { throw 'CARD_CONSUMER_PATH_INVALID' }
+          if ($targetStatus -notin @('idle', 'done')) { throw 'CARD_TARGET_STATUS_INVALID' }
+          if ($allowedActions -notmatch 'GITHUB_READBACK_AND_RECEIPTS_ONLY' -or $forbiddenActions -notmatch 'PRODUCT_MUTATION' -or $forbiddenActions -notmatch 'SECOND_RUN' -or $forbiddenActions -notmatch 'USER_RELAY') { throw 'CARD_SCOPE_INVALID' }
+
+          $targetRefObject = Invoke-RestMethod "$api/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
+          if ([string]$targetRefObject.object.sha -cne $targetHead) { throw 'TARGET_REF_HEAD_STALE' }
+          $workflowObject = Invoke-RestMethod "$api/contents/$workflowPath?ref=$env:GITHUB_SHA" -Headers $headers -Method Get -TimeoutSec 30
+          if ([string]$workflowObject.sha -cne $consumerBlob) { throw 'CONSUMER_WORKFLOW_BLOB_MISMATCH' }
+          if ([string]$env:GITHUB_SHA -cne $launcherHead) { throw 'LAUNCHER_HEAD_MISMATCH' }
+
+          $switch = Get-Comment '5645732538'
+          Require-FirstLine ([string]$switch.body) 'CONTROL_GENERATION_SWITCH_V1' 'SWITCH'
+          if ([string]$switch.body -notmatch '(?m)^state:\s*SWITCH_COMMITTED\s*$' -or [string]$switch.body -notmatch '(?m)^new_generation:\s*013\s*$' -or [string]$switch.body -notmatch '(?m)^new_status:\s*ACTIVE\s*$') { throw 'CONTROL013_NOT_ACTIVE' }
+          $currentStart = Get-Comment '5645736288'
+          Require-FirstLine ([string]$currentStart.body) 'CURRENT_REHYDRATION_INDEX_V117' 'CURRENT_START'
+          if ([string]$currentStart.body -notmatch '(?m)^state:\s*CURRENT_START_HERE\s*$' -or [string]$currentStart.body -notmatch '(?m)^control_generation:\s*013\s*$' -or [string]$currentStart.body -notmatch '(?m)^control_status:\s*ACTIVE\s*$') { throw 'CURRENT_START_NOT_ACTIVE' }
+
+          $comments = Get-AllComments $issue
+          $newerSwitches = @($comments | Where-Object {
+            [int64]$_.id -gt 5645732538 -and
+            [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+            [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
+          })
+          if ($newerSwitches.Count -gt 0) { throw 'NEWER_CONTROL_SWITCH_EXISTS' }
+
+          $priorConsumed = @($comments | Where-Object {
+            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1\s*$' -and
+            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
+            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
+          })
+          $priorTerminal = @($comments | Where-Object {
+            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1\s*$' -and
+            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
+            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
+          })
+          if ($priorTerminal.Count -gt 0) {
+            Write-Output "NO_OP_DUPLICATE prior terminal receipt=$($priorTerminal[-1].id)"
+            exit 0
+          }
+          if ($priorConsumed.Count -gt 0) {
+            Publish-Blocker 'BLOCKED_PRIOR_CONSUMPTION_WITHOUT_TERMINAL' 'Existing executor consumption prevents a second prompt; reconcile the prior run.' $dispatchId $cardReceipt $cardId $idempotency 0
+            exit 0
+          }
+
+          $runnerUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+          $runnerSession = (Get-Process -Id $PID).SessionId
+          if ([string]$env:RUNNER_NAME -cne $expectedRunner) {
+            Publish-Blocker 'RUNNER_NAME_MISMATCH' "Expected $expectedRunner" $dispatchId $cardReceipt $cardId $idempotency 0
+            exit 0
+          }
+
+          $liveBody = @(
+            'GBB_G13_HANDOFF_AUTOMATION_LIVE_CONSUMER_OBSERVES_V1'
+            'state: LIVE_CONSUMER_OBSERVES'
+            'recorded_by_role: G13_HANDOFF_CONSUMER_WORKFLOW'
+            'control_generation: 013'
+            "source_dispatch_comment: $dispatchId"
+            "source_card_receipt: $cardReceipt"
+            "card_id: $cardId"
+            "launcher_head_sha: $launcherHead"
+            "worker_base_sha: $workerBase"
+            "dispatch_idempotency_key: $idempotency"
+            "runner_name: $env:RUNNER_NAME"
+            "runner_user: $runnerUser"
+            "runner_session_id: $runnerSession"
+            "target_agent_name: $targetAgentName"
+            "target_pane: $targetPane"
+            "target_cwd_exact: $targetCwd"
+            "workflow_run_id: $env:GITHUB_RUN_ID"
+            'physical_prompt_count: 0'
+            'readback_verified: true'
+          ) -join "`n"
+          [void](Publish $liveBody)
+
+          $before = Invoke-HerdrJson @('agent', 'list')
+          $beforeMatches = Find-TargetAgent $before.result.agents $targetAgentName $targetPane $targetCwd $targetStatus
+          if ($beforeMatches.Count -ne 1) {
+            Publish-Blocker 'VISIBLE_EXECUTOR_ABSENT_OR_AMBIGUOUS' "target_count=$($beforeMatches.Count)" $dispatchId $cardReceipt $cardId $idempotency 0
+            exit 0
+          }
+          $selected = $beforeMatches[0]
+          $targetSession = [string]$selected.agent_session.value
+          if ([string]::IsNullOrWhiteSpace($targetSession)) {
+            Publish-Blocker 'EXECUTOR_SESSION_MISSING' 'Selected executor has no session identity.' $dispatchId $cardReceipt $cardId $idempotency 0
+            exit 0
+          }
+          $after = Invoke-HerdrJson @('agent', 'list')
+          $afterMatches = @($after.result.agents | Where-Object {
+            [string]$_.name -ceq $targetAgentName -and
+            [string]$_.pane_id -ceq $targetPane -and
+            [string]$_.cwd -ceq $targetCwd -and
+            [string]$_.agent_session.value -ceq $targetSession -and
+            [string]$_.agent_status -ceq $targetStatus
+          })
+          if ($afterMatches.Count -ne 1) {
+            Publish-Blocker 'EXECUTOR_BINDING_CHANGED' 'Two fresh inventories did not identify the same unique executor.' $dispatchId $cardReceipt $cardId $idempotency 0
+            exit 0
+          }
+
+          $pointer = @(
+            'GBB_G13_HANDOFF_POINTER_DISPATCH_REQUEST_V1'
+            "card_receipt: $cardReceipt"
+            "card_id: $cardId"
+            'control_generation: 013'
+            "launcher_head_sha: $launcherHead"
+            "worker_base_sha: $workerBase"
+            "dispatch_idempotency_key: $idempotency"
+          ) -join "`n"
+          $promptOutput = (& $herdr agent prompt $targetAgentName $pointer 2>&1 | Out-String).Trim()
+          $promptExit = $LASTEXITCODE
+          if ($promptExit -ne 0) {
+            Publish-Blocker 'HERDR_POINTER_SEND_FAILED' 'The single pointer send failed; no retry is authorized.' $dispatchId $cardReceipt $cardId $idempotency 1
+            exit 0
+          }
+
+          $consumed = $null
+          for ($attempt = 0; $attempt -lt 40; $attempt++) {
+            Start-Sleep -Seconds 3
+            $rows = Get-AllComments $issue
+            $matches = @($rows | Where-Object {
+              [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1\s*$' -and
+              [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
+              [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
+              [string]$_.body -match '(?m)^executor_role:\s*LOCAL_EXECUTOR\s*$' -and
+              [string]$_.body -match '(?m)^readback_verified:\s*true\s*$'
+            })
+            if ($matches.Count -gt 1) {
+              Publish-Blocker 'CONSUMED_STARTED_AMBIGUOUS' 'More than one executor consumption receipt was observed; no semantic decision is made.' $dispatchId $cardReceipt $cardId $idempotency 1
+              exit 0
+            }
+            if ($matches.Count -eq 1) { $consumed = $matches[0]; break }
+          }
+          if ($null -eq $consumed) {
+            Publish-Blocker 'UNCERTAIN_SEND_CONSUMED_STARTED_NOT_OBSERVED' 'The single pointer send may have been delivered; no blind retry is allowed.' $dispatchId $cardReceipt $cardId $idempotency 1
+            exit 0
+          }
+
+          $terminal = $null
+          for ($attempt = 0; $attempt -lt 40; $attempt++) {
+            Start-Sleep -Seconds 3
+            $rows = Get-AllComments $issue
+            $matches = @($rows | Where-Object {
+              [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1\s*$' -and
+              [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
+              [string]$_.body -match "(?m)^source_consumed_started_receipt:\s*$([regex]::Escape([string]$consumed.id))\s*$" -and
+              [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
+              [string]$_.body -match '(?m)^decision:\s*(PASS|BLOCKED|CONTROL_REQUIRED)\s*$' -and
+              [string]$_.body -match '(?m)^readback_verified:\s*true\s*$'
+            })
+            if ($matches.Count -gt 1) {
+              Publish-Blocker 'HANDOFF_TEST_RESULT_AMBIGUOUS' 'More than one terminal result was observed; no acceptance is inferred.' $dispatchId $cardReceipt $cardId $idempotency 1
+              exit 0
+            }
+            if ($matches.Count -eq 1) { $terminal = $matches[0]; break }
+          }
+          if ($null -eq $terminal) {
+            Publish-Blocker 'HANDOFF_TEST_RESULT_NOT_OBSERVED' 'Consumption was observed but the executor terminal was not observed; no completion is inferred.' $dispatchId $cardReceipt $cardId $idempotency 1
+            exit 0
+          }
+          Write-Output "HANDOFF_TEST_TERMINAL_OBSERVED receipt=$($terminal.id) decision=$(([regex]::Match([string]$terminal.body,'(?m)^decision:\s*(PASS|BLOCKED|CONTROL_REQUIRED)\s*$')).Groups[1].Value)"
