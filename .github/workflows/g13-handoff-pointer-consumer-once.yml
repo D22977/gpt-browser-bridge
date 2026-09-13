@@ -9,7 +9,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: g13-handoff-pointer-consumer-${{ github.event.issue.number }}
+  group: g13-handoff-pointer-${{ github.event.issue.number }}-${{ github.event.comment.id }}
   cancel-in-progress: false
 
 jobs:
@@ -59,7 +59,7 @@ jobs:
           }
 
           function Get-Field([string]$body, [string]$name) {
-            $pattern = '(?m)^' + [regex]::Escape($name) + ':\s*(\S.*)\s*$'
+            $pattern = '(?m)^' + [regex]::Escape($name) + ':\s+(\S[^\r\n]*)$'
             $matches = [regex]::Matches($body, $pattern)
             if ($matches.Count -eq 0) { throw "MISSING_FIELD_$name" }
             if ($matches.Count -gt 1) { throw "DUPLICATE_FIELD_$name" }
@@ -67,8 +67,18 @@ jobs:
           }
 
           function Require-FirstLine([string]$body, [string]$protocol, [string]$label) {
-            $first = (($body -split "`r?`n")[0]).Trim()
-            if ($first -cne $protocol) { throw "WRONG_$label_PROTOCOL" }
+            $nlIdx = $body.IndexOfAny(@([char]13, [char]10))
+            $first = if ($nlIdx -ge 0) { $body.Substring(0, $nlIdx) } else { $body }
+            if ($first.Length -ne $protocol.Length) { throw "WRONG_${label}_PROTOCOL_LENGTH" }
+            for ($ci = 0; $ci -lt $protocol.Length; $ci++) {
+              if ([char]$first[$ci] -ne [char]$protocol[$ci]) { throw "WRONG_${label}_PROTOCOL_ORDINAL_$ci" }
+            }
+          }
+
+          function Require-Exact-FirstLine([string]$body, [string]$protocol, [string]$label) {
+            Require-FirstLine $body $protocol $label
+            $firstChar = [int][char]$body[0]
+            if ($firstChar -eq 0xFEFF) { throw "BOM_DETECTED_IN_${label}" }
           }
 
           function Require-Sha([string]$value, [string]$label) {
@@ -139,7 +149,7 @@ jobs:
           if ([string]$event.comment.user.login -cne 'D22977' -or [string]$event.comment.author_association -cne 'OWNER') { throw 'DISPATCH_AUTHOR_NOT_OWNER' }
           $dispatchId = [string]$event.comment.id
           $dispatchBody = [string]$event.comment.body
-          Require-FirstLine $dispatchBody 'GBB_G13_HANDOFF_POINTER_DISPATCH_REQUEST_V1' 'DISPATCH'
+          Require-Exact-FirstLine $dispatchBody 'GBB_G13_HANDOFF_POINTER_DISPATCH_REQUEST_V1' 'DISPATCH'
 
           $allowedDispatchKeys = @('card_receipt', 'card_id', 'control_generation', 'launcher_head_sha', 'worker_base_sha', 'dispatch_idempotency_key')
           $dispatchLines = $dispatchBody -split "`r?`n"
@@ -163,12 +173,13 @@ jobs:
           Require-Sha $workerBase 'WORKER_BASE'
           if ($generation -cne '013') { throw 'CONTROL_GENERATION_MISMATCH' }
           if ($idempotency -cne 'GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01-DISPATCH-01') { throw 'DISPATCH_IDEMPOTENCY_MISMATCH' }
+          if ($cardId -cne 'GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01') { throw 'DISPATCH_CARD_ID_NOT_EXACT_ADVERSARIAL_TEST_01' }
 
           $card = Get-Comment $cardReceipt
           $cardBody = [string]$card.body
           if ([string]$card.issue_url -notmatch '/issues/162$') { throw 'CARD_ISSUE_MISMATCH' }
           if ([string]$card.user.login -cne 'D22977' -or [string]$card.author_association -cne 'OWNER') { throw 'CARD_AUTHOR_NOT_OWNER' }
-          Require-FirstLine $cardBody 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1' 'CARD'
+          Require-Exact-FirstLine $cardBody 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1' 'CARD'
           $allowedCardKeys = @('state','card_protocol','card_id','control_generation','source_consumer_acceptance','target_ref_exact','target_ref_head_exact','launcher_head_sha','worker_base_sha','executor_role','requested_action','allowed_actions','forbidden_actions','logical_handoff_count_max','dispatch_idempotency_key','readback_verified','consumer_workflow_path_exact','consumer_workflow_blob_exact','target_agent_name','target_pane','target_cwd_exact','target_agent_status_required')
           $cardLines = $cardBody -split "`r?`n"
           for ($ci = 1; $ci -lt $cardLines.Count; $ci++) {
@@ -205,7 +216,7 @@ jobs:
           Require-Sha $cardWorkerBase 'CARD_WORKER_BASE'
           if ($cardState -cne 'READY_FOR_POINTER_DISPATCH') { throw 'CARD_NOT_READY_FOR_POINTER_DISPATCH' }
           if ($cardProtocol -cne 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1') { throw 'CARD_PROTOCOL_MISMATCH' }
-          if ($cardIdFromCard -cne $cardId) { throw 'CARD_ID_MISMATCH' }
+          if ($cardIdFromCard -cne 'GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01') { throw 'CARD_ID_NOT_EXACT_ADVERSARIAL_TEST_01' }
           if ($cardGeneration -cne '013') { throw 'CARD_GENERATION_MISMATCH' }
           if ($sourceAcceptance -notmatch '^\d+$') { throw 'CARD_ACCEPTANCE_INVALID' }
           if ($targetRef -cne 'refs/heads/review-base/gbb-gh-01') { throw 'CARD_TARGET_REF_MISMATCH' }
@@ -232,11 +243,22 @@ jobs:
           if ([string]$acceptanceComment.issue_url -notmatch '/issues/162$') { throw 'SOURCE_ACCEPTANCE_ISSUE_MISMATCH' }
           if ([string]$acceptanceComment.user.login -cne 'D22977') { throw 'SOURCE_ACCEPTANCE_AUTHOR_INVALID' }
           if ([string]$acceptanceComment.author_association -cne 'OWNER') { throw 'SOURCE_ACCEPTANCE_ASSOCIATION_INVALID' }
-          $acceptanceFirstLine = (($acceptanceBody -split "`r?`n")[0]).Trim()
-          if ($acceptanceFirstLine -notmatch '^[A-Z][A-Z0-9_]+_V\d+$') { throw 'SOURCE_ACCEPTANCE_PROTOCOL_INVALID' }
-          if ($acceptanceBody -notmatch '(?m)^state:\s*(PASS|ACCEPTED)\s*$') { throw 'SOURCE_ACCEPTANCE_STATE_INVALID' }
-          if ($acceptanceBody -notmatch "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$") { throw 'SOURCE_ACCEPTANCE_CARD_ID_MISMATCH' }
+          $acceptanceFirstLine = (($acceptanceBody -split "`r?`n")[0])
+          $acceptanceFirstChar = [int][char]$acceptanceFirstLine[0]
+          if ($acceptanceFirstChar -eq 0xFEFF) { throw 'BOM_DETECTED_IN_ACCEPTANCE' }
+          if ($acceptanceFirstLine -cne 'GBB_G13_HANDOFF_AUTOMATION_TEST_ACCEPTANCE_V1') { throw 'SOURCE_ACCEPTANCE_PROTOCOL_NOT_EXACT' }
+          if ($acceptanceBody -notmatch '(?m)^state:\s*PASS\s*$') { throw 'SOURCE_ACCEPTANCE_STATE_INVALID' }
+          if ($acceptanceBody -notmatch '(?m)^card_id:\s*GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01\s*$') { throw 'SOURCE_ACCEPTANCE_CARD_ID_MISMATCH' }
           if ($acceptanceBody -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'SOURCE_ACCEPTANCE_GENERATION_MISMATCH' }
+          if ($acceptanceBody -notmatch '(?m)^target_ref_exact:\s*refs/heads/review-base/gbb-gh-01\s*$') { throw 'SOURCE_ACCEPTANCE_TARGET_REF_MISMATCH' }
+          if ($acceptanceBody -notmatch '(?m)^target_ref_head_exact:\s*[0-9a-f]{40}\s*$') { throw 'SOURCE_ACCEPTANCE_TARGET_HEAD_MISMATCH' }
+          if ($acceptanceBody -notmatch '(?m)^target_workflow_blob:\s*[0-9a-f]{40}\s*$') { throw 'SOURCE_ACCEPTANCE_WORKFLOW_BLOB_MISMATCH' }
+          if ($acceptanceBody -notmatch '(?m)^executor_role:\s*LOCAL_EXECUTOR\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_ROLE_MISMATCH' }
+          if ($acceptanceBody -notmatch '(?m)^card_id:\s*GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01\s*$') { throw 'SOURCE_ACCEPTANCE_CARD_ID_MISSING' }
+          $hasRejected = $acceptanceBody -match '(?m)^state:\s*REJECTED\s*$'
+          if ($hasRejected) { throw 'SOURCE_ACCEPTANCE_CONFLICTING_PASS_AND_REJECTED' }
+          $acceptanceStateLines = @($acceptanceBody -split "`r?`n" | Where-Object { $_ -match '^state:\s*' })
+          if ($acceptanceStateLines.Count -ne 1) { throw 'SOURCE_ACCEPTANCE_DUPLICATE_STATE' }
 
           $targetRefObject = Invoke-RestMethod "$api/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
           if ([string]$targetRefObject.object.sha -cne $targetHead) { throw 'TARGET_REF_HEAD_STALE' }
@@ -256,7 +278,7 @@ jobs:
           })
           if ($allSwitches.Count -eq 0) { throw 'NO_COMMITTED_SWITCH_FOUND' }
           $switch = ($allSwitches | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
-          Require-FirstLine ([string]$switch.body) 'CONTROL_GENERATION_SWITCH_V1' 'SWITCH'
+          Require-Exact-FirstLine ([string]$switch.body) 'CONTROL_GENERATION_SWITCH_V1' 'SWITCH'
           if ([string]$switch.body -notmatch '(?m)^new_generation:\s*013\s*$') { throw 'SWITCH_NOT_GEN013' }
           if ([string]$switch.body -notmatch '(?m)^new_status:\s*ACTIVE\s*$') { throw 'SWITCH_NOT_ACTIVE' }
           $newerSwitchesAfterLatest = @($issue88 | Where-Object {
@@ -278,10 +300,27 @@ jobs:
           })
           if ($allCurrentStarts.Count -eq 0) { throw 'NO_CURRENT_START_FOUND' }
           $currentStart = ($allCurrentStarts | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
-          $csFirstLine = (($currentStart.body -split "`r?`n")[0]).Trim()
+          $csNlIdx = [string]$currentStart.body.IndexOfAny(@([char]13, [char]10))
+          $csFirstLine = if ($csNlIdx -ge 0) { [string]$currentStart.body.Substring(0, $csNlIdx) } else { [string]$currentStart.body }
+          if ($csFirstLine.Length -lt 32) { throw 'CURRENT_START_PROTOCOL_TOO_SHORT' }
+          for ($ci = 0; $ci -lt $csFirstLine.Length; $ci++) {
+            if ([char]$csFirstLine[$ci] -ne [char]'C' -and $ci -eq 0) { throw 'CURRENT_START_BOM_OR_GARBAGE' }
+          }
+          $csFirstChar = [int][char]$csFirstLine[0]
+          if ($csFirstChar -eq 0xFEFF) { throw 'BOM_DETECTED_IN_CURRENT_START' }
+          if ($csFirstLine -cne [string]$csFirstLine.Trim()) { throw 'CURRENT_START_PROTOCOL_LEADING_WHITESPACE' }
           if ($csFirstLine -notmatch '^CURRENT_REHYDRATION_INDEX_V\d+$') { throw 'WRONG_CURRENT_START_PROTOCOL' }
           $csVersion = [int]($csFirstLine -replace '^CURRENT_REHYDRATION_INDEX_V(\d+)$','$1')
           if ($csVersion -lt 1) { throw 'CURRENT_START_VERSION_INVALID' }
+          $csBodyLines = [string]$currentStart.body -split "`r?`n"
+          $csSeenKeys = @{}
+          for ($csLi = 1; $csLi -lt $csBodyLines.Count; $csLi++) {
+            $csLine = $csBodyLines[$csLi].Trim()
+            if ([string]::IsNullOrWhiteSpace($csLine)) { continue }
+            if ($csLine -notmatch '^(?<ck>[a-z0-9_]+):\s*(?<cv>.+)$') { throw "CURRENT_START_BODY_NOT_POINTER_ONLY_LINE_$csLi" }
+            if ($csSeenKeys.ContainsKey($Matches.ck)) { throw "CURRENT_START_DUPLICATE_FIELD_$($Matches.ck)" }
+            $csSeenKeys[$Matches.ck] = $true
+          }
           if ([string]$currentStart.body -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'CURRENT_START_GEN_MISMATCH' }
           if ([string]$currentStart.body -notmatch '(?m)^control_status:\s*ACTIVE\s*$') { throw 'CURRENT_START_NOT_ACTIVE' }
           $newerCurrentStartsAfterLatest = @($issue43 | Where-Object {
@@ -296,7 +335,7 @@ jobs:
           $issue162Eof = $issue162Result.eof
           if (-not $issue162Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_162' }
 
-          $logicalKey = "${cardReceipt}:${idempotency}:${cardId}:${generation}:${launcherHead}:${workerBase}"
+          $logicalKey = "${cardReceipt}:${idempotency}:${cardId}:${generation}:${launcherHead}:${workerBase}:${workflowPath}:${targetRef}"
           $priorLiveObs = @($comments | Where-Object {
             [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_LIVE_CONSUMER_OBSERVES_V1\s*$' -and
             [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
@@ -379,11 +418,12 @@ jobs:
           [void](Publish $liveBody)
 
           $before = Invoke-HerdrJson @('agent', 'list')
+          $workerBranchName = 'worker/g13-handoff-pointer-consumer-repair-01'
           $beforeMatches = @($before.result.agents | Where-Object {
             [string]$_.name -ceq $targetAgentName -and
             [string]$_.pane_id -ceq $targetPane -and
             [string]$_.cwd -ceq $targetCwd -and
-            [string]$_.branch -ceq $workerBase -and
+            [string]$_.branch -ceq $workerBranchName -and
             [string]$_.head_sha -ceq $workerBase -and
             [string]$_.agent_status -ceq $targetStatus
           })
@@ -397,8 +437,8 @@ jobs:
             Publish-Blocker 'EXECUTOR_SESSION_MISSING' 'Selected executor has no session identity.' $dispatchId $cardReceipt $cardId $idempotency 0
             exit 0
           }
-          if ([string]$selected.branch -cne $targetBranch) {
-            Publish-Blocker 'EXECUTOR_BRANCH_MISMATCH' "expected=$targetBranch actual=$([string]$selected.branch)" $dispatchId $cardReceipt $cardId $idempotency 0
+          if ([string]$selected.branch -cne $workerBranchName) {
+            Publish-Blocker 'EXECUTOR_BRANCH_MISMATCH' "expected=$workerBranchName actual=$([string]$selected.branch)" $dispatchId $cardReceipt $cardId $idempotency 0
             exit 0
           }
           if ([string]$selected.head_sha -cne $workerBase) {
@@ -410,7 +450,7 @@ jobs:
             [string]$_.name -ceq $targetAgentName -and
             [string]$_.pane_id -ceq $targetPane -and
             [string]$_.cwd -ceq $targetCwd -and
-            [string]$_.branch -ceq $workerBase -and
+            [string]$_.branch -ceq $workerBranchName -and
             [string]$_.head_sha -ceq $workerBase -and
             [string]$_.agent_session.value -ceq $targetSession -and
             [string]$_.agent_status -ceq $targetStatus
@@ -429,7 +469,7 @@ jobs:
           })
           if ($preSendAllSwitches.Count -eq 0) { throw 'PRE_SEND_NO_COMMITTED_SWITCH' }
           $latestPreSendSwitch = ($preSendAllSwitches | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
-          Require-FirstLine ([string]$latestPreSendSwitch.body) 'CONTROL_GENERATION_SWITCH_V1' 'PRE_SEND_SWITCH'
+          Require-Exact-FirstLine ([string]$latestPreSendSwitch.body) 'CONTROL_GENERATION_SWITCH_V1' 'PRE_SEND_SWITCH'
           if ([string]$latestPreSendSwitch.body -notmatch '(?m)^new_generation:\s*013\s*$') { throw 'PRE_SEND_LATEST_SWITCH_NOT_GEN013' }
           if ([string]$latestPreSendSwitch.body -notmatch '(?m)^new_status:\s*ACTIVE\s*$') { throw 'PRE_SEND_LATEST_SWITCH_NOT_ACTIVE' }
 
@@ -442,7 +482,11 @@ jobs:
           })
           if ($preSendAllCS.Count -eq 0) { throw 'PRE_SEND_NO_CURRENT_START' }
           $latestPreSendCS = ($preSendAllCS | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
-          $preSendCSFirstLine = (([string]$latestPreSendCS.body -split "`r?`n")[0]).Trim()
+          $preSendCSNlIdx = [string]$latestPreSendCS.body.IndexOfAny(@([char]13, [char]10))
+          $preSendCSFirstLine = if ($preSendCSNlIdx -ge 0) { [string]$latestPreSendCS.body.Substring(0, $preSendCSNlIdx) } else { [string]$latestPreSendCS.body }
+          $preSendCSFirstChar = [int][char]$preSendCSFirstLine[0]
+          if ($preSendCSFirstChar -eq 0xFEFF) { throw 'BOM_DETECTED_IN_PRE_SEND_CS' }
+          if ($preSendCSFirstLine -cne [string]$preSendCSFirstLine.Trim()) { throw 'PRE_SEND_CS_PROTOCOL_LEADING_WHITESPACE' }
           if ($preSendCSFirstLine -notmatch '^CURRENT_REHYDRATION_INDEX_V\d+$') { throw 'PRE_SEND_WRONG_CS_PROTOCOL' }
           if ([string]$latestPreSendCS.body -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'PRE_SEND_LATEST_CS_NOT_GEN013' }
           if ([string]$latestPreSendCS.body -notmatch '(?m)^control_status:\s*ACTIVE\s*$') { throw 'PRE_SEND_LATEST_CS_NOT_ACTIVE' }
@@ -451,7 +495,7 @@ jobs:
           $preSendCardBody = [string]$preSendCard.body
           if ([string]$preSendCard.user.login -cne 'D22977') { throw 'PRE_SEND_CARD_AUTHOR_INVALID' }
           if ([string]$preSendCard.author_association -cne 'OWNER') { throw 'PRE_SEND_CARD_ASSOCIATION_INVALID' }
-          Require-FirstLine $preSendCardBody 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1' 'PRE_SEND_CARD'
+          Require-Exact-FirstLine $preSendCardBody 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1' 'PRE_SEND_CARD'
           if ($preSendCardBody -notmatch '(?m)^state:\s*READY_FOR_POINTER_DISPATCH\s*$') { throw 'PRE_SEND_CARD_NO_LONGER_READY' }
           if ((Get-Field $preSendCardBody 'card_id') -cne $cardId) { throw 'PRE_SEND_CARD_ID_CHANGED' }
           if ((Get-Field $preSendCardBody 'control_generation') -cne '013') { throw 'PRE_SEND_CARD_GEN_CHANGED' }
@@ -460,7 +504,7 @@ jobs:
           $preSendAccBody = [string]$preSendAcceptance.body
           if ([string]$preSendAcceptance.user.login -cne 'D22977') { throw 'PRE_SEND_ACCEPTANCE_AUTHOR_INVALID' }
           if ([string]$preSendAcceptance.author_association -cne 'OWNER') { throw 'PRE_SEND_ACCEPTANCE_ASSOCIATION_INVALID' }
-          if ($preSendAccBody -notmatch '(?m)^state:\s*(PASS|ACCEPTED)\s*$') { throw 'PRE_SEND_ACCEPTANCE_STATE_INVALID' }
+          if ($preSendAccBody -notmatch '(?m)^state:\s*PASS\s*$') { throw 'PRE_SEND_ACCEPTANCE_STATE_INVALID' }
           if ($preSendAccBody -notmatch "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$") { throw 'PRE_SEND_ACCEPTANCE_CARD_ID_MISMATCH' }
 
           $preSendRef = Invoke-RestMethod "$api/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
@@ -538,7 +582,7 @@ jobs:
 
           $consumedReadback = Get-Comment ([string]$consumed.id)
           $consumedReadbackBody = [string]$consumedReadback.body
-          Require-FirstLine $consumedReadbackBody 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1' 'CONSUMED_STARTED_READBACK'
+          Require-Exact-FirstLine $consumedReadbackBody 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1' 'CONSUMED_STARTED_READBACK'
           if ([string]$consumedReadback.user.login -cne 'D22977') { throw 'CONSUMED_STARTED_AUTHOR_INVALID' }
           if ([string]$consumedReadback.author_association -cne 'OWNER') { throw 'CONSUMED_STARTED_ASSOCIATION_INVALID' }
           if ((Get-Field $consumedReadbackBody 'source_card_receipt') -cne $cardReceipt) { throw 'CONSUMED_STARTED_READBACK_CARD_RECEIPT_MISMATCH' }
@@ -547,7 +591,7 @@ jobs:
           $admittedSession = $targetSession
           $admittedControlGeneration = $generation
           function Validate-ConsumedStarted([string]$body, [string]$expectedExecutor, [string]$expectedSession, [string]$expectedGeneration) {
-            Require-FirstLine $body 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1' 'CONSUMED_STARTED'
+            Require-Exact-FirstLine $body 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1' 'CONSUMED_STARTED'
             if ((Get-Field $body 'source_card_receipt') -cne $cardReceipt) { throw 'CONSUMED_STARTED_CARD_RECEIPT_MISMATCH' }
             if ((Get-Field $body 'dispatch_idempotency_key') -cne $idempotency) { throw 'CONSUMED_STARTED_IDEMPOTENCY_MISMATCH' }
             if ((Get-Field $body 'card_id') -cne $cardId) { throw 'CONSUMED_STARTED_CARD_ID_MISMATCH' }
@@ -584,7 +628,7 @@ jobs:
 
           $terminalReadback = Get-Comment ([string]$terminal.id)
           $terminalReadbackBody = [string]$terminalReadback.body
-          Require-FirstLine $terminalReadbackBody 'GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1' 'TERMINAL_READBACK'
+          Require-Exact-FirstLine $terminalReadbackBody 'GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1' 'TERMINAL_READBACK'
           if ([string]$terminalReadback.user.login -cne 'D22977') { throw 'TERMINAL_AUTHOR_INVALID' }
           if ([string]$terminalReadback.author_association -cne 'OWNER') { throw 'TERMINAL_ASSOCIATION_INVALID' }
           if ((Get-Field $terminalReadbackBody 'source_card_receipt') -cne $cardReceipt) { throw 'TERMINAL_READBACK_CARD_RECEIPT_MISMATCH' }
