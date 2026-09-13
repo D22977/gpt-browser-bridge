@@ -9,7 +9,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: g13-handoff-pointer-consumer-${{ github.event.comment.id }}
+  group: g13-handoff-pointer-consumer-${{ github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
@@ -59,7 +59,7 @@ jobs:
           }
 
           function Get-Field([string]$body, [string]$name) {
-            $pattern = '(?m)^' + [regex]::Escape($name) + ':\s*(.+)\s*$'
+            $pattern = '(?m)^' + [regex]::Escape($name) + ':\s*(\S.*)\s*$'
             $matches = [regex]::Matches($body, $pattern)
             if ($matches.Count -eq 0) { throw "MISSING_FIELD_$name" }
             if ($matches.Count -gt 1) { throw "DUPLICATE_FIELD_$name" }
@@ -231,8 +231,12 @@ jobs:
           $acceptanceBody = [string]$acceptanceComment.body
           if ([string]$acceptanceComment.issue_url -notmatch '/issues/162$') { throw 'SOURCE_ACCEPTANCE_ISSUE_MISMATCH' }
           if ([string]$acceptanceComment.user.login -cne 'D22977') { throw 'SOURCE_ACCEPTANCE_AUTHOR_INVALID' }
+          if ([string]$acceptanceComment.author_association -cne 'OWNER') { throw 'SOURCE_ACCEPTANCE_ASSOCIATION_INVALID' }
+          $acceptanceFirstLine = (($acceptanceBody -split "`r?`n")[0]).Trim()
+          if ($acceptanceFirstLine -notmatch '^[A-Z][A-Z0-9_]+_V\d+$') { throw 'SOURCE_ACCEPTANCE_PROTOCOL_INVALID' }
           if ($acceptanceBody -notmatch '(?m)^state:\s*(PASS|ACCEPTED)\s*$') { throw 'SOURCE_ACCEPTANCE_STATE_INVALID' }
           if ($acceptanceBody -notmatch "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$") { throw 'SOURCE_ACCEPTANCE_CARD_ID_MISMATCH' }
+          if ($acceptanceBody -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'SOURCE_ACCEPTANCE_GENERATION_MISMATCH' }
 
           $targetRefObject = Invoke-RestMethod "$api/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
           if ([string]$targetRefObject.object.sha -cne $targetHead) { throw 'TARGET_REF_HEAD_STALE' }
@@ -245,6 +249,8 @@ jobs:
           $issue88Eof = $issue88Result.eof
           if (-not $issue88Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_88' }
           $allSwitches = @($issue88 | Where-Object {
+            [string]$_.user.login -ceq 'D22977' -and
+            [string]$_.author_association -ceq 'OWNER' -and
             [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
             [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
           })
@@ -265,6 +271,8 @@ jobs:
           $issue43Eof = $issue43Result.eof
           if (-not $issue43Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_43' }
           $allCurrentStarts = @($issue43 | Where-Object {
+            [string]$_.user.login -ceq 'D22977' -and
+            [string]$_.author_association -ceq 'OWNER' -and
             [string]$_.body -match '(?m)^CURRENT_REHYDRATION_INDEX_V\d+\s*$' -and
             [string]$_.body -match '(?m)^state:\s*CURRENT_START_HERE\s*$'
           })
@@ -371,10 +379,14 @@ jobs:
           [void](Publish $liveBody)
 
           $before = Invoke-HerdrJson @('agent', 'list')
-          $targetKind = 'coordinator'
-          $targetWorkspace = 'herdr_workspace_w5'
-          $targetBranch = 'worker/g13-handoff-pointer-consumer-repair-01'
-          $beforeMatches = Find-TargetAgent $before.result.agents $targetAgentName $targetKind $targetPane $targetCwd $targetWorkspace $targetBranch $workerBase $targetStatus
+          $beforeMatches = @($before.result.agents | Where-Object {
+            [string]$_.name -ceq $targetAgentName -and
+            [string]$_.pane_id -ceq $targetPane -and
+            [string]$_.cwd -ceq $targetCwd -and
+            [string]$_.branch -ceq $workerBase -and
+            [string]$_.head_sha -ceq $workerBase -and
+            [string]$_.agent_status -ceq $targetStatus
+          })
           if ($beforeMatches.Count -ne 1) {
             Publish-Blocker 'VISIBLE_EXECUTOR_ABSENT_OR_AMBIGUOUS' "target_count=$($beforeMatches.Count)" $dispatchId $cardReceipt $cardId $idempotency 0
             exit 0
@@ -396,11 +408,9 @@ jobs:
           $after = Invoke-HerdrJson @('agent', 'list')
           $afterMatches = @($after.result.agents | Where-Object {
             [string]$_.name -ceq $targetAgentName -and
-            [string]$_.agent_kind -ceq $targetKind -and
             [string]$_.pane_id -ceq $targetPane -and
             [string]$_.cwd -ceq $targetCwd -and
-            [string]$_.workspace -ceq $targetWorkspace -and
-            [string]$_.branch -ceq $targetBranch -and
+            [string]$_.branch -ceq $workerBase -and
             [string]$_.head_sha -ceq $workerBase -and
             [string]$_.agent_session.value -ceq $targetSession -and
             [string]$_.agent_status -ceq $targetStatus
@@ -412,28 +422,81 @@ jobs:
 
           $preSendIssue88 = Get-AllComments 88
           $preSendAllSwitches = @($preSendIssue88.comments | Where-Object {
+            [string]$_.user.login -ceq 'D22977' -and
+            [string]$_.author_association -ceq 'OWNER' -and
             [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
             [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
           })
           if ($preSendAllSwitches.Count -eq 0) { throw 'PRE_SEND_NO_COMMITTED_SWITCH' }
           $latestPreSendSwitch = ($preSendAllSwitches | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
+          Require-FirstLine ([string]$latestPreSendSwitch.body) 'CONTROL_GENERATION_SWITCH_V1' 'PRE_SEND_SWITCH'
           if ([string]$latestPreSendSwitch.body -notmatch '(?m)^new_generation:\s*013\s*$') { throw 'PRE_SEND_LATEST_SWITCH_NOT_GEN013' }
           if ([string]$latestPreSendSwitch.body -notmatch '(?m)^new_status:\s*ACTIVE\s*$') { throw 'PRE_SEND_LATEST_SWITCH_NOT_ACTIVE' }
 
           $preSendIssue43 = Get-AllComments 43
           $preSendAllCS = @($preSendIssue43.comments | Where-Object {
+            [string]$_.user.login -ceq 'D22977' -and
+            [string]$_.author_association -ceq 'OWNER' -and
             [string]$_.body -match '(?m)^CURRENT_REHYDRATION_INDEX_V\d+\s*$' -and
             [string]$_.body -match '(?m)^state:\s*CURRENT_START_HERE\s*$'
           })
           if ($preSendAllCS.Count -eq 0) { throw 'PRE_SEND_NO_CURRENT_START' }
           $latestPreSendCS = ($preSendAllCS | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
+          $preSendCSFirstLine = (([string]$latestPreSendCS.body -split "`r?`n")[0]).Trim()
+          if ($preSendCSFirstLine -notmatch '^CURRENT_REHYDRATION_INDEX_V\d+$') { throw 'PRE_SEND_WRONG_CS_PROTOCOL' }
           if ([string]$latestPreSendCS.body -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'PRE_SEND_LATEST_CS_NOT_GEN013' }
           if ([string]$latestPreSendCS.body -notmatch '(?m)^control_status:\s*ACTIVE\s*$') { throw 'PRE_SEND_LATEST_CS_NOT_ACTIVE' }
 
           $preSendCard = Get-Comment $cardReceipt
-          if ([string]$preSendCard.body -notmatch '(?m)^state:\s*READY_FOR_POINTER_DISPATCH\s*$') { throw 'PRE_SEND_CARD_NO_LONGER_READY' }
+          $preSendCardBody = [string]$preSendCard.body
+          if ([string]$preSendCard.user.login -cne 'D22977') { throw 'PRE_SEND_CARD_AUTHOR_INVALID' }
+          if ([string]$preSendCard.author_association -cne 'OWNER') { throw 'PRE_SEND_CARD_ASSOCIATION_INVALID' }
+          Require-FirstLine $preSendCardBody 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1' 'PRE_SEND_CARD'
+          if ($preSendCardBody -notmatch '(?m)^state:\s*READY_FOR_POINTER_DISPATCH\s*$') { throw 'PRE_SEND_CARD_NO_LONGER_READY' }
+          if ((Get-Field $preSendCardBody 'card_id') -cne $cardId) { throw 'PRE_SEND_CARD_ID_CHANGED' }
+          if ((Get-Field $preSendCardBody 'control_generation') -cne '013') { throw 'PRE_SEND_CARD_GEN_CHANGED' }
+
+          $preSendAcceptance = Get-Comment $sourceAcceptance
+          $preSendAccBody = [string]$preSendAcceptance.body
+          if ([string]$preSendAcceptance.user.login -cne 'D22977') { throw 'PRE_SEND_ACCEPTANCE_AUTHOR_INVALID' }
+          if ([string]$preSendAcceptance.author_association -cne 'OWNER') { throw 'PRE_SEND_ACCEPTANCE_ASSOCIATION_INVALID' }
+          if ($preSendAccBody -notmatch '(?m)^state:\s*(PASS|ACCEPTED)\s*$') { throw 'PRE_SEND_ACCEPTANCE_STATE_INVALID' }
+          if ($preSendAccBody -notmatch "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$") { throw 'PRE_SEND_ACCEPTANCE_CARD_ID_MISMATCH' }
+
           $preSendRef = Invoke-RestMethod "$api/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
           if ([string]$preSendRef.object.sha -cne $targetHead) { throw 'PRE_SEND_TARGET_REF_HEAD_STALE' }
+          $preSendWorkflow = Invoke-RestMethod "$api/contents/${workflowPath}?ref=$env:GITHUB_SHA" -Headers $headers -Method Get -TimeoutSec 30
+          if ([string]$preSendWorkflow.sha -cne $consumerBlob) { throw 'PRE_SEND_WORKFLOW_BLOB_MISMATCH' }
+
+          $preSendIssue162 = Get-AllComments $issue
+          $preSendComments = $preSendIssue162.comments
+          $preSendTerminal = @($preSendComments | Where-Object {
+            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1\s*$' -and
+            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
+            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
+          })
+          if ($preSendTerminal.Count -gt 0) {
+            Write-Output "NO_OP_PRE_SEND_TERMINAL_EXISTS receipt=$($preSendTerminal[-1].id)"
+            exit 0
+          }
+          $preSendConsumed = @($preSendComments | Where-Object {
+            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1\s*$' -and
+            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
+            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
+          })
+          if ($preSendConsumed.Count -gt 0) {
+            Publish-Blocker 'BLOCKED_PRE_SEND_CONSUMPTION_EXISTS' 'A consumption receipt was observed before physical send; no duplicate dispatch.' $dispatchId $cardReceipt $cardId $idempotency 0
+            exit 0
+          }
+          $preSendLiveObs = @($preSendComments | Where-Object {
+            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_LIVE_CONSUMER_OBSERVES_V1\s*$' -and
+            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
+            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
+          })
+          if ($preSendLiveObs.Count -gt 1) {
+            Publish-Blocker 'BLOCKED_PRE_SEND_DUPLICATE_LIVE_OBSERVATION' 'Multiple live observations exist for this logical event; no duplicate dispatch.' $dispatchId $cardReceipt $cardId $idempotency 0
+            exit 0
+          }
 
           $pointer = @(
             'GBB_G13_HANDOFF_POINTER_DISPATCH_REQUEST_V1'
@@ -477,24 +540,23 @@ jobs:
           $consumedReadbackBody = [string]$consumedReadback.body
           Require-FirstLine $consumedReadbackBody 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1' 'CONSUMED_STARTED_READBACK'
           if ([string]$consumedReadback.user.login -cne 'D22977') { throw 'CONSUMED_STARTED_AUTHOR_INVALID' }
+          if ([string]$consumedReadback.author_association -cne 'OWNER') { throw 'CONSUMED_STARTED_ASSOCIATION_INVALID' }
           if ((Get-Field $consumedReadbackBody 'source_card_receipt') -cne $cardReceipt) { throw 'CONSUMED_STARTED_READBACK_CARD_RECEIPT_MISMATCH' }
           if ((Get-Field $consumedReadbackBody 'dispatch_idempotency_key') -cne $idempotency) { throw 'CONSUMED_STARTED_READBACK_IDEMPOTENCY_MISMATCH' }
           $admittedExecutorIdentity = 'opencode/mimo-v2.5-free'
           $admittedSession = $targetSession
-          $admittedRepairTaskId = 'GBB-G13-HANDOFF-POINTER-CONSUMER-REPAIR-R5-01'
           $admittedControlGeneration = $generation
-          function Validate-ConsumedStarted([string]$body, [string]$expectedExecutor, [string]$expectedSession, [string]$expectedTaskId, [string]$expectedGeneration) {
-            Require-FirstLine $body 'GBB_G13_HANDOFF_POINTER_CONSUMER_REPAIR_R5_CONSUMED_STARTED_V1' 'CONSUMED_STARTED'
-            if ((Get-Field $body 'executor_identity') -cne $expectedExecutor) { throw 'CONSUMED_STARTED_EXECUTOR_IDENTITY_MISMATCH' }
-            if ((Get-Field $body 'executor_session_or_instance') -cne $expectedSession) { throw 'CONSUMED_STARTED_SESSION_MISMATCH' }
-            if ((Get-Field $body 'repair_task_id') -cne $expectedTaskId) { throw 'CONSUMED_STARTED_TASK_ID_MISMATCH' }
+          function Validate-ConsumedStarted([string]$body, [string]$expectedExecutor, [string]$expectedSession, [string]$expectedGeneration) {
+            Require-FirstLine $body 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1' 'CONSUMED_STARTED'
+            if ((Get-Field $body 'source_card_receipt') -cne $cardReceipt) { throw 'CONSUMED_STARTED_CARD_RECEIPT_MISMATCH' }
+            if ((Get-Field $body 'dispatch_idempotency_key') -cne $idempotency) { throw 'CONSUMED_STARTED_IDEMPOTENCY_MISMATCH' }
+            if ((Get-Field $body 'card_id') -cne $cardId) { throw 'CONSUMED_STARTED_CARD_ID_MISMATCH' }
             if ((Get-Field $body 'control_generation') -cne $expectedGeneration) { throw 'CONSUMED_STARTED_GENERATION_MISMATCH' }
             if ((Get-Field $body 'readback_verified') -cne 'true') { throw 'CONSUMED_STARTED_READBACK_NOT_VERIFIED' }
-            if ((Get-Field $body 'repair_worker_base_sha') -cne $workerBase) { throw 'CONSUMED_STARTED_BASE_SHA_MISMATCH' }
-            if ((Get-Field $body 'repair_worker_branch_exact') -cne $targetBranch) { throw 'CONSUMED_STARTED_BRANCH_MISMATCH' }
-            if ((Get-Field $body 'allowed_changed_path_exact') -ne $workflowPath) { throw 'CONSUMED_STARTED_PATH_MISMATCH' }
+            if ((Get-Field $body 'executor_identity') -cne $expectedExecutor) { throw 'CONSUMED_STARTED_EXECUTOR_IDENTITY_MISMATCH' }
+            if ((Get-Field $body 'executor_session_or_instance') -cne $expectedSession) { throw 'CONSUMED_STARTED_SESSION_MISMATCH' }
           }
-          Validate-ConsumedStarted $consumedReadbackBody $admittedExecutorIdentity $admittedSession $admittedRepairTaskId $admittedControlGeneration
+          Validate-ConsumedStarted $consumedReadbackBody $admittedExecutorIdentity $admittedSession $admittedControlGeneration
 
           $terminal = $null
           for ($attempt = 0; $attempt -lt 40; $attempt++) {
@@ -524,6 +586,7 @@ jobs:
           $terminalReadbackBody = [string]$terminalReadback.body
           Require-FirstLine $terminalReadbackBody 'GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1' 'TERMINAL_READBACK'
           if ([string]$terminalReadback.user.login -cne 'D22977') { throw 'TERMINAL_AUTHOR_INVALID' }
+          if ([string]$terminalReadback.author_association -cne 'OWNER') { throw 'TERMINAL_ASSOCIATION_INVALID' }
           if ((Get-Field $terminalReadbackBody 'source_card_receipt') -cne $cardReceipt) { throw 'TERMINAL_READBACK_CARD_RECEIPT_MISMATCH' }
           if ((Get-Field $terminalReadbackBody 'dispatch_idempotency_key') -cne $idempotency) { throw 'TERMINAL_READBACK_IDEMPOTENCY_MISMATCH' }
           $terminalDecision = Get-Field $terminalReadbackBody 'decision'
@@ -531,7 +594,6 @@ jobs:
           if ((Get-Field $terminalReadbackBody 'source_consumed_started_receipt') -cne [string]$consumed.id) { throw 'TERMINAL_READBACK_CONSUMED_STARTED_MISMATCH' }
           if ((Get-Field $terminalReadbackBody 'executor_identity') -cne $admittedExecutorIdentity) { throw 'TERMINAL_EXECUTOR_IDENTITY_MISMATCH' }
           if ((Get-Field $terminalReadbackBody 'executor_session_or_instance') -cne $admittedSession) { throw 'TERMINAL_SESSION_MISMATCH' }
-          if ((Get-Field $terminalReadbackBody 'repair_task_id') -cne $admittedRepairTaskId) { throw 'TERMINAL_TASK_ID_MISMATCH' }
           if ((Get-Field $terminalReadbackBody 'control_generation') -cne $admittedControlGeneration) { throw 'TERMINAL_GENERATION_MISMATCH' }
 
           Write-Output "HANDOFF_TEST_TERMINAL_OBSERVED receipt=$($terminal.id) decision=$terminalDecision"
