@@ -9,7 +9,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: g13-handoff-pointer-${{ github.event.issue.number }}-${{ github.event.comment.id }}
+  group: g13-handoff-pointer-consumer-serialized
   cancel-in-progress: false
 
 jobs:
@@ -30,684 +30,552 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
           $repo = 'D22977/gpt-browser-bridge'
           $issue = 162
           $workflowPath = '.github/workflows/g13-handoff-pointer-consumer-once.yml'
           $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
           $api = "https://api.github.com/repos/$repo"
-          $headers = @{
-            Authorization = "Bearer $env:GH_TOKEN"
-            'User-Agent' = 'g13-pointer-only-handoff-consumer'
-            Accept = 'application/vnd.github+json'
-          }
-
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'g13-pointer-only-handoff-consumer'; Accept = 'application/vnd.github+json' }
+          
           function Get-Comment([string]$id) {
+            if ($id -cnotmatch '^[1-9][0-9]*$') { throw 'INVALID_COMMENT_ID' }
             return Invoke-RestMethod "$api/issues/comments/$id" -Headers $headers -Method Get -TimeoutSec 30
           }
-
+          
           function Get-AllComments([int]$number, [int]$maxPages = 100) {
             $all = @()
             for ($page = 1; $page -le $maxPages; $page++) {
               $rows = @(Invoke-RestMethod "$api/issues/$number/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
               $all += $rows
               if ($rows.Count -lt 100) {
+                if (@($all.id | Sort-Object -Unique).Count -ne $all.Count) { throw 'HISTORY_PAGINATION_OVERLAP' }
                 return @{ comments = @($all); eof = $true; pages = $page }
               }
             }
-            throw "INCOMPLETE_DURABLE_HISTORY_issue_${number}_pages_${maxPages}"
+            throw "INCOMPLETE_DURABLE_HISTORY_issue_$number"
           }
-
-          function Get-Field([string]$body, [string]$name) {
-            $pattern = '(?m)^' + [regex]::Escape($name) + ':[ \t]+(\S[^\r\n]*)$'
-            $matches = [regex]::Matches($body, $pattern)
-            if ($matches.Count -eq 0) { throw "MISSING_FIELD_$name" }
-            if ($matches.Count -gt 1) { throw "DUPLICATE_FIELD_$name" }
-            return $matches[0].Groups[1].Value
+          
+          # LF and CRLF are equivalent; bare CR, BOM, empty values and unknown lines fail.
+          # Field identity is ordinal and section scoped. In V117 release_authorized occurs
+          # in two declared sections; both are mandatory and independently validated.
+          function Read-Record([string]$body, [string]$protocol, [string[]]$keys, [string[]]$sections = @()) {
+            if ($body.Contains([char]0xFEFF) -or $body.Contains([char]0) -or $body -match '\n(?!\n)') { throw 'INVALID_RECORD_ENCODING' }
+            $lines = $body -split "\n?\n"
+            if ($lines[0] -cne $protocol) { throw 'WRONG_RECORD_PROTOCOL' }
+            $fields = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+            $seenSections = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            $section = ''
+            foreach ($line in $lines | Select-Object -Skip 1) {
+              if ($line -ceq '') { continue }
+              if ($sections -ccontains $line) {
+                if (-not $seenSections.Add($line)) { throw "DUPLICATE_SECTION_$line" }
+                $section = $line
+                continue
+              }
+              if ($line -cmatch '^([a-z][a-z0-9_]*):[ \t]*(.*)$') {
+                $key = if ($section) { "$section/$($Matches[1])" } else { $Matches[1] }
+                $value = $Matches[2]
+              } elseif ($section -ceq 'BEST_NEXT') {
+                $key = 'BEST_NEXT/text'
+                $value = $line
+              } else { throw 'UNKNOWN_RECORD_LINE' }
+              if ($fields.ContainsKey($key)) { throw "DUPLICATE_FIELD_$key" }
+              # Register before checking emptiness: an empty duplicate can never be ignored.
+              $fields.Add($key, $value)
+              if ($keys -cnotcontains $key) { throw "UNKNOWN_FIELD_$key" }
+              if ([string]::IsNullOrWhiteSpace($value) -or $value -cne $value.Trim()) { throw "EMPTY_OR_PADDED_FIELD_$key" }
+            }
+            foreach ($key in $keys) { if (-not $fields.ContainsKey($key)) { throw "MISSING_FIELD_$key" } }
+            foreach ($name in $sections) { if (-not $seenSections.Contains($name)) { throw "MISSING_SECTION_$name" } }
+            return ,$fields
           }
-
-          function Require-FirstLine([string]$body, [string]$protocol, [string]$label) {
-            $nlIdx = $body.IndexOfAny(@([char]13, [char]10))
-            $first = if ($nlIdx -ge 0) { $body.Substring(0, $nlIdx) } else { $body }
-            if ($first.Length -ne $protocol.Length) { throw "WRONG_${label}_PROTOCOL_LENGTH" }
-            for ($ci = 0; $ci -lt $protocol.Length; $ci++) {
-              if ([char]$first[$ci] -ne [char]$protocol[$ci]) { throw "WRONG_${label}_PROTOCOL_ORDINAL_$ci" }
+          
+          function Require-Values($fields, $expected) {
+            foreach ($key in $expected.Keys) {
+              if ([string]::IsNullOrWhiteSpace([string]$expected[$key]) -or -not $fields.ContainsKey($key) -or $fields[$key] -cne [string]$expected[$key]) {
+                throw "BINDING_MISMATCH_$key"
+              }
             }
           }
-
-          function Require-Exact-FirstLine([string]$body, [string]$protocol, [string]$label) {
-            Require-FirstLine $body $protocol $label
-            $firstChar = [int][char]$body[0]
-            if ($firstChar -eq 0xFEFF) { throw "BOM_DETECTED_IN_${label}" }
+          
+          function Require-Sha([string]$value) {
+            if ($value -cnotmatch '^[0-9a-f]{40}$') { throw 'INVALID_SHA' }
           }
-
-          function Require-Sha([string]$value, [string]$label) {
-            if ($value -notmatch '^[0-9a-f]{40}$') { throw "MALFORMED_$label" }
+          
+          function Assert-Comment($comment, [int]$number, [string]$publisher = 'OWNER') {
+            if ([string]$comment.id -cnotmatch '^[1-9][0-9]*$' -or [string]$comment.issue_url -cne "$api/issues/$number") { throw 'COMMENT_ISSUE_OR_ID_MISMATCH' }
+            if ($publisher -ceq 'OWNER') {
+              if ([string]$comment.user.login -cne 'D22977' -or [string]$comment.author_association -cne 'OWNER') { throw 'COMMENT_NOT_OWNER' }
+            } elseif ($publisher -ceq 'WORKFLOW') {
+              if ([string]$comment.user.login -cne 'github-actions[bot]' -or [string]$comment.user.type -cne 'Bot') { throw 'RESERVATION_NOT_WORKFLOW' }
+            } else { throw 'UNKNOWN_PUBLISHER_SCHEMA' }
+            foreach ($key in @('created_at','updated_at')) {
+              $stamp = $comment.$key
+              # PowerShell 7.5+ may deserialize JSON ISO dates as DateTime.
+              if ($stamp -isnot [datetime] -and $stamp -isnot [datetimeoffset] -and [string]$stamp -cnotmatch '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$') { throw 'INVALID_COMMENT_TIMESTAMP' }
+              if ([datetimeoffset]$stamp -gt [datetimeoffset]::UtcNow) { throw 'FUTURE_COMMENT_TIMESTAMP' }
+            }
+            if ([string]$comment.created_at -cne [string]$comment.updated_at) { throw 'EDITED_RECEIPT_NO_BLIND_RETRY' }
           }
-
-          function Publish([string]$body) {
-            $payload = @{ body = $body } | ConvertTo-Json -Compress
-            $created = Invoke-RestMethod "$api/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
-            $readback = Get-Comment ([string]$created.id)
-            if ([string]$readback.body -cne $body) { throw 'PUBLISHED_RECEIPT_READBACK_MISMATCH' }
-            return [string]$created.id
+          
+          function Assert-Unchanged($before, $after) {
+            foreach ($key in @('id','issue_url','body','created_at','updated_at','author_association')) {
+              if ([string]$before.$key -cne [string]$after.$key) { throw "EXACT_GET_CHANGED_$key" }
+            }
+            if ([string]$before.user.login -cne [string]$after.user.login) { throw 'EXACT_GET_AUTHOR_CHANGED' }
           }
-
-          function Publish-Blocker([string]$classification, [string]$detail, [string]$dispatchId, [string]$cardReceipt, [string]$cardId, [string]$idempotency, [int]$promptCount) {
-            $body = @(
-              'GBB_G13_HANDOFF_AUTOMATION_CONSUMER_BLOCKED_V1'
-              'state: BLOCKED'
-              "classification: $classification"
-              'recorded_by_role: G13_HANDOFF_CONSUMER_WORKFLOW'
-              'control_generation: 013'
-              "source_dispatch_comment: $dispatchId"
-              "source_card_receipt: $cardReceipt"
-              "card_id: $cardId"
-              "dispatch_idempotency_key: $idempotency"
-              "detail: $detail"
-              "runner_name: $env:RUNNER_NAME"
-              "runner_user: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
-              "workflow_run_id: $env:GITHUB_RUN_ID"
-              "consumer_workflow_path_exact: $workflowPath"
-              "launcher_head_sha_observed: $env:GITHUB_SHA"
-              "physical_prompt_count: $promptCount"
-              'second_prompt_count: 0'
-              'blind_retry: false'
-              'handoff_dispatch_count: 1'
-              'runtime_run_count: 0'
-              'herdr_mutation_count: 0'
-              'product_mutation_count: 0'
-              'file_mutation_count: 0'
-              'readback_verified: true'
-            ) -join "`n"
-            [void](Publish $body)
+          
+          function Read-Exact($comment, [int]$number, [string]$publisher = 'OWNER') {
+            $fresh = Get-Comment ([string]$comment.id)
+            Assert-Comment $fresh $number $publisher
+            Assert-Unchanged $comment $fresh
+            return $fresh
           }
-
+          
+          function Assert-Order($earlier, $later) {
+            if ([int64]$earlier.id -ge [int64]$later.id -or [datetimeoffset]$earlier.created_at -gt [datetimeoffset]$later.created_at) { throw 'RECEIPT_ORDER_INVALID' }
+          }
+          
+          # Inspect every page and every first-line envelope, without author/state filters.
+          # Never fall back past a newer malformed, wrong-author or unsupported version.
+          # Older versions are archival only; this G13 workflow admits the complete declared
+          # G13 switch and V117 schema below, not arbitrary fields from future schemas.
+          function Get-Family($rows, [string]$family) {
+            $records = @()
+            foreach ($row in $rows) {
+              $first = ([string]$row.body -split "\n?\n", 2)[0]
+              if ($first.Trim().TrimStart([char]0xFEFF) -imatch ('^' + [regex]::Escape($family))) {
+                if ($first -cnotmatch ('^' + [regex]::Escape($family) + '[1-9][0-9]*$')) { throw 'MALFORMED_VERSIONED_ENVELOPE' }
+                $records += $row
+              }
+            }
+            return @($records | Sort-Object { [int64]$_.id })
+          }
+          
+          function Validate-Switch($comment) {
+            Assert-Comment $comment 88
+            $keys = @(
+              'state','recorded_by_role','issue','source_active_switch_012','source_owner_direct_recovery','source_candidate_binding',
+              'source_generation_ack','source_continuity_ack','source_routing_canary','rotation_standard','final_freshness_issue43',
+              'final_freshness_issue81','final_freshness_issue88','final_freshness_issue162','latest_issue162_receipt',
+              'newer_conflicting_switch','competing_generation013_identity','old_generation','old_display_name','old_conversation_id',
+              'old_status','old_stale_wake_behavior','new_generation','new_display_name','new_conversation_id','new_conversation_url',
+              'new_status','inherited_issue162_card','inherited_issue162_boundary','wake_5645450149_retry','merge_authorized',
+              'release_authorized','workflow_dispatch_authorized','scheduled_task_deployment_authorized','readback_required','idempotency_key'
+            )
+            $f = Read-Record $comment.body 'CONTROL_GENERATION_SWITCH_V1' $keys
+            Require-Values $f @{
+              state='SWITCH_COMMITTED'; recorded_by_role='CHATGPT_WEB_CONTROL'; issue='88'; old_generation='012'; old_status='RETIRED'
+              old_stale_wake_behavior='NO_OP_RETIRED'; new_generation='013'; new_status='ACTIVE'; readback_required='true'
+              newer_conflicting_switch='false'; competing_generation013_identity='false'; wake_5645450149_retry='false'
+              merge_authorized='false'; release_authorized='false'; workflow_dispatch_authorized='false'; scheduled_task_deployment_authorized='false'
+              final_freshness_issue43='PASS'; final_freshness_issue81='PASS'; final_freshness_issue88='PASS'; final_freshness_issue162='PASS'
+            }
+            foreach ($key in $keys | Where-Object { $_ -like 'source_*' -or $_ -in @('rotation_standard','latest_issue162_receipt','inherited_issue162_boundary') }) {
+              if ($f[$key] -cnotmatch '^[1-9][0-9]*$' -or [int64]$f[$key] -ge [int64]$comment.id) { throw 'SWITCH_SOURCE_ORDER_INVALID' }
+            }
+            foreach ($key in @('old_conversation_id','new_conversation_id')) {
+              if ($f[$key] -cnotmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$') { throw 'CONTROL_IDENTITY_INVALID' }
+            }
+            if ($f['new_conversation_id'] -ceq $f['old_conversation_id'] -or $f['new_conversation_url'] -cnotmatch ('^https://chatgpt\.com/(g/[^/]+/)?c/' + $f['new_conversation_id'] + '$')) { throw 'CONTROL_URL_IDENTITY_MISMATCH' }
+            return ,$f
+          }
+          
+          function Validate-CurrentStart($comment, $switch, $switchFields) {
+            Assert-Comment $comment 43
+            $keys = @(
+              'state','recorded_by_role','supersedes','source_control_switch','current_registry',
+              'CURRENT_CONTROL/control_generation','CURRENT_CONTROL/control_status','CURRENT_CONTROL/control_logical_name',
+              'CURRENT_CONTROL/control_conversation_id','CURRENT_CONTROL/control_conversation_url','CURRENT_CONTROL/previous_generation','CURRENT_CONTROL/previous_stale_wake_behavior',
+              'CURRENT_WORK/repo','CURRENT_WORK/issue','CURRENT_WORK/card_id','CURRENT_WORK/issue_state','CURRENT_WORK/latest_receipt',
+              'CURRENT_WORK/current_phase','CURRENT_WORK/wake_5645450149_consumed','CURRENT_WORK/same_wake_retry_authorized',
+              'CURRENT_WORK/exact_allowed_path','CURRENT_WORK/exact_required_change','CURRENT_WORK/scheduled_task_deployment_authorized',
+              'CURRENT_WORK/worker_merge_authorized','CURRENT_WORK/release_authorized','BEST_NEXT/text','AUTHORITY_BOUNDARY/merge_default',
+              'AUTHORITY_BOUNDARY/release_authorized','AUTHORITY_BOUNDARY/workflow_dispatch_authorized','AUTHORITY_BOUNDARY/terminal_does_not_imply_successor',
+              'AUTHORITY_BOUNDARY/pass_does_not_imply_merge','AUTHORITY_BOUNDARY/user_task_result_relay_target',
+              'AUTHORITY_BOUNDARY/readback_required','AUTHORITY_BOUNDARY/idempotency_key'
+            )
+            $f = Read-Record $comment.body 'CURRENT_REHYDRATION_INDEX_V117' $keys @('CURRENT_CONTROL','CURRENT_WORK','BEST_NEXT','AUTHORITY_BOUNDARY')
+            Require-Values $f @{
+              state='CURRENT_START_HERE'; recorded_by_role='CHATGPT_WEB_CONTROL'
+              source_control_switch="$($switch.id) / CONTROL_GENERATION_SWITCH_V1"
+              'CURRENT_CONTROL/control_generation'=$switchFields['new_generation']; 'CURRENT_CONTROL/control_status'='ACTIVE'
+              'CURRENT_CONTROL/control_logical_name'=$switchFields['new_display_name']
+              'CURRENT_CONTROL/control_conversation_id'=$switchFields['new_conversation_id']; 'CURRENT_CONTROL/control_conversation_url'=$switchFields['new_conversation_url']
+              'CURRENT_CONTROL/previous_generation'='012 / RETIRED'; 'CURRENT_CONTROL/previous_stale_wake_behavior'='NO_OP_RETIRED'
+              'CURRENT_WORK/repo'=$repo; 'CURRENT_WORK/issue'='162'; 'CURRENT_WORK/card_id'=$switchFields['inherited_issue162_card']
+              'CURRENT_WORK/issue_state'='OPEN_P0'; 'CURRENT_WORK/current_phase'='PRE_EXECUTION_POWERSHELL_PARSER_REPAIR'
+              'CURRENT_WORK/wake_5645450149_consumed'='true'; 'CURRENT_WORK/same_wake_retry_authorized'='false'
+              'CURRENT_WORK/exact_allowed_path'='.github/workflows/g12-issue162-resident-loop-repair-agent-recovery-once.yml'
+              'CURRENT_WORK/exact_required_change'='delimit repairCard variable before literal colon; no semantic scope change'
+              'CURRENT_WORK/latest_receipt'="$($switchFields['inherited_issue162_boundary']) / CONTROL_G12_ISSUE162_AGENT_RECOVERY_POWERSHELL_PARSE_REPAIR_V1"
+              'CURRENT_WORK/scheduled_task_deployment_authorized'='false'; 'CURRENT_WORK/worker_merge_authorized'='false'; 'CURRENT_WORK/release_authorized'='false'
+              'AUTHORITY_BOUNDARY/merge_default'='NOT_AUTHORIZED except exact separately adopted bounded Control repair authority'
+              'AUTHORITY_BOUNDARY/release_authorized'='false'; 'AUTHORITY_BOUNDARY/workflow_dispatch_authorized'='false'
+              'AUTHORITY_BOUNDARY/terminal_does_not_imply_successor'='true'; 'AUTHORITY_BOUNDARY/pass_does_not_imply_merge'='true'
+              'AUTHORITY_BOUNDARY/user_task_result_relay_target'='0'; 'AUTHORITY_BOUNDARY/readback_required'='true'
+              'AUTHORITY_BOUNDARY/idempotency_key'="CURRENT-REHYDRATION-INDEX-V117-G13-$($switch.id)"
+              'BEST_NEXT/text'='Because receipt 5645454417 is explicitly generation012-bound and generation012 is now RETIRED, generation013 must first durably adopt/rebind that exact bounded repair authority without changing scope. Only then may the one-file parser repair continue. Do not execute a G12-bound mutation directly under G13.'
+            }
+            if ($f['supersedes'] -cnotmatch '^([1-9][0-9]*) / CURRENT_REHYDRATION_INDEX_V116$' -or [int64]$Matches[1] -ge [int64]$comment.id) { throw 'CURRENT_START_SUPERSESSION_INVALID' }
+            if ($f['current_registry'] -cnotmatch '^([1-9][0-9]*) / CURRENT_REGISTRY_INDEX_V19$' -or [int64]$Matches[1] -ge [int64]$comment.id) { throw 'CURRENT_REGISTRY_ORDER_INVALID' }
+            Assert-Order $switch $comment
+            return ,$f
+          }
+          
+          function Read-Control {
+            $h88 = Get-AllComments 88
+            $h43 = Get-AllComments 43
+            $switches = @(Get-Family $h88.comments 'CONTROL_GENERATION_SWITCH_V')
+            $starts = @(Get-Family $h43.comments 'CURRENT_REHYDRATION_INDEX_V')
+            if ($switches.Count -eq 0 -or $starts.Count -eq 0) { throw 'CONTROL_HISTORY_MISSING' }
+            $switch = Read-Exact $switches[-1] 88
+            $sf = Validate-Switch $switch
+            $start = Read-Exact $starts[-1] 43
+            $cf = Validate-CurrentStart $start $switch $sf
+            # The predecessor pointers must resolve in the COMPLETE histories, and must
+            # name the immediately preceding records. No state/author-filtered fallback.
+            $priorSwitch = @($switches | Where-Object { [int64]$_.id -lt [int64]$switch.id })
+            $priorStart = @($starts | Where-Object { [int64]$_.id -lt [int64]$start.id })
+            if ($priorSwitch.Count -eq 0 -or [string]$priorSwitch[-1].id -cne $sf['source_active_switch_012']) { throw 'SWITCH_SUPERSESSION_CONFLICT' }
+            if ($priorStart.Count -eq 0 -or "$($priorStart[-1].id) / CURRENT_REHYDRATION_INDEX_V116" -cne $cf['supersedes']) { throw 'CURRENT_START_SUPERSESSION_CONFLICT' }
+            return @{ switch=$switch; start=$start }
+          }
+          
+          function Tuple-Keys {
+            return @('executor_identity','executor_session_or_instance','executor_kind','executor_name','executor_pane',
+              'executor_workspace','executor_cwd','executor_branch','executor_head','executor_status','executor_visibility')
+          }
+          
+          function Validate-Dispatch($comment) {
+            Assert-Comment $comment 162
+            $f = Read-Record $comment.body 'GBB_G13_HANDOFF_POINTER_DISPATCH_REQUEST_V1' @('card_receipt','card_id','control_generation','launcher_head_sha','worker_base_sha','dispatch_idempotency_key')
+            Require-Values $f @{
+              card_id='GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01'; control_generation='013'
+              dispatch_idempotency_key='GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01-DISPATCH-01'
+            }
+            if ($f['card_receipt'] -cnotmatch '^[1-9][0-9]*$') { throw 'INVALID_CARD_POINTER' }
+            Require-Sha $f['launcher_head_sha']
+            Require-Sha $f['worker_base_sha']
+            return ,$f
+          }
+          
+          function Validate-Card($comment, $dispatchFields) {
+            Assert-Comment $comment 162
+            $keys = @('state','card_protocol','card_id','control_generation','source_consumer_acceptance','target_ref_exact','target_ref_head_exact',
+              'launcher_head_sha','worker_base_sha','executor_role','requested_action','allowed_actions','forbidden_actions','logical_handoff_count_max',
+              'dispatch_idempotency_key','readback_verified','consumer_workflow_path_exact','consumer_workflow_blob_exact',
+              'target_agent_name','target_pane','target_cwd_exact','target_agent_status_required')
+            $f = Read-Record $comment.body 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1' $keys
+            Require-Values $f @{
+              state='READY_FOR_POINTER_DISPATCH'; card_protocol='GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1'
+              card_id=$dispatchFields['card_id']; control_generation=$dispatchFields['control_generation']; target_ref_exact='refs/heads/review-base/gbb-gh-01'
+              launcher_head_sha=$dispatchFields['launcher_head_sha']; worker_base_sha=$dispatchFields['worker_base_sha']
+              target_ref_head_exact=$dispatchFields['launcher_head_sha']; executor_role='LOCAL_EXECUTOR'
+              requested_action='SYNTHETIC_POINTER_ONLY_HANDOFF_CANARY'; allowed_actions='GITHUB_READBACK_AND_RECEIPTS_ONLY'
+              forbidden_actions='PRODUCT_MUTATION,SECOND_RUN,USER_RELAY,MERGE,RELEASE,DEPLOYMENT,WAKE'
+              logical_handoff_count_max='1'; dispatch_idempotency_key=$dispatchFields['dispatch_idempotency_key']
+              readback_verified='true'; consumer_workflow_path_exact=$workflowPath
+            }
+            Require-Sha $f['consumer_workflow_blob_exact']
+            if ($f['source_consumer_acceptance'] -cnotmatch '^[1-9][0-9]*$' -or $f['target_agent_status_required'] -cnotin @('idle','done')) { throw 'INVALID_CARD_SELECTOR' }
+            return ,$f
+          }
+          
+          # Acceptance is a Control-authored selector, distinct from a WORKER receipt.
+          # Every tuple field is explicit; LOCAL_EXECUTOR is the action class, worker_role
+          # is the selected live role. No kind/workspace/branch/model/visibility defaults.
+          function Validate-Acceptance($comment, $cardFields, $control) {
+            Assert-Comment $comment 162
+            $keys = @('state','recorded_by_role','card_id','control_generation','target_ref_exact','target_ref_head_exact','target_workflow_blob',
+              'consumer_workflow_path_exact','launcher_head_sha','worker_base_sha','executor_role','worker_role','requested_action',
+              'allowed_actions','forbidden_actions','logical_handoff_count_max','dispatch_idempotency_key','source_control_switch',
+              'source_current_start','supersedes','readback_verified') + @(Tuple-Keys)
+            $f = Read-Record $comment.body 'GBB_G13_HANDOFF_AUTOMATION_TEST_ACCEPTANCE_V1' $keys
+            $expected = @{
+              state='PASS'; recorded_by_role='CHATGPT_WEB_CONTROL'; executor_role='LOCAL_EXECUTOR'; worker_role='WORKER'
+              target_workflow_blob=$cardFields['consumer_workflow_blob_exact']; source_control_switch=[string]$control.switch.id
+              source_current_start=[string]$control.start.id; supersedes='NONE'; readback_verified='true'
+              executor_name=$cardFields['target_agent_name']; executor_pane=$cardFields['target_pane']; executor_cwd=$cardFields['target_cwd_exact']
+              executor_head=$cardFields['worker_base_sha']; executor_status=$cardFields['target_agent_status_required']
+            }
+            foreach ($key in @('card_id','control_generation','target_ref_exact','target_ref_head_exact','consumer_workflow_path_exact',
+              'launcher_head_sha','worker_base_sha','requested_action','allowed_actions','forbidden_actions','logical_handoff_count_max','dispatch_idempotency_key')) {
+              $expected[$key] = $cardFields[$key]
+            }
+            Require-Values $f $expected
+            if ($f['executor_visibility'] -cnotin @('visible','focused','agent_visible')) { throw 'EXECUTOR_NOT_VISIBLE' }
+            Assert-Order $control.start $comment
+            return ,$f
+          }
+          
+          function Live-Value($agent, [string[]]$names) {
+            $values = @()
+            foreach ($name in $names) {
+              $p = $agent.PSObject.Properties[$name]
+              if ($null -ne $p -and -not [string]::IsNullOrWhiteSpace([string]$p.Value)) { $values += [string]$p.Value }
+            }
+            if ($values.Count -eq 0 -or @($values | Where-Object { $_ -cne $values[0] }).Count -gt 0) { throw "LIVE_FIELD_MISSING_OR_CONFLICTING_$($names[0])" }
+            return $values[0]
+          }
+          
+          function Get-ExecutorTuple($agent) {
+            $tuple = @{
+              executor_identity=Live-Value $agent @('identity','agent_identity')
+              executor_kind=Live-Value $agent @('agent_kind')
+              executor_name=Live-Value $agent @('name')
+              executor_pane=Live-Value $agent @('pane_id')
+              executor_workspace=Live-Value $agent @('workspace','workspace_id')
+              executor_cwd=Live-Value $agent @('cwd')
+              executor_branch=Live-Value $agent @('branch')
+              executor_head=Live-Value $agent @('head_sha')
+              executor_status=Live-Value $agent @('agent_status')
+              executor_visibility=Live-Value $agent @('visibility','agent_visibility')
+              executor_role=Live-Value $agent @('role','agent_role')
+            }
+            $session = $agent.PSObject.Properties['agent_session']
+            if ($null -eq $session -or $null -eq $session.Value) { throw 'LIVE_SESSION_MISSING' }
+            $tuple['executor_session_or_instance'] = Live-Value $session.Value @('value')
+            Require-Sha $tuple['executor_head']
+            Require-Values $tuple @{ executor_role='WORKER' }
+            if ($tuple['executor_status'] -cnotin @('idle','done') -or $tuple['executor_visibility'] -cnotin @('visible','focused','agent_visible')) { throw 'LIVE_EXECUTOR_NOT_ADMISSIBLE' }
+            if (-not $tuple['executor_pane'].StartsWith("$($tuple['executor_workspace']):", [StringComparison]::Ordinal)) { throw 'PANE_NOT_WORKSPACE_QUALIFIED' }
+            return $tuple
+          }
+          
+          function Select-Executor($agents, $expected) {
+            # Require both transport name and pane to be unique in the whole inventory.
+            $byName = @($agents | Where-Object { [string]$_.name -ceq $expected['executor_name'] })
+            $byPane = @($agents | Where-Object { [string]$_.pane_id -ceq $expected['executor_pane'] })
+            if ($byName.Count -ne 1 -or $byPane.Count -ne 1) { throw 'EXECUTOR_ABSENT_OR_AMBIGUOUS' }
+            $tuple = Get-ExecutorTuple $byName[0]
+            foreach ($key in @(Tuple-Keys) + @('executor_role')) {
+              $value = if ($key -ceq 'executor_role' -and $expected.ContainsKey('worker_role')) { $expected['worker_role'] } else { $expected[$key] }
+              Require-Values $tuple @{ $key=$value }
+            }
+            return $tuple
+          }
+          
           function Invoke-HerdrJson([string[]]$arguments) {
             if (-not (Test-Path -LiteralPath $herdr -PathType Leaf)) { throw 'HERDR_EXE_MISSING' }
             $raw = (& $herdr @arguments 2>&1 | Out-String).Trim()
-            $exit = $LASTEXITCODE
-            if ($exit -ne 0) { throw "HERDR_READ_FAILED_$exit" }
-            try { return ($raw | ConvertFrom-Json) } catch { throw 'HERDR_JSON_INVALID' }
+            if ($LASTEXITCODE -ne 0) { throw 'HERDR_READ_FAILED' }
+            $result = $raw | ConvertFrom-Json
+            if ($null -eq $result.result.agents) { throw 'HERDR_INVENTORY_UNAVAILABLE' }
+            return $result
           }
-
-          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
-          if ([int]$event.issue.number -ne $issue) { throw 'ISSUE_NUMBER_MISMATCH' }
-          if ([string]$event.comment.user.login -cne 'D22977' -or [string]$event.comment.author_association -cne 'OWNER') { throw 'DISPATCH_AUTHOR_NOT_OWNER' }
-          $dispatchId = [string]$event.comment.id
-          $dispatchBody = [string]$event.comment.body
-          Require-Exact-FirstLine $dispatchBody 'GBB_G13_HANDOFF_POINTER_DISPATCH_REQUEST_V1' 'DISPATCH'
-
-          $allowedDispatchKeys = @('card_receipt', 'card_id', 'control_generation', 'launcher_head_sha', 'worker_base_sha', 'dispatch_idempotency_key')
-          $dispatchLines = $dispatchBody -split "`r?`n"
-          $seenDispatchKeys = @{}
-          for ($i = 1; $i -lt $dispatchLines.Count; $i++) {
-            $line = $dispatchLines[$i]
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            if ($line -notmatch '^(?<key>[a-z0-9_]+):\s*(?<value>.+)$') { throw 'DISPATCH_BODY_NOT_POINTER_ONLY' }
-            if ($allowedDispatchKeys -notcontains $Matches.key) { throw 'DISPATCH_BODY_CONTAINS_TASK_BODY' }
-            if ($seenDispatchKeys.ContainsKey($Matches.key)) { throw "DISPATCH_DUPLICATE_KEY_$($Matches.key)" }
-            $seenDispatchKeys[$Matches.key] = $true
-          }
-
-          $cardReceipt = Get-Field $dispatchBody 'card_receipt'
-          $cardId = Get-Field $dispatchBody 'card_id'
-          $generation = Get-Field $dispatchBody 'control_generation'
-          $launcherHead = Get-Field $dispatchBody 'launcher_head_sha'
-          $workerBase = Get-Field $dispatchBody 'worker_base_sha'
-          $idempotency = Get-Field $dispatchBody 'dispatch_idempotency_key'
-          Require-Sha $launcherHead 'LAUNCHER_HEAD'
-          Require-Sha $workerBase 'WORKER_BASE'
-          if ($generation -cne '013') { throw 'CONTROL_GENERATION_MISMATCH' }
-          if ($idempotency -cne 'GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01-DISPATCH-01') { throw 'DISPATCH_IDEMPOTENCY_MISMATCH' }
-          if ($cardId -cne 'GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01') { throw 'DISPATCH_CARD_ID_NOT_EXACT_ADVERSARIAL_TEST_01' }
-
-          $card = Get-Comment $cardReceipt
-          $cardBody = [string]$card.body
-          if ([string]$card.issue_url -notmatch '/issues/162$') { throw 'CARD_ISSUE_MISMATCH' }
-          if ([string]$card.user.login -cne 'D22977' -or [string]$card.author_association -cne 'OWNER') { throw 'CARD_AUTHOR_NOT_OWNER' }
-          Require-Exact-FirstLine $cardBody 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1' 'CARD'
-          $allowedCardKeys = @('state','card_protocol','card_id','control_generation','source_consumer_acceptance','target_ref_exact','target_ref_head_exact','launcher_head_sha','worker_base_sha','executor_role','requested_action','allowed_actions','forbidden_actions','logical_handoff_count_max','dispatch_idempotency_key','readback_verified','consumer_workflow_path_exact','consumer_workflow_blob_exact','target_agent_name','target_pane','target_cwd_exact','target_agent_status_required')
-          $cardLines = $cardBody -split "`r?`n"
-          for ($ci = 1; $ci -lt $cardLines.Count; $ci++) {
-            $cline = $cardLines[$ci]
-            if ([string]::IsNullOrWhiteSpace($cline)) { continue }
-            if ($cline -notmatch '^(?<ckey>[a-z0-9_]+):\s*(?<cval>.+)$') { throw "CARD_BODY_NOT_POINTER_ONLY_LINE_$ci" }
-            if ($allowedCardKeys -notcontains $Matches.ckey) { throw "CARD_UNKNOWN_FIELD_$($Matches.ckey)" }
-          }
-          $cardState = Get-Field $cardBody 'state'
-          $cardProtocol = Get-Field $cardBody 'card_protocol'
-          $cardIdFromCard = Get-Field $cardBody 'card_id'
-          $cardGeneration = Get-Field $cardBody 'control_generation'
-          $sourceAcceptance = Get-Field $cardBody 'source_consumer_acceptance'
-          $targetRef = Get-Field $cardBody 'target_ref_exact'
-          $targetHead = Get-Field $cardBody 'target_ref_head_exact'
-          $cardLauncher = Get-Field $cardBody 'launcher_head_sha'
-          $cardWorkerBase = Get-Field $cardBody 'worker_base_sha'
-          $executorRole = Get-Field $cardBody 'executor_role'
-          $requestedAction = Get-Field $cardBody 'requested_action'
-          $allowedActions = Get-Field $cardBody 'allowed_actions'
-          $forbiddenActions = Get-Field $cardBody 'forbidden_actions'
-          $logicalMax = Get-Field $cardBody 'logical_handoff_count_max'
-          $cardIdempotency = Get-Field $cardBody 'dispatch_idempotency_key'
-          $cardReadback = Get-Field $cardBody 'readback_verified'
-          $consumerPath = Get-Field $cardBody 'consumer_workflow_path_exact'
-          $consumerBlob = Get-Field $cardBody 'consumer_workflow_blob_exact'
-          $targetAgentName = Get-Field $cardBody 'target_agent_name'
-          $targetPane = Get-Field $cardBody 'target_pane'
-          $targetCwd = Get-Field $cardBody 'target_cwd_exact'
-          $targetStatus = Get-Field $cardBody 'target_agent_status_required'
-
-          Require-Sha $targetHead 'TARGET_HEAD'
-          Require-Sha $cardLauncher 'CARD_LAUNCHER_HEAD'
-          Require-Sha $cardWorkerBase 'CARD_WORKER_BASE'
-          if ($cardState -cne 'READY_FOR_POINTER_DISPATCH') { throw 'CARD_NOT_READY_FOR_POINTER_DISPATCH' }
-          if ($cardProtocol -cne 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1') { throw 'CARD_PROTOCOL_MISMATCH' }
-          if ($cardIdFromCard -cne 'GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01') { throw 'CARD_ID_NOT_EXACT_ADVERSARIAL_TEST_01' }
-          if ($cardGeneration -cne '013') { throw 'CARD_GENERATION_MISMATCH' }
-          if ($sourceAcceptance -notmatch '^\d+$') { throw 'CARD_ACCEPTANCE_INVALID' }
-          if ($targetRef -cne 'refs/heads/review-base/gbb-gh-01') { throw 'CARD_TARGET_REF_MISMATCH' }
-          if ($targetHead -cne $env:GITHUB_SHA) { throw 'CARD_HEAD_BINDING_MISMATCH' }
-          if ($cardLauncher -cne $launcherHead) { throw 'CARD_LAUNCHER_MISMATCH' }
-          if ($cardWorkerBase -cne $workerBase) { throw 'CARD_WORKER_BASE_MISMATCH' }
-          if ($requestedAction -cne 'SYNTHETIC_POINTER_ONLY_HANDOFF_CANARY') { throw 'CARD_ACTION_INVALID' }
-          if ($executorRole -cne 'LOCAL_EXECUTOR') { throw 'CARD_EXECUTOR_ROLE_INVALID' }
-          if ($logicalMax -ne '1') { throw 'CARD_LOGICAL_MAX_INVALID' }
-          if ($cardIdempotency -cne $idempotency) { throw 'CARD_IDEMPOTENCY_MISMATCH' }
-          if ($cardReadback -cne 'true') { throw 'CARD_READBACK_INVALID' }
-          if ($consumerPath -cne $workflowPath) { throw 'CARD_CONSUMER_PATH_INVALID' }
-          if ($consumerBlob -notmatch '^[0-9a-f]{40}$') { throw 'CARD_CONSUMER_BLOB_INVALID' }
-          if ([string]::IsNullOrWhiteSpace($targetAgentName)) { throw 'CARD_TARGET_AGENT_NAME_MISSING' }
-          if ([string]::IsNullOrWhiteSpace($targetPane)) { throw 'CARD_TARGET_PANE_MISSING' }
-          if ([string]::IsNullOrWhiteSpace($targetCwd)) { throw 'CARD_TARGET_CWD_MISSING' }
-          if ($targetStatus -notin @('idle', 'done')) { throw 'CARD_TARGET_STATUS_INVALID' }
-          if ($allowedActions -cne 'GITHUB_READBACK_AND_RECEIPTS_ONLY') { throw 'CARD_ALLOWED_ACTIONS_INVALID' }
-          $expectedForbidden = 'PRODUCT_MUTATION,SECOND_RUN,USER_RELAY,MERGE,RELEASE,DEPLOYMENT,WAKE'
-          if ($forbiddenActions -cne $expectedForbidden) { throw 'CARD_FORBIDDEN_ACTIONS_INVALID' }
-
-          $acceptanceComment = Get-Comment $sourceAcceptance
-          $acceptanceBody = [string]$acceptanceComment.body
-          if ([string]$acceptanceComment.issue_url -notmatch '/issues/162$') { throw 'SOURCE_ACCEPTANCE_ISSUE_MISMATCH' }
-          if ([string]$acceptanceComment.user.login -cne 'D22977') { throw 'SOURCE_ACCEPTANCE_AUTHOR_INVALID' }
-          if ([string]$acceptanceComment.author_association -cne 'OWNER') { throw 'SOURCE_ACCEPTANCE_ASSOCIATION_INVALID' }
-          $acceptanceFirstLine = (($acceptanceBody -split "`r?`n")[0])
-          $acceptanceFirstChar = [int][char]$acceptanceFirstLine[0]
-          if ($acceptanceFirstChar -eq 0xFEFF) { throw 'BOM_DETECTED_IN_ACCEPTANCE' }
-          if ($acceptanceFirstLine -cne 'GBB_G13_HANDOFF_AUTOMATION_TEST_ACCEPTANCE_V1') { throw 'SOURCE_ACCEPTANCE_PROTOCOL_NOT_EXACT' }
-          if ($acceptanceBody -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'SOURCE_ACCEPTANCE_RECORDED_BY_ROLE_INVALID' }
-          if ($acceptanceBody -notmatch '(?m)^state:\s*PASS\s*$') { throw 'SOURCE_ACCEPTANCE_STATE_INVALID' }
-          if ($acceptanceBody -notmatch '(?m)^card_id:\s*GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01\s*$') { throw 'SOURCE_ACCEPTANCE_CARD_ID_MISMATCH' }
-          if ($acceptanceBody -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'SOURCE_ACCEPTANCE_GENERATION_MISMATCH' }
-          if ($acceptanceBody -notmatch '(?m)^target_ref_exact:\s*refs/heads/review-base/gbb-gh-01\s*$') { throw 'SOURCE_ACCEPTANCE_TARGET_REF_MISMATCH' }
-          if ((Get-Field $acceptanceBody 'target_ref_head_exact') -cne $targetHead) { throw 'SOURCE_ACCEPTANCE_TARGET_HEAD_NOT_BOUND_VALUE' }
-          if ((Get-Field $acceptanceBody 'target_workflow_blob') -cne $consumerBlob) { throw 'SOURCE_ACCEPTANCE_WORKFLOW_BLOB_NOT_BOUND_VALUE' }
-          if ($acceptanceBody -notmatch '(?m)^executor_role:\s*LOCAL_EXECUTOR\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_ROLE_MISMATCH' }
-          if ($acceptanceBody -notmatch '(?m)^card_id:\s*GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01\s*$') { throw 'SOURCE_ACCEPTANCE_CARD_ID_MISSING' }
-          if ($acceptanceBody -notmatch '(?m)^executor_kind:\s*opencode\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_KIND_MISSING' }
-          if ($acceptanceBody -notmatch '(?m)^executor_name:\s*\S+\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_NAME_MISSING' }
-          if ($acceptanceBody -notmatch '(?m)^executor_session_or_instance:\s*ses_[A-Za-z0-9]+\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_SESSION_MISSING' }
-          if ($acceptanceBody -notmatch '(?m)^executor_pane:\s*w5:\S+\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_PANE_MISSING' }
-          if ($acceptanceBody -notmatch '(?m)^executor_workspace:\s*w5\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_WORKSPACE_MISSING' }
-          if ($acceptanceBody -notmatch '(?m)^executor_branch:\s*worker/g13-handoff-pointer-consumer-repair-01\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_BRANCH_MISSING' }
-          if ($acceptanceBody -notmatch '(?m)^executor_head:\s*[0-9a-f]{40}\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_HEAD_MISSING' }
-          if ($acceptanceBody -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'SOURCE_ACCEPTANCE_RECORDED_BY_ROLE_NOT_CONTROL' }
-          $hasRejected = $acceptanceBody -match '(?m)^state:\s*REJECTED\s*$'
-          if ($hasRejected) { throw 'SOURCE_ACCEPTANCE_CONFLICTING_PASS_AND_REJECTED' }
-          $acceptanceStateLines = @($acceptanceBody -split "`r?`n" | Where-Object { $_ -match '^state:\s*' })
-          if ($acceptanceStateLines.Count -ne 1) { throw 'SOURCE_ACCEPTANCE_DUPLICATE_STATE' }
-
-          $targetRefObject = Invoke-RestMethod "$api/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
-          if ([string]$targetRefObject.object.sha -cne $targetHead) { throw 'TARGET_REF_HEAD_STALE' }
-          $workflowObject = Invoke-RestMethod "$api/contents/${workflowPath}?ref=$env:GITHUB_SHA" -Headers $headers -Method Get -TimeoutSec 30
-          if ([string]$workflowObject.sha -cne $consumerBlob) { throw 'CONSUMER_WORKFLOW_BLOB_MISMATCH' }
-          if ([string]$env:GITHUB_SHA -cne $launcherHead) { throw 'LAUNCHER_HEAD_MISMATCH' }
-
-          $issue88Result = Get-AllComments 88
-          $issue88 = $issue88Result.comments
-          $issue88Eof = $issue88Result.eof
-          if (-not $issue88Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_88' }
-          $allSwitches = @($issue88 | Where-Object {
-            [string]$_.user.login -ceq 'D22977' -and
-            [string]$_.author_association -ceq 'OWNER' -and
-            [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
-            [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
-          })
-          if ($allSwitches.Count -eq 0) { throw 'NO_COMMITTED_SWITCH_FOUND' }
-          $switch = ($allSwitches | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
-          Require-Exact-FirstLine ([string]$switch.body) 'CONTROL_GENERATION_SWITCH_V1' 'SWITCH'
-          if ([string]$switch.body -notmatch '(?m)^new_generation:\s*013\s*$') { throw 'SWITCH_NOT_GEN013' }
-          if ([string]$switch.body -notmatch '(?m)^new_status:\s*ACTIVE\s*$') { throw 'SWITCH_NOT_ACTIVE' }
-          if ([string]$switch.body -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'SWITCH_RECORDED_BY_ROLE_INVALID' }
-          $allowedSwitchKeys = @('state','new_generation','new_status','recorded_by_role','issue')
-          $switchLines = [string]$switch.body -split "`r?`n"
-          $seenSwitchKeys = @{}
-          for ($si = 1; $si -lt $switchLines.Count; $si++) {
-            $sline = $switchLines[$si]
-            if ([string]::IsNullOrWhiteSpace($sline)) { continue }
-            if ($sline -notmatch '^(?<sk>[a-z0-9_]+):\s*(?<sv>.+)$') { throw "SWITCH_BODY_NOT_POINTER_ONLY_LINE_$si" }
-            if ($allowedSwitchKeys -notcontains $Matches.sk) { throw "SWITCH_UNKNOWN_FIELD_$($Matches.sk)" }
-            if ($seenSwitchKeys.ContainsKey($Matches.sk)) { throw "SWITCH_DUPLICATE_FIELD_$($Matches.sk)" }
-            $seenSwitchKeys[$Matches.sk] = $true
-          }
-          $newerSwitchesAfterLatest = @($issue88 | Where-Object {
-            [int64]$_.id -gt [int64]$switch.id -and
-            [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
-            [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
-          })
-          if ($newerSwitchesAfterLatest.Count -gt 0) { throw 'NEWER_CONTROL_SWITCH_EXISTS' }
-
-          $issue43Result = Get-AllComments 43
-          $issue43 = $issue43Result.comments
-          $issue43Eof = $issue43Result.eof
-          if (-not $issue43Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_43' }
-          $allCurrentStarts = @($issue43 | Where-Object {
-            [string]$_.user.login -ceq 'D22977' -and
-            [string]$_.author_association -ceq 'OWNER' -and
-            [string]$_.body -match '(?m)^CURRENT_REHYDRATION_INDEX_V\d+\s*$' -and
-            [string]$_.body -match '(?m)^state:\s*CURRENT_START_HERE\s*$'
-          })
-          if ($allCurrentStarts.Count -eq 0) { throw 'NO_CURRENT_START_FOUND' }
-          $currentStart = ($allCurrentStarts | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
-          $csNlIdx = [string]$currentStart.body.IndexOfAny(@([char]13, [char]10))
-          $csFirstLine = if ($csNlIdx -ge 0) { [string]$currentStart.body.Substring(0, $csNlIdx) } else { [string]$currentStart.body }
-          if ($csFirstLine.Length -lt 32) { throw 'CURRENT_START_PROTOCOL_TOO_SHORT' }
-          for ($ci = 0; $ci -lt $csFirstLine.Length; $ci++) {
-            if ([char]$csFirstLine[$ci] -ne [char]'C' -and $ci -eq 0) { throw 'CURRENT_START_BOM_OR_GARBAGE' }
-          }
-          $csFirstChar = [int][char]$csFirstLine[0]
-          if ($csFirstChar -eq 0xFEFF) { throw 'BOM_DETECTED_IN_CURRENT_START' }
-          if ($csFirstLine -cne [string]$csFirstLine.Trim()) { throw 'CURRENT_START_PROTOCOL_LEADING_WHITESPACE' }
-          if ($csFirstLine -notmatch '^CURRENT_REHYDRATION_INDEX_V\d+$') { throw 'WRONG_CURRENT_START_PROTOCOL' }
-          $csVersion = [int]($csFirstLine -replace '^CURRENT_REHYDRATION_INDEX_V(\d+)$','$1')
-          if ($csVersion -lt 1) { throw 'CURRENT_START_VERSION_INVALID' }
-          $csBodyLines = [string]$currentStart.body -split "`r?`n"
-          $csSeenKeys = @{}
-          for ($csLi = 1; $csLi -lt $csBodyLines.Count; $csLi++) {
-            $csLine = $csBodyLines[$csLi]
-            if ([string]::IsNullOrWhiteSpace($csLine)) { continue }
-            if ($csLine -notmatch '^(?<ck>[a-z0-9_]+):\s*(?<cv>.+)$') { throw "CURRENT_START_BODY_NOT_POINTER_ONLY_LINE_$csLi" }
-            if ($csSeenKeys.ContainsKey($Matches.ck)) { throw "CURRENT_START_DUPLICATE_FIELD_$($Matches.ck)" }
-            $csSeenKeys[$Matches.ck] = $true
-          }
-          if ([string]$currentStart.body -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'CURRENT_START_GEN_MISMATCH' }
-          if ([string]$currentStart.body -notmatch '(?m)^control_status:\s*ACTIVE\s*$') { throw 'CURRENT_START_NOT_ACTIVE' }
-          if ([string]$currentStart.body -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'CURRENT_START_RECORDED_BY_ROLE_INVALID' }
-          $allowedCSKeys = @('state','control_generation','control_status','recorded_by_role','supersedes')
-          for ($csLi = 1; $csLi -lt $csBodyLines.Count; $csLi++) {
-            $csLine = $csBodyLines[$csLi]
-            if ([string]::IsNullOrWhiteSpace($csLine)) { continue }
-            if ($csLine -notmatch '^(?<ck>[a-z0-9_]+):\s*(?<cv>.+)$') { throw "CURRENT_START_BODY_NOT_POINTER_ONLY_LINE_$csLi" }
-            if ($allowedCSKeys -notcontains $Matches.ck) { throw "CURRENT_START_UNKNOWN_FIELD_$($Matches.ck)" }
-          }
-          $newerCurrentStartsAfterLatest = @($issue43 | Where-Object {
-            [int64]$_.id -gt [int64]$currentStart.id -and
-            [string]$_.body -match '(?m)^CURRENT_REHYDRATION_INDEX_V\d+\s*$' -and
-            [string]$_.body -match '(?m)^state:\s*CURRENT_START_HERE\s*$'
-          })
-          if ($newerCurrentStartsAfterLatest.Count -gt 0) { throw 'NEWER_CURRENT_START_EXISTS' }
-
-          $issue162Result = Get-AllComments $issue
-          $comments = $issue162Result.comments
-          $issue162Eof = $issue162Result.eof
-          if (-not $issue162Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_162' }
-
-          $logicalKey = "${cardReceipt}:${idempotency}:${cardId}:${generation}:${launcherHead}:${workerBase}:${workflowPath}:${targetRef}:${targetHead}:${consumerBlob}"
-          $priorLiveObs = @($comments | Where-Object {
-            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_LIVE_CONSUMER_OBSERVES_V1\s*$' -and
-            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
-            [string]$_.body -match "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$" -and
-            [string]$_.body -match "(?m)^control_generation:\s*$([regex]::Escape($generation))\s*$" -and
-            [string]$_.body -match "(?m)^launcher_head_sha:\s*$([regex]::Escape($launcherHead))\s*$" -and
-            [string]$_.body -match "(?m)^worker_base_sha:\s*$([regex]::Escape($workerBase))\s*$"
-          })
-          $priorConsumed = @($comments | Where-Object {
-            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1\s*$' -and
-            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
-            [string]$_.body -match "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$" -and
-            [string]$_.body -match "(?m)^control_generation:\s*$([regex]::Escape($generation))\s*$"
-          })
-          $priorTerminal = @($comments | Where-Object {
-            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1\s*$' -and
-            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
-            [string]$_.body -match "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$" -and
-            [string]$_.body -match "(?m)^control_generation:\s*$([regex]::Escape($generation))\s*$"
-          })
-          $priorBlocked = @($comments | Where-Object {
-            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMER_BLOCKED_V1\s*$' -and
-            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
-            [string]$_.body -match "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$" -and
-            [string]$_.body -match "(?m)^control_generation:\s*$([regex]::Escape($generation))\s*$"
-          })
-          if ($priorTerminal.Count -gt 0) {
-            Write-Output "NO_OP_DUPLICATE prior terminal receipt=$($priorTerminal[-1].id)"
-            exit 0
-          }
-          if ($priorConsumed.Count -gt 0) {
-            if ($priorBlocked.Count -gt 0) {
-              Publish-Blocker 'BLOCKED_PRIOR_CONSUMPTION_WITH_BLOCKER' 'Prior consumption and blocker exist without terminal; reconcile the prior run.' $dispatchId $cardReceipt $cardId $idempotency 0
-            } else {
-              Publish-Blocker 'BLOCKED_PRIOR_CONSUMPTION_WITHOUT_TERMINAL' 'Existing executor consumption prevents a second prompt; reconcile the prior run.' $dispatchId $cardReceipt $cardId $idempotency 0
+          
+          function Make-Binding($dispatch, $df, $card, $cf, $executor) {
+            $binding = @{
+              repo=$repo; issue='162'; source_dispatch_comment=[string]$dispatch.id; source_card_receipt=[string]$card.id
+              source_consumer_acceptance=$cf['source_consumer_acceptance']; executor_role='WORKER'
             }
-            exit 0
+            foreach ($key in @('card_id','control_generation','dispatch_idempotency_key','launcher_head_sha','worker_base_sha',
+              'consumer_workflow_path_exact','consumer_workflow_blob_exact','target_ref_exact','target_ref_head_exact')) { $binding[$key] = $cf[$key] }
+            foreach ($key in @(Tuple-Keys)) { $binding[$key] = $executor[$key] }
+            return $binding
           }
-          if ($priorLiveObs.Count -gt 0) {
-            Publish-Blocker 'BLOCKED_PRIOR_LIVE_OBSERVATION_WITHOUT_CONSUMPTION' 'A prior live observation exists without consumption or terminal; reconcile before resend.' $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
-          if ($priorBlocked.Count -gt 0) {
-            Publish-Blocker 'BLOCKED_PRIOR_BLOCKER_WITHOUT_CONSUMPTION' 'A prior blocker exists without consumption or terminal; reconcile before resend.' $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
-
-          $runnerUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-          $runnerSession = (Get-Process -Id $PID).SessionId
-
-          $liveBody = @(
-            'GBB_G13_HANDOFF_AUTOMATION_LIVE_CONSUMER_OBSERVES_V1'
-            'state: LIVE_CONSUMER_OBSERVES'
-            'recorded_by_role: G13_HANDOFF_CONSUMER_WORKFLOW'
-            'control_generation: 013'
-            "source_dispatch_comment: $dispatchId"
-            "source_card_receipt: $cardReceipt"
-            "card_id: $cardId"
-            "launcher_head_sha: $launcherHead"
-            "worker_base_sha: $workerBase"
-            "dispatch_idempotency_key: $idempotency"
-            "runner_name: $env:RUNNER_NAME"
-            "runner_user: $runnerUser"
-            "runner_session_id: $runnerSession"
-            "target_agent_name: $targetAgentName"
-            "target_pane: $targetPane"
-            "target_cwd_exact: $targetCwd"
-            "workflow_run_id: $env:GITHUB_RUN_ID"
-            'physical_prompt_count: 0'
-            'readback_verified: true'
-          ) -join "`n"
-          [void](Publish $liveBody)
-
-          $before = Invoke-HerdrJson @('agent', 'list')
-          $beforeMatches = @($before.result.agents | Where-Object {
-            [string]$_.name -ceq $targetAgentName -and
-            [string]$_.pane_id -ceq $targetPane -and
-            [string]$_.cwd -ceq $targetCwd -and
-            [string]$_.head_sha -ceq $workerBase -and
-            [string]$_.agent_status -ceq $targetStatus -and
-            [string]$_.agent_kind -ceq 'opencode' -and
-            [string]$_.workspace -ceq 'w5'
-          })
-          if ($beforeMatches.Count -ne 1) {
-            Publish-Blocker 'VISIBLE_EXECUTOR_ABSENT_OR_AMBIGUOUS' "target_count=$($beforeMatches.Count)" $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
-          $selected = $beforeMatches[0]
-          $targetSession = [string]$selected.agent_session.value
-          if ([string]::IsNullOrWhiteSpace($targetSession)) {
-            Publish-Blocker 'EXECUTOR_SESSION_MISSING' 'Selected executor has no session identity.' $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
-          $workerBranchName = [string]$selected.branch
-          if ([string]::IsNullOrWhiteSpace($workerBranchName)) {
-            Publish-Blocker 'EXECUTOR_BRANCH_MISSING' 'Selected executor has no branch.' $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
-          if ([string]$selected.head_sha -cne $workerBase) {
-            Publish-Blocker 'EXECUTOR_HEAD_MISMATCH' "expected=$workerBase actual=$([string]$selected.head_sha)" $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
-          $after = Invoke-HerdrJson @('agent', 'list')
-          $afterMatches = @($after.result.agents | Where-Object {
-            [string]$_.name -ceq $targetAgentName -and
-            [string]$_.pane_id -ceq $targetPane -and
-            [string]$_.cwd -ceq $targetCwd -and
-            [string]$_.branch -ceq $workerBranchName -and
-            [string]$_.head_sha -ceq $workerBase -and
-            [string]$_.agent_session.value -ceq $targetSession -and
-            [string]$_.agent_status -ceq $targetStatus -and
-            [string]$_.agent_kind -ceq 'opencode' -and
-            [string]$_.workspace -ceq 'w5'
-          })
-          if ($afterMatches.Count -ne 1) {
-            Publish-Blocker 'EXECUTOR_BINDING_CHANGED' 'Two fresh inventories did not identify the same unique executor.' $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
-
-          $preSendIssue88 = Get-AllComments 88
-          $preSendAllSwitches = @($preSendIssue88.comments | Where-Object {
-            [string]$_.user.login -ceq 'D22977' -and
-            [string]$_.author_association -ceq 'OWNER' -and
-            [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
-            [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
-          })
-          if ($preSendAllSwitches.Count -eq 0) { throw 'PRE_SEND_NO_COMMITTED_SWITCH' }
-          $latestPreSendSwitch = ($preSendAllSwitches | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
-          Require-Exact-FirstLine ([string]$latestPreSendSwitch.body) 'CONTROL_GENERATION_SWITCH_V1' 'PRE_SEND_SWITCH'
-          if ([string]$latestPreSendSwitch.body -notmatch '(?m)^new_generation:\s*013\s*$') { throw 'PRE_SEND_LATEST_SWITCH_NOT_GEN013' }
-          if ([string]$latestPreSendSwitch.body -notmatch '(?m)^new_status:\s*ACTIVE\s*$') { throw 'PRE_SEND_LATEST_SWITCH_NOT_ACTIVE' }
-
-          $preSendIssue43 = Get-AllComments 43
-          $preSendAllCS = @($preSendIssue43.comments | Where-Object {
-            [string]$_.user.login -ceq 'D22977' -and
-            [string]$_.author_association -ceq 'OWNER' -and
-            [string]$_.body -match '(?m)^CURRENT_REHYDRATION_INDEX_V\d+\s*$' -and
-            [string]$_.body -match '(?m)^state:\s*CURRENT_START_HERE\s*$'
-          })
-          if ($preSendAllCS.Count -eq 0) { throw 'PRE_SEND_NO_CURRENT_START' }
-          $latestPreSendCS = ($preSendAllCS | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
-          $preSendCSNlIdx = [string]$latestPreSendCS.body.IndexOfAny(@([char]13, [char]10))
-          $preSendCSFirstLine = if ($preSendCSNlIdx -ge 0) { [string]$latestPreSendCS.body.Substring(0, $preSendCSNlIdx) } else { [string]$latestPreSendCS.body }
-          $preSendCSFirstChar = [int][char]$preSendCSFirstLine[0]
-          if ($preSendCSFirstChar -eq 0xFEFF) { throw 'BOM_DETECTED_IN_PRE_SEND_CS' }
-          if ($preSendCSFirstLine -cne [string]$preSendCSFirstLine.Trim()) { throw 'PRE_SEND_CS_PROTOCOL_LEADING_WHITESPACE' }
-          if ($preSendCSFirstLine -notmatch '^CURRENT_REHYDRATION_INDEX_V\d+$') { throw 'PRE_SEND_WRONG_CS_PROTOCOL' }
-          if ([string]$latestPreSendCS.body -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'PRE_SEND_LATEST_CS_NOT_GEN013' }
-          if ([string]$latestPreSendCS.body -notmatch '(?m)^control_status:\s*ACTIVE\s*$') { throw 'PRE_SEND_LATEST_CS_NOT_ACTIVE' }
-
-          $preSendCard = Get-Comment $cardReceipt
-          $preSendCardBody = [string]$preSendCard.body
-          if ([string]$preSendCard.user.login -cne 'D22977') { throw 'PRE_SEND_CARD_AUTHOR_INVALID' }
-          if ([string]$preSendCard.author_association -cne 'OWNER') { throw 'PRE_SEND_CARD_ASSOCIATION_INVALID' }
-          Require-Exact-FirstLine $preSendCardBody 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1' 'PRE_SEND_CARD'
-          if ($preSendCardBody -notmatch '(?m)^state:\s*READY_FOR_POINTER_DISPATCH\s*$') { throw 'PRE_SEND_CARD_NO_LONGER_READY' }
-          if ((Get-Field $preSendCardBody 'card_id') -cne $cardId) { throw 'PRE_SEND_CARD_ID_CHANGED' }
-          if ((Get-Field $preSendCardBody 'control_generation') -cne '013') { throw 'PRE_SEND_CARD_GEN_CHANGED' }
-
-          $preSendAcceptance = Get-Comment $sourceAcceptance
-          $preSendAccBody = [string]$preSendAcceptance.body
-          if ([string]$preSendAcceptance.user.login -cne 'D22977') { throw 'PRE_SEND_ACCEPTANCE_AUTHOR_INVALID' }
-          if ([string]$preSendAcceptance.author_association -cne 'OWNER') { throw 'PRE_SEND_ACCEPTANCE_ASSOCIATION_INVALID' }
-          if ($preSendAccBody -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'PRE_SEND_ACCEPTANCE_RECORDED_BY_ROLE_INVALID' }
-          if ($preSendAccBody -notmatch '(?m)^state:\s*PASS\s*$') { throw 'PRE_SEND_ACCEPTANCE_STATE_INVALID' }
-          if ($preSendAccBody -notmatch "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$") { throw 'PRE_SEND_ACCEPTANCE_CARD_ID_MISMATCH' }
-
-          $preSendRef = Invoke-RestMethod "$api/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
-          if ([string]$preSendRef.object.sha -cne $targetHead) { throw 'PRE_SEND_TARGET_REF_HEAD_STALE' }
-          $preSendWorkflow = Invoke-RestMethod "$api/contents/${workflowPath}?ref=$env:GITHUB_SHA" -Headers $headers -Method Get -TimeoutSec 30
-          if ([string]$preSendWorkflow.sha -cne $consumerBlob) { throw 'PRE_SEND_WORKFLOW_BLOB_MISMATCH' }
-
-          $preSendIssue162 = Get-AllComments $issue
-          $preSendComments = $preSendIssue162.comments
-          $preSendTerminal = @($preSendComments | Where-Object {
-            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1\s*$' -and
-            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
-          })
-          if ($preSendTerminal.Count -gt 0) {
-            Write-Output "NO_OP_PRE_SEND_TERMINAL_EXISTS receipt=$($preSendTerminal[-1].id)"
-            exit 0
-          }
-          $preSendConsumed = @($preSendComments | Where-Object {
-            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1\s*$' -and
-            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
-          })
-          if ($preSendConsumed.Count -gt 0) {
-            Publish-Blocker 'BLOCKED_PRE_SEND_CONSUMPTION_EXISTS' 'A consumption receipt was observed before physical send; no duplicate dispatch.' $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
-          $preSendLiveObs = @($preSendComments | Where-Object {
-            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_LIVE_CONSUMER_OBSERVES_V1\s*$' -and
-            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
-          })
-          if ($preSendLiveObs.Count -gt 1) {
-            Publish-Blocker 'BLOCKED_PRE_SEND_DUPLICATE_LIVE_OBSERVATION' 'Multiple live observations exist for this logical event; no duplicate dispatch.' $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
-
-          $reservationKey = "${cardReceipt}:${idempotency}:${cardId}:${generation}:${launcherHead}:${workerBase}:${workflowPath}:${targetRef}:${targetHead}:${consumerBlob}"
-          if ($reservationKey -cne $logicalKey) { throw 'RESERVATION_KEY_DIVERGENCE' }
-          $preSendReservation = @($preSendComments | Where-Object {
-            [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1\s*$' -and
-            [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
-            [string]$_.body -match "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$" -and
-            [string]$_.body -match "(?m)^control_generation:\s*$([regex]::Escape($generation))\s*$" -and
-            [string]$_.body -match "(?m)^launcher_head_sha:\s*$([regex]::Escape($launcherHead))\s*$" -and
-            [string]$_.body -match "(?m)^worker_base_sha:\s*$([regex]::Escape($workerBase))\s*$" -and
-            [string]$_.body -match "(?m)^consumer_workflow_path_exact:\s*$([regex]::Escape($workflowPath))\s*$" -and
-            [string]$_.body -match "(?m)^target_ref_exact:\s*$([regex]::Escape($targetRef))\s*$"
-          })
-          if ($preSendReservation.Count -gt 0) {
-            Publish-Blocker 'BLOCKED_PRE_SEND_RESERVATION_CONFLICT' 'A prior consumption exists for this exact logical reservation; no duplicate dispatch.' $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
-
-          $finalCheck = Invoke-HerdrJson @('agent', 'list')
-          $finalMatch = @($finalCheck.result.agents | Where-Object {
-            [string]$_.name -ceq $targetAgentName -and
-            [string]$_.pane_id -ceq $targetPane -and
-            [string]$_.cwd -ceq $targetCwd -and
-            [string]$_.branch -ceq $workerBranchName -and
-            [string]$_.head_sha -ceq $workerBase -and
-            [string]$_.agent_session.value -ceq $targetSession -and
-            [string]$_.agent_status -ceq $targetStatus -and
-            [string]$_.agent_kind -ceq $admittedExecutorKind -and
-            [string]$_.workspace -ceq $admittedExecutorWorkspace
-          })
-          if ($finalMatch.Count -ne 1) {
-            Publish-Blocker 'FINAL_BOUNDARY_REENUMERATION_FAILED' 'Final pre-send re-enumeration did not identify the same unique executor.' $dispatchId $cardReceipt $cardId $idempotency 0
-            exit 0
-          }
-          $finalSelected = $finalMatch[0]
-          $finalIdentity = if (-not [string]::IsNullOrWhiteSpace([string]$finalSelected.identity)) { [string]$finalSelected.identity } elseif (-not [string]::IsNullOrWhiteSpace([string]$finalSelected.agent_identity)) { [string]$finalSelected.agent_identity } else { "$admittedExecutorKind/$admittedExecutorName" }
-          if ($finalIdentity -cne $admittedExecutorIdentity) { throw 'FINAL_BOUNDARY_IDENTITY_MISMATCH' }
-          if ([string]$finalSelected.agent_kind -cne $admittedExecutorKind) { throw 'FINAL_BOUNDARY_KIND_MISMATCH' }
-          if ([string]$finalSelected.workspace -cne $admittedExecutorWorkspace) { throw 'FINAL_BOUNDARY_WORKSPACE_MISMATCH' }
-          if ([string]$finalSelected.pane_id -cne $admittedExecutorPane) { throw 'FINAL_BOUNDARY_PANE_MISMATCH' }
-          if ([string]$finalSelected.agent_session.value -cne $admittedSession) { throw 'FINAL_BOUNDARY_SESSION_MISMATCH' }
-          if ([string]$finalSelected.head_sha -cne $admittedExecutorHead) { throw 'FINAL_BOUNDARY_HEAD_MISMATCH' }
-          if ([string]$finalSelected.agent_status -cne $admittedExecutorStatus) { throw 'FINAL_BOUNDARY_STATUS_MISMATCH' }
-
-          $pointer = @(
-            'GBB_G13_HANDOFF_POINTER_DISPATCH_REQUEST_V1'
-            "card_receipt: $cardReceipt"
-            "card_id: $cardId"
-            'control_generation: 013'
-            "launcher_head_sha: $launcherHead"
-            "worker_base_sha: $workerBase"
-            "dispatch_idempotency_key: $idempotency"
-          ) -join "`n"
-          $promptOutput = (& $herdr agent prompt $targetAgentName $pointer 2>&1 | Out-String).Trim()
-          $promptExit = $LASTEXITCODE
-          if ($promptExit -ne 0) {
-            Publish-Blocker 'HERDR_POINTER_SEND_FAILED' 'The single pointer send failed; no retry is authorized.' $dispatchId $cardReceipt $cardId $idempotency 1
-            exit 0
-          }
-
-          $consumed = $null
-          for ($attempt = 0; $attempt -lt 40; $attempt++) {
-            Start-Sleep -Seconds 3
-            $rows = Get-AllComments $issue
-            $rowsComments = $rows.comments
-            $matches = @($rowsComments | Where-Object {
-              [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1\s*$' -and
-              [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-              [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
-              [string]$_.body -match '(?m)^readback_verified:\s*true\s*$'
-            })
-            if ($matches.Count -gt 1) {
-              Publish-Blocker 'CONSUMED_STARTED_AMBIGUOUS' 'More than one executor consumption receipt was observed; no semantic decision is made.' $dispatchId $cardReceipt $cardId $idempotency 1
-              exit 0
+          
+          function Logical-Key($binding) {
+            # Length-prefixed canonical full tuple; dispatch COMMENT is excluded so two
+            # comment IDs carrying one logical event cannot acquire separate reservations.
+            $parts = foreach ($key in @($binding.Keys | Sort-Object -CaseSensitive)) {
+              if ($key -ceq 'source_dispatch_comment') { continue }
+              $value = [string]$binding[$key]
+              if ([string]::IsNullOrWhiteSpace($value)) { throw 'EMPTY_RESERVATION_TUPLE' }
+              "$($key.Length):$key$($value.Length):$value"
             }
-            if ($matches.Count -eq 1) { $consumed = $matches[0]; break }
+            return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes(($parts -join '|')))).ToLowerInvariant()
           }
-          if ($null -eq $consumed) {
-            Publish-Blocker 'UNCERTAIN_SEND_CONSUMED_STARTED_NOT_OBSERVED' 'The single pointer send may have been delivered; no blind retry is allowed.' $dispatchId $cardReceipt $cardId $idempotency 1
-            exit 0
+          
+          function Receipt-Body([string]$protocol, $fields) {
+            return (@($protocol) + @($fields.Keys | Sort-Object -CaseSensitive | ForEach-Object { "$($_): $($fields[$_])" })) -join "`n"
           }
-
-          $consumedReadback = Get-Comment ([string]$consumed.id)
-          $consumedReadbackBody = [string]$consumedReadback.body
-          Require-Exact-FirstLine $consumedReadbackBody 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1' 'CONSUMED_STARTED_READBACK'
-          if ([string]$consumedReadback.user.login -cne 'D22977') { throw 'CONSUMED_STARTED_AUTHOR_INVALID' }
-          if ([string]$consumedReadback.author_association -cne 'OWNER') { throw 'CONSUMED_STARTED_ASSOCIATION_INVALID' }
-          if ((Get-Field $consumedReadbackBody 'source_card_receipt') -cne $cardReceipt) { throw 'CONSUMED_STARTED_READBACK_CARD_RECEIPT_MISMATCH' }
-          if ((Get-Field $consumedReadbackBody 'dispatch_idempotency_key') -cne $idempotency) { throw 'CONSUMED_STARTED_READBACK_IDEMPOTENCY_MISMATCH' }
-          $admittedExecutorKind = [string]$selected.agent_kind
-          if ([string]::IsNullOrWhiteSpace($admittedExecutorKind)) { $admittedExecutorKind = [string]$selected.agent }
-          $admittedExecutorName = [string]$selected.name
-          $admittedExecutorIdentity = if (-not [string]::IsNullOrWhiteSpace([string]$selected.identity)) { [string]$selected.identity } elseif (-not [string]::IsNullOrWhiteSpace([string]$selected.agent_identity)) { [string]$selected.agent_identity } else { "$admittedExecutorKind/$admittedExecutorName" }
-          $admittedExecutorRole = 'WORKER'
-          $admittedSession = $targetSession
-          $admittedControlGeneration = $generation
-          $admittedExecutorPane = $targetPane
-          $admittedExecutorWorkspace = 'w5'
-          $admittedExecutorCwd = $targetCwd
-          $admittedExecutorBranch = $workerBranchName
-          $admittedExecutorHead = $workerBase
-          $admittedExecutorStatus = $targetStatus
-          $admittedExecutorVisibility = 'focused:true'
-          function Validate-ConsumedStarted([string]$body, [string]$expectedExecutor, [string]$expectedSession, [string]$expectedGeneration) {
-            Require-Exact-FirstLine $body 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1' 'CONSUMED_STARTED'
-            if ((Get-Field $body 'source_card_receipt') -cne $cardReceipt) { throw 'CONSUMED_STARTED_CARD_RECEIPT_MISMATCH' }
-            if ((Get-Field $body 'dispatch_idempotency_key') -cne $idempotency) { throw 'CONSUMED_STARTED_IDEMPOTENCY_MISMATCH' }
-            if ((Get-Field $body 'card_id') -cne $cardId) { throw 'CONSUMED_STARTED_CARD_ID_MISMATCH' }
-            if ((Get-Field $body 'control_generation') -cne $expectedGeneration) { throw 'CONSUMED_STARTED_GENERATION_MISMATCH' }
-            if ((Get-Field $body 'readback_verified') -cne 'true') { throw 'CONSUMED_STARTED_READBACK_NOT_VERIFIED' }
-            if ((Get-Field $body 'executor_identity') -cne $expectedExecutor) { throw 'CONSUMED_STARTED_EXECUTOR_IDENTITY_MISMATCH' }
-            if ((Get-Field $body 'executor_session_or_instance') -cne $expectedSession) { throw 'CONSUMED_STARTED_SESSION_MISMATCH' }
+          
+          function Publish([string]$body) {
+            # One POST only. A timeout, lost response or failed exact GET is never retried.
+            $created = Invoke-RestMethod "$api/issues/162/comments" -Headers $headers -Method Post -Body (@{body=$body} | ConvertTo-Json -Compress) -ContentType 'application/json' -TimeoutSec 30
+            $fresh = Read-Exact $created 162 'WORKFLOW'
+            if ([string]$fresh.body -cne $body) { throw 'PUBLISHED_RECEIPT_READBACK_MISMATCH_NO_BLIND_RETRY' }
+            return $fresh
           }
-          Validate-ConsumedStarted $consumedReadbackBody $admittedExecutorIdentity $admittedSession $admittedControlGeneration
-
-          $terminal = $null
-          for ($attempt = 0; $attempt -lt 40; $attempt++) {
-            Start-Sleep -Seconds 3
-            $rows = Get-AllComments $issue
-            $rowsComments = $rows.comments
-            $matches = @($rowsComments | Where-Object {
-              [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1\s*$' -and
-              [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-              [string]$_.body -match "(?m)^source_consumed_started_receipt:\s*$([regex]::Escape([string]$consumed.id))\s*$" -and
-              [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
-              [string]$_.body -match '(?m)^decision:\s*(PASS|BLOCKED|CONTROL_REQUIRED)\s*$' -and
-              [string]$_.body -match '(?m)^readback_verified:\s*true\s*$'
-            })
-            if ($matches.Count -gt 1) {
-              Publish-Blocker 'HANDOFF_TEST_RESULT_AMBIGUOUS' 'More than one terminal result was observed; no acceptance is inferred.' $dispatchId $cardReceipt $cardId $idempotency 1
-              exit 0
+          
+          function Validate-Reservation($comment, $binding, [string]$runId, [string]$runAttempt) {
+            Assert-Comment $comment 162 'WORKFLOW'
+            $expected = @{} + $binding
+            $expected += @{ state='RESERVED_NO_RETRY'; recorded_by_role='G13_HANDOFF_CONSUMER_WORKFLOW'; logical_key=(Logical-Key $binding)
+              workflow_run_id=$runId; workflow_run_attempt=$runAttempt; physical_prompt_count='0'; supersedes='NONE'; readback_verified='true' }
+            $f = Read-Record $comment.body 'GBB_G13_HANDOFF_AUTOMATION_RESERVATION_V1' @($expected.Keys)
+            Require-Values $f $expected
+            return ,$f
+          }
+          
+          function Assert-NoPriorAttempt($rows, $binding, [string]$ownReservationId = '') {
+            foreach ($row in $rows) {
+              $first = ([string]$row.body -split "\n?\n",2)[0]
+              if ($first.Trim().TrimStart([char]0xFEFF) -imatch '^GBB_G13_HANDOFF_AUTOMATION_(RESERVATION|LIVE_CONSUMER_OBSERVES|CONSUMED_STARTED|HANDOFF_TEST_RESULT|CONSUMER_BLOCKED)_V') {
+                if ([string]$row.id -ceq $ownReservationId) { continue }
+                # A prior attempt with an incomplete/unknown schema is uncertainty, not an
+                # ignorable non-match. This single-card consumer cannot inherit a send.
+                throw 'NO_BLIND_RETRY_PRIOR_DURABLE_ATTEMPT'
+              }
             }
-            if ($matches.Count -eq 1) { $terminal = $matches[0]; break }
           }
-          if ($null -eq $terminal) {
-            Publish-Blocker 'HANDOFF_TEST_RESULT_NOT_OBSERVED' 'Consumption was observed but the executor terminal was not observed; no completion is inferred.' $dispatchId $cardReceipt $cardId $idempotency 1
-            exit 0
+          
+          function Validate-WorkerReceipt($comment, [string]$kind, $binding, $reservation, $consumed = $null) {
+            Assert-Comment $comment 162
+            $expected = @{} + $binding
+            $expected += @{ recorded_by_role='WORKER'; source_reservation_receipt=[string]$reservation.id; supersedes='NONE'; readback_verified='true' }
+            if ($kind -ceq 'CONSUMED') {
+              $protocol = 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1'
+              $expected['state'] = 'CONSUMED_STARTED'
+              $expected['executor_status'] = 'working'
+              Assert-Order $reservation $comment
+            } elseif ($kind -ceq 'TERMINAL' -and $null -ne $consumed) {
+              $protocol = 'GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1'
+              $expected['state'] = 'TERMINAL_RESULT'
+              $expected['source_consumed_started_receipt'] = [string]$consumed.id
+              # Decision and status are validated as a pair below, never loosely regexed.
+              $expected['decision'] = 'PASS'
+              $expected['executor_status'] = 'done'
+              $expected['physical_prompt_count'] = '1'
+              $expected['second_prompt_count'] = '0'
+              $expected['blind_retry'] = 'false'
+              Assert-Order $consumed $comment
+            } else { throw 'UNKNOWN_WORKER_RECEIPT_SCHEMA' }
+            $f = Read-Record $comment.body $protocol @($expected.Keys)
+            if ($kind -ceq 'TERMINAL') {
+              if ($f['decision'] -cnotin @('PASS','BLOCKED','CONTROL_REQUIRED')) { throw 'INVALID_TERMINAL_DECISION' }
+              $expected['decision'] = $f['decision']
+              $expected['executor_status'] = if ($f['decision'] -ceq 'PASS') { 'done' } else { 'blocked' }
+            }
+            Require-Values $f $expected
+            return ,$f
           }
-
-          $terminalReadback = Get-Comment ([string]$terminal.id)
-          $terminalReadbackBody = [string]$terminalReadback.body
-          Require-Exact-FirstLine $terminalReadbackBody 'GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1' 'TERMINAL_READBACK'
-          if ([string]$terminalReadback.user.login -cne 'D22977') { throw 'TERMINAL_AUTHOR_INVALID' }
-          if ([string]$terminalReadback.author_association -cne 'OWNER') { throw 'TERMINAL_ASSOCIATION_INVALID' }
-          if ((Get-Field $terminalReadbackBody 'source_card_receipt') -cne $cardReceipt) { throw 'TERMINAL_READBACK_CARD_RECEIPT_MISMATCH' }
-          if ((Get-Field $terminalReadbackBody 'dispatch_idempotency_key') -cne $idempotency) { throw 'TERMINAL_READBACK_IDEMPOTENCY_MISMATCH' }
-          $terminalDecision = Get-Field $terminalReadbackBody 'decision'
-          if ($terminalDecision -notin @('PASS', 'BLOCKED', 'CONTROL_REQUIRED')) { throw 'TERMINAL_DECISION_INVALID' }
-          if ((Get-Field $terminalReadbackBody 'source_consumed_started_receipt') -cne [string]$consumed.id) { throw 'TERMINAL_READBACK_CONSUMED_STARTED_MISMATCH' }
-          if ((Get-Field $terminalReadbackBody 'executor_identity') -cne $admittedExecutorIdentity) { throw 'TERMINAL_EXECUTOR_IDENTITY_MISMATCH' }
-          if ((Get-Field $terminalReadbackBody 'executor_session_or_instance') -cne $admittedSession) { throw 'TERMINAL_SESSION_MISMATCH' }
-          if ((Get-Field $terminalReadbackBody 'control_generation') -cne $admittedControlGeneration) { throw 'TERMINAL_GENERATION_MISMATCH' }
-
-          Write-Output "HANDOFF_TEST_TERMINAL_OBSERVED receipt=$($terminal.id) decision=$terminalDecision"
+          
+          function Assert-AuthorityHistory($rows, $card, $acceptance) {
+            foreach ($row in $rows) {
+              $first = ([string]$row.body -split "\n?\n",2)[0]
+              if ($first.Trim().TrimStart([char]0xFEFF) -imatch '^GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V' -and [int64]$row.id -gt [int64]$card.id) { throw 'CARD_SUPERSEDED' }
+              if ($first.Trim().TrimStart([char]0xFEFF) -imatch '^GBB_G13_HANDOFF_AUTOMATION_TEST_ACCEPTANCE_V' -and [int64]$row.id -gt [int64]$acceptance.id) { throw 'ACCEPTANCE_SUPERSEDED' }
+            }
+          }
+          
+          function Read-FinalAuthority($dispatch, $card, $acceptance, $control) {
+            $freshControl = Read-Control
+            Assert-Unchanged $control.switch $freshControl.switch
+            Assert-Unchanged $control.start $freshControl.start
+            $freshDispatch = Read-Exact $dispatch 162
+            $df = Validate-Dispatch $freshDispatch
+            $freshCard = Read-Exact $card 162
+            $cf = Validate-Card $freshCard $df
+            $freshAcceptance = Read-Exact $acceptance 162
+            $af = Validate-Acceptance $freshAcceptance $cf $freshControl
+            Assert-Order $freshAcceptance $freshCard
+            Assert-Order $freshCard $freshDispatch
+            $ref = Invoke-RestMethod "$api/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
+            $blob = Invoke-RestMethod "$api/contents/$($workflowPath)?ref=$($df['launcher_head_sha'])" -Headers $headers -Method Get -TimeoutSec 30
+            if ([string]$ref.object.sha -cne $cf['target_ref_head_exact'] -or [string]$blob.sha -cne $cf['consumer_workflow_blob_exact'] -or [string]$env:GITHUB_SHA -cne $df['launcher_head_sha']) { throw 'FINAL_HEAD_OR_BLOB_STALE' }
+            $history = Get-AllComments 162
+            Assert-AuthorityHistory $history.comments $freshCard $freshAcceptance
+            return $history
+          }
+          
+          function Read-ReceiptPair($rows, $binding, $reservation) {
+            foreach ($row in $rows) {
+              $first = ([string]$row.body -split "\n?\n",2)[0]
+              if ($first.Trim().TrimStart([char]0xFEFF) -imatch '^GBB_G13_HANDOFF_AUTOMATION_(LIVE_CONSUMER_OBSERVES|CONSUMER_BLOCKED)_V') { throw 'NO_BLIND_RETRY_CONFLICTING_ATTEMPT' }
+            }
+            $consumedRows = @(Get-Family $rows 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V')
+            $terminalRows = @(Get-Family $rows 'GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V')
+            $reservations = @(Get-Family $rows 'GBB_G13_HANDOFF_AUTOMATION_RESERVATION_V')
+            if ($reservations.Count -ne 1 -or [string]$reservations[0].id -cne [string]$reservation.id) { throw 'NO_BLIND_RETRY_RESERVATION_CONFLICT' }
+            $freshReservation = Read-Exact $reservations[0] 162 'WORKFLOW'
+            Assert-Unchanged $reservation $freshReservation
+            [void](Validate-Reservation $freshReservation $binding $env:GITHUB_RUN_ID $env:GITHUB_RUN_ATTEMPT)
+            if ($consumedRows.Count -gt 1 -or $terminalRows.Count -gt 1) { throw 'RECEIPT_DUPLICATE_OR_SUPERSEDED' }
+            $consumed = $null
+            $terminal = $null
+            if ($consumedRows.Count -eq 1) {
+              [void](Validate-WorkerReceipt $consumedRows[0] 'CONSUMED' $binding $reservation)
+              $consumed = Read-Exact $consumedRows[0] 162
+              [void](Validate-WorkerReceipt $consumed 'CONSUMED' $binding $reservation)
+            }
+            if ($terminalRows.Count -eq 1) {
+              if ($null -eq $consumed) { throw 'TERMINAL_WITHOUT_CONSUMED' }
+              [void](Validate-WorkerReceipt $terminalRows[0] 'TERMINAL' $binding $reservation $consumed)
+              $terminal = Read-Exact $terminalRows[0] 162
+              [void](Validate-WorkerReceipt $terminal 'TERMINAL' $binding $reservation $consumed)
+            }
+            return @{ consumed=$consumed; terminal=$terminal }
+          }
+          
+          # Main: every tuple assignment and validation precedes the final inventory/send.
+          # Global workflow concurrency serializes different dispatch comments too.
+          # Reservation is a permanent no-retry tombstone across failures/restarts.
+          try {
+            $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+            if ([int]$event.issue.number -ne 162) { throw 'EVENT_ISSUE_MISMATCH' }
+            $dispatch = Get-Comment ([string]$event.comment.id)
+            if ([string]$dispatch.body -cne [string]$event.comment.body) { throw 'DISPATCH_EDITED_SINCE_EVENT' }
+            $df = Validate-Dispatch $dispatch
+            $control = Read-Control
+            $card = Get-Comment $df['card_receipt']
+            $cf = Validate-Card $card $df
+            $acceptance = Get-Comment $cf['source_consumer_acceptance']
+            $af = Validate-Acceptance $acceptance $cf $control
+            Assert-Order $acceptance $card
+            Assert-Order $card $dispatch
+            $inventory = Invoke-HerdrJson @('agent','list')
+            $admittedExecutor = Select-Executor $inventory.result.agents $af
+            $binding = Make-Binding $dispatch $df $card $cf $admittedExecutor
+            $history = Read-FinalAuthority $dispatch $card $acceptance $control
+            Assert-NoPriorAttempt $history.comments $binding
+            if ($env:GITHUB_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:GITHUB_RUN_ATTEMPT -cne '1') { throw 'NO_BLIND_RETRY_RERUN_OR_RUN_ID_MISSING' }
+            $reservedFields = @{} + $binding
+            $reservedFields += @{ state='RESERVED_NO_RETRY'; recorded_by_role='G13_HANDOFF_CONSUMER_WORKFLOW'; logical_key=(Logical-Key $binding)
+              workflow_run_id=$env:GITHUB_RUN_ID; workflow_run_attempt=$env:GITHUB_RUN_ATTEMPT; physical_prompt_count='0'; supersedes='NONE'; readback_verified='true' }
+            $reservation = Publish (Receipt-Body 'GBB_G13_HANDOFF_AUTOMATION_RESERVATION_V1' $reservedFields)
+            [void](Validate-Reservation $reservation $binding $env:GITHUB_RUN_ID $env:GITHUB_RUN_ATTEMPT)
+            Assert-Order $dispatch $reservation
+            $pointer = [string]$dispatch.body
+          
+            # Complete card/acceptance/control/ref/blob revalidation after reservation.
+            $finalHistory = Read-FinalAuthority $dispatch $card $acceptance $control
+            Assert-NoPriorAttempt $finalHistory.comments $binding ([string]$reservation.id)
+            $owned = @(Get-Family $finalHistory.comments 'GBB_G13_HANDOFF_AUTOMATION_RESERVATION_V')
+            if ($owned.Count -ne 1 -or [string]$owned[0].id -cne [string]$reservation.id) { throw 'NO_BLIND_RETRY_RESERVATION_NOT_EXCLUSIVE' }
+            $ownedReadback = Read-Exact $owned[0] 162 'WORKFLOW'
+            Assert-Unchanged $reservation $ownedReadback
+            [void](Validate-Reservation $ownedReadback $binding $env:GITHUB_RUN_ID $env:GITHUB_RUN_ATTEMPT)
+            $finalInventory = Invoke-HerdrJson @('agent','list')
+            $finalExecutor = Select-Executor $finalInventory.result.agents $admittedExecutor
+            Require-Values $finalExecutor $admittedExecutor
+            # Transport resolves the exact workspace-qualified pane, never the name alone.
+            # There are no network calls or deferred tuple assignments between here/send.
+            $promptOutput = (& $herdr agent prompt $admittedExecutor['executor_pane'] $pointer 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) { throw 'UNCERTAIN_SEND_NO_BLIND_RETRY' }
+          
+            $pair = $null
+            for ($attempt = 0; $attempt -lt 80; $attempt++) {
+              Start-Sleep -Seconds 3
+              $rows = Read-FinalAuthority $dispatch $card $acceptance $control
+              $pair = Read-ReceiptPair $rows.comments $binding $reservation
+              if ($null -ne $pair.terminal) { break }
+            }
+            if ($null -eq $pair -or $null -eq $pair.terminal) { throw 'RECEIPT_TIMEOUT_NO_BLIND_RETRY' }
+            # Re-fetch complete histories and both full receipts once more after polling:
+            # a terminal observed once never bypasses order, edit or supersession checks.
+            $lastRows = Read-FinalAuthority $dispatch $card $acceptance $control
+            $finalPair = Read-ReceiptPair $lastRows.comments $binding $reservation
+            if ($null -eq $finalPair.consumed -or $null -eq $finalPair.terminal) { throw 'RECEIPT_DISAPPEARED_NO_BLIND_RETRY' }
+            Assert-Unchanged $pair.consumed $finalPair.consumed
+            Assert-Unchanged $pair.terminal $finalPair.terminal
+            Write-Output "HANDOFF_TEST_TERMINAL_OBSERVED receipt=$($finalPair.terminal.id); Control acceptance remains separate."
+          } catch {
+            # No second publication/physical prompt in a catch: ambiguous POST/send cannot
+            # be repaired by retry. Any existing reservation remains durable and occupied.
+            Write-Output "CONTROL_REQUIRED NO_BLIND_RETRY: $($_.Exception.Message)"
+            exit 1
+          }
