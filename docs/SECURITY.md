@@ -1,8 +1,10 @@
 # GPT Browser Bridge — Security
 
 This is the repo-local security policy for GPT Browser Bridge. The authoritative
-policy is `plans/GBB_PARENT_WORK_ORDER.md` §18. Rules here apply to all roles and to
-any code committed to this repository.
+technical policy originates in `plans/GBB_PARENT_WORK_ORDER.md` §18. Rules here
+apply to all roles and any code committed to this repository. Current handoff and
+escalation ownership is defined in [HANDOFF_CONTRACT.md](HANDOFF_CONTRACT.md);
+that contract does not relax the credential, browser or destructive-operation prohibitions.
 
 ## 1. CDP (Chrome DevTools Protocol)
 
@@ -49,8 +51,10 @@ Do **not** save full HTML by default.
 
 - Never commit runtime state, heartbeat, cookies, Chrome profiles, or logs.
 - Review `git status --short` before every commit.
-- Stop and report `NEEDS_HUMAN / DIRTY_ATTRIBUTION_UNKNOWN` if the tree is dirty
-  with unknown attribution; do not `git clean`/`reset --hard`/`stash`.
+- Stop mutation in a tree with unknown dirty attribution and report
+  `DIRTY_ATTRIBUTION_UNKNOWN` to Control; do not `git clean`/`reset --hard`/`stash`.
+  Preserve the files. A separately authorized clean checkout must not duplicate
+  an active Worker or imply ownership of the unknown files.
 
 ## 6. Watcher read-only enforcement
 
@@ -74,5 +78,7 @@ checks for these forbidden APIs on every review.
 ## 8. Fail closed
 
 On any login wall, CAPTCHA, unknown dirty attribution, insufficient permission or
-repeated crash, stop and leave `NEEDS_HUMAN` with a concrete blocker reason rather
-than guessing, retrying indefinitely, or resetting state.
+repeated crash, stop the affected action and preserve a concrete blocker. Never
+guess, retry indefinitely or reset state. Existing local NEEDS_HUMAN holds must not
+be cleared automatically. Return evidence to Control for bounded adjudication;
+external login/permission or an unresolved owner-only decision remains HUMAN_REQUIRED.
