@@ -56,12 +56,14 @@ jobs:
             throw "INCOMPLETE_DURABLE_HISTORY_issue_$number"
           }
           
-          # LF and CRLF are equivalent; bare CR, BOM, empty values and unknown lines fail.
+          # LF and CRLF are equivalent; bare CR, BOM at code point zero, NUL and unknown lines fail.
           # Field identity is ordinal and section scoped. In V117 release_authorized occurs
           # in two declared sections; both are mandatory and independently validated.
           function Read-Record([string]$body, [string]$protocol, [string[]]$keys, [string[]]$sections = @()) {
-            if ($body.Contains([char]0xFEFF) -or $body.Contains([char]0) -or $body -match '\n(?!\n)') { throw 'INVALID_RECORD_ENCODING' }
-            $lines = $body -split "\n?\n"
+            if ($body.Length -gt 0 -and $body[0] -ceq [char]0xFEFF) { throw 'INVALID_RECORD_ENCODING_BOM' }
+            if ($body.Contains([char]0)) { throw 'INVALID_RECORD_ENCODING_NUL' }
+            if ($body -match '\r(?!\n)') { throw 'INVALID_RECORD_ENCODING_BARE_CR' }
+            $lines = $body -split "\r?\n|\n"
             if ($lines[0] -cne $protocol) { throw 'WRONG_RECORD_PROTOCOL' }
             $fields = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
             $seenSections = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -144,7 +146,7 @@ jobs:
           function Get-Family($rows, [string]$family) {
             $records = @()
             foreach ($row in $rows) {
-              $first = ([string]$row.body -split "\n?\n", 2)[0]
+              $first = ([string]$row.body -split "\r?\n|\n", 2)[0]
               if ($first.Trim().TrimStart([char]0xFEFF) -imatch ('^' + [regex]::Escape($family))) {
                 if ($first -cnotmatch ('^' + [regex]::Escape($family) + '[1-9][0-9]*$')) { throw 'MALFORMED_VERSIONED_ENVELOPE' }
                 $records += $row
@@ -205,18 +207,14 @@ jobs:
               'CURRENT_CONTROL/control_conversation_id'=$switchFields['new_conversation_id']; 'CURRENT_CONTROL/control_conversation_url'=$switchFields['new_conversation_url']
               'CURRENT_CONTROL/previous_generation'='012 / RETIRED'; 'CURRENT_CONTROL/previous_stale_wake_behavior'='NO_OP_RETIRED'
               'CURRENT_WORK/repo'=$repo; 'CURRENT_WORK/issue'='162'; 'CURRENT_WORK/card_id'=$switchFields['inherited_issue162_card']
-              'CURRENT_WORK/issue_state'='OPEN_P0'; 'CURRENT_WORK/current_phase'='PRE_EXECUTION_POWERSHELL_PARSER_REPAIR'
+              'CURRENT_WORK/issue_state'='OPEN_P0'
               'CURRENT_WORK/wake_5645450149_consumed'='true'; 'CURRENT_WORK/same_wake_retry_authorized'='false'
-              'CURRENT_WORK/exact_allowed_path'='.github/workflows/g12-issue162-resident-loop-repair-agent-recovery-once.yml'
-              'CURRENT_WORK/exact_required_change'='delimit repairCard variable before literal colon; no semantic scope change'
-              'CURRENT_WORK/latest_receipt'="$($switchFields['inherited_issue162_boundary']) / CONTROL_G12_ISSUE162_AGENT_RECOVERY_POWERSHELL_PARSE_REPAIR_V1"
               'CURRENT_WORK/scheduled_task_deployment_authorized'='false'; 'CURRENT_WORK/worker_merge_authorized'='false'; 'CURRENT_WORK/release_authorized'='false'
               'AUTHORITY_BOUNDARY/merge_default'='NOT_AUTHORIZED except exact separately adopted bounded Control repair authority'
               'AUTHORITY_BOUNDARY/release_authorized'='false'; 'AUTHORITY_BOUNDARY/workflow_dispatch_authorized'='false'
               'AUTHORITY_BOUNDARY/terminal_does_not_imply_successor'='true'; 'AUTHORITY_BOUNDARY/pass_does_not_imply_merge'='true'
               'AUTHORITY_BOUNDARY/user_task_result_relay_target'='0'; 'AUTHORITY_BOUNDARY/readback_required'='true'
               'AUTHORITY_BOUNDARY/idempotency_key'="CURRENT-REHYDRATION-INDEX-V117-G13-$($switch.id)"
-              'BEST_NEXT/text'='Because receipt 5645454417 is explicitly generation012-bound and generation012 is now RETIRED, generation013 must first durably adopt/rebind that exact bounded repair authority without changing scope. Only then may the one-file parser repair continue. Do not execute a G12-bound mutation directly under G13.'
             }
             if ($f['supersedes'] -cnotmatch '^([1-9][0-9]*) / CURRENT_REHYDRATION_INDEX_V116$' -or [int64]$Matches[1] -ge [int64]$comment.id) { throw 'CURRENT_START_SUPERSESSION_INVALID' }
             if ($f['current_registry'] -cnotmatch '^([1-9][0-9]*) / CURRENT_REGISTRY_INDEX_V19$' -or [int64]$Matches[1] -ge [int64]$comment.id) { throw 'CURRENT_REGISTRY_ORDER_INVALID' }
@@ -320,26 +318,82 @@ jobs:
             return $values[0]
           }
           
+          # Herdr 0.8.2 supported AgentInfo properties: agent, agent_session,
+          # agent_status (idle|working|blocked|done|unknown), cwd, display_agent,
+          # focused, foreground_cwd, interactive_ready, launch_pending, name,
+          # pane_id, revision, screen_detection_skipped, state_change_seq, tab_id,
+          # terminal_id, terminal_title, terminal_title_stripped, title, tokens,
+          # workspace_id. Do not invent identity/kind/branch/head/visibility/role
+          # from AgentInfo. Obtain model/identity/branch/head from pane process-info
+          # and git in the bound cwd.
           function Get-ExecutorTuple($agent) {
-            $tuple = @{
-              executor_identity=Live-Value $agent @('identity','agent_identity')
-              executor_kind=Live-Value $agent @('agent_kind')
-              executor_name=Live-Value $agent @('name')
-              executor_pane=Live-Value $agent @('pane_id')
-              executor_workspace=Live-Value $agent @('workspace','workspace_id')
-              executor_cwd=Live-Value $agent @('cwd')
-              executor_branch=Live-Value $agent @('branch')
-              executor_head=Live-Value $agent @('head_sha')
-              executor_status=Live-Value $agent @('agent_status')
-              executor_visibility=Live-Value $agent @('visibility','agent_visibility')
-              executor_role=Live-Value $agent @('role','agent_role')
-            }
+            $name = Live-Value $agent @('name')
+            $paneId = Live-Value $agent @('pane_id')
+            $workspaceId = Live-Value $agent @('workspace_id')
+            $cwd = Live-Value $agent @('cwd')
+            $status = Live-Value $agent @('agent_status')
+            if ($status -cnotin @('idle','working','blocked','done','unknown')) { throw 'INVALID_EXECUTOR_STATUS' }
             $session = $agent.PSObject.Properties['agent_session']
             if ($null -eq $session -or $null -eq $session.Value) { throw 'LIVE_SESSION_MISSING' }
-            $tuple['executor_session_or_instance'] = Live-Value $session.Value @('value')
-            Require-Sha $tuple['executor_head']
-            Require-Values $tuple @{ executor_role='WORKER' }
-            if ($tuple['executor_status'] -cnotin @('idle','done') -or $tuple['executor_visibility'] -cnotin @('visible','focused','agent_visible')) { throw 'LIVE_EXECUTOR_NOT_ADMISSIBLE' }
+            $sessionValue = Live-Value $session.Value @('value')
+            $focused = $false
+            $focusedProp = $agent.PSObject.Properties['focused']
+            if ($null -ne $focusedProp) { $focused = [bool]$focusedProp.Value }
+            $interactiveReady = $false
+            $irProp = $agent.PSObject.Properties['interactive_ready']
+            if ($null -ne $irProp) { $interactiveReady = [bool]$irProp.Value }
+            $terminalId = ''
+            $tidProp = $agent.PSObject.Properties['terminal_id']
+            if ($null -ne $tidProp -and -not [string]::IsNullOrWhiteSpace([string]$tidProp.Value)) { $terminalId = [string]$tidProp.Value }
+
+            # Model/identity proof from pane process-info argv
+            $modelProof = ''
+            $modelProofSource = ''
+            if (Test-Path -LiteralPath $herdr -PathType Leaf) {
+              try {
+                $piRaw = (& $herdr 'pane' 'process-info' '--pane' $paneId 2>&1 | Out-String).Trim()
+                if ($LASTEXITCODE -eq 0) {
+                  $pi = $piRaw | ConvertFrom-Json
+                  $fgProcs = $pi.result.process_info.foreground_processes
+                  if ($fgProcs.Count -gt 0) {
+                    $argv = $fgProcs[0].argv
+                    $modelProof = $argv -join ' '
+                    $modelProofSource = 'herdr_pane_process_info_foreground_argv'
+                  }
+                }
+              } catch { }
+            }
+
+            # Branch/head proof from git in the bound cwd
+            $branch = ''
+            $headSha = ''
+            if (Test-Path -LiteralPath $cwd -PathType Container) {
+              try {
+                $branch = (& git -C $cwd rev-parse --abbrev-ref HEAD 2>&1 | Out-String).Trim()
+                $headSha = (& git -C $cwd rev-parse HEAD 2>&1 | Out-String).Trim()
+              } catch { }
+            }
+
+            if ([string]::IsNullOrWhiteSpace($modelProof)) { throw 'MODEL_PROOF_MISSING' }
+            if ($branch -cnotmatch '^[a-zA-Z0-9._/\-]+$') { throw 'BRANCH_PROOF_MISSING_OR_INVALID' }
+            if ($headSha -cnotmatch '^[0-9a-f]{40}$') { throw 'HEAD_PROOF_MISSING_OR_INVALID' }
+
+            $tuple = @{
+              executor_identity="$name/$modelProofSource"
+              executor_session_or_instance=$sessionValue
+              executor_kind='cli'
+              executor_name=$name
+              executor_pane=$paneId
+              executor_workspace=$workspaceId
+              executor_cwd=$cwd
+              executor_branch=$branch
+              executor_head=$headSha
+              executor_status=$status
+              executor_visibility=if ($focused) { 'focused' } else { 'visible' }
+              executor_role='WORKER'
+              executor_model_proof_source=$modelProofSource
+              executor_model_proof=$modelProof
+            }
             if (-not $tuple['executor_pane'].StartsWith("$($tuple['executor_workspace']):", [StringComparison]::Ordinal)) { throw 'PANE_NOT_WORKSPACE_QUALIFIED' }
             return $tuple
           }
@@ -413,7 +467,7 @@ jobs:
           
           function Assert-NoPriorAttempt($rows, $binding, [string]$ownReservationId = '') {
             foreach ($row in $rows) {
-              $first = ([string]$row.body -split "\n?\n",2)[0]
+              $first = ([string]$row.body -split "\r?\n|\n",2)[0]
               if ($first.Trim().TrimStart([char]0xFEFF) -imatch '^GBB_G13_HANDOFF_AUTOMATION_(RESERVATION|LIVE_CONSUMER_OBSERVES|CONSUMED_STARTED|HANDOFF_TEST_RESULT|CONSUMER_BLOCKED)_V') {
                 if ([string]$row.id -ceq $ownReservationId) { continue }
                 # A prior attempt with an incomplete/unknown schema is uncertainty, not an
@@ -456,7 +510,7 @@ jobs:
           
           function Assert-AuthorityHistory($rows, $card, $acceptance) {
             foreach ($row in $rows) {
-              $first = ([string]$row.body -split "\n?\n",2)[0]
+              $first = ([string]$row.body -split "\r?\n|\n",2)[0]
               if ($first.Trim().TrimStart([char]0xFEFF) -imatch '^GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V' -and [int64]$row.id -gt [int64]$card.id) { throw 'CARD_SUPERSEDED' }
               if ($first.Trim().TrimStart([char]0xFEFF) -imatch '^GBB_G13_HANDOFF_AUTOMATION_TEST_ACCEPTANCE_V' -and [int64]$row.id -gt [int64]$acceptance.id) { throw 'ACCEPTANCE_SUPERSEDED' }
             }
@@ -484,7 +538,7 @@ jobs:
           
           function Read-ReceiptPair($rows, $binding, $reservation) {
             foreach ($row in $rows) {
-              $first = ([string]$row.body -split "\n?\n",2)[0]
+              $first = ([string]$row.body -split "\r?\n|\n",2)[0]
               if ($first.Trim().TrimStart([char]0xFEFF) -imatch '^GBB_G13_HANDOFF_AUTOMATION_(LIVE_CONSUMER_OBSERVES|CONSUMER_BLOCKED)_V') { throw 'NO_BLIND_RETRY_CONFLICTING_ATTEMPT' }
             }
             $consumedRows = @(Get-Family $rows 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V')
