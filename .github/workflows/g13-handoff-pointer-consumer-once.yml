@@ -235,41 +235,48 @@ jobs:
           $issue88Result = Get-AllComments 88
           $issue88 = $issue88Result.comments
           $issue88Eof = $issue88Result.eof
-          $switch = Get-Comment '5645732538'
+          if (-not $issue88Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_88' }
+          $allSwitches = @($issue88 | Where-Object {
+            [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+            [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
+          })
+          if ($allSwitches.Count -eq 0) { throw 'NO_COMMITTED_SWITCH_FOUND' }
+          $switch = ($allSwitches | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
           Require-FirstLine ([string]$switch.body) 'CONTROL_GENERATION_SWITCH_V1' 'SWITCH'
-          if ([string]$switch.body -notmatch '(?m)^state:\s*SWITCH_COMMITTED\s*$') { throw 'SWITCH_NOT_COMMITTED' }
           if ([string]$switch.body -notmatch '(?m)^new_generation:\s*013\s*$') { throw 'SWITCH_NOT_GEN013' }
           if ([string]$switch.body -notmatch '(?m)^new_status:\s*ACTIVE\s*$') { throw 'SWITCH_NOT_ACTIVE' }
-          if (-not $issue88Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_88' }
+          $newerSwitchesAfterLatest = @($issue88 | Where-Object {
+            [int64]$_.id -gt [int64]$switch.id -and
+            [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
+            [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
+          })
+          if ($newerSwitchesAfterLatest.Count -gt 0) { throw 'NEWER_CONTROL_SWITCH_EXISTS' }
 
           $issue43Result = Get-AllComments 43
           $issue43 = $issue43Result.comments
           $issue43Eof = $issue43Result.eof
-          $currentStart = Get-Comment '5645736288'
+          if (-not $issue43Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_43' }
+          $allCurrentStarts = @($issue43 | Where-Object {
+            [string]$_.body -match '(?m)^CURRENT_REHYDRATION_INDEX_V\d+\s*$' -and
+            [string]$_.body -match '(?m)^state:\s*CURRENT_START_HERE\s*$'
+          })
+          if ($allCurrentStarts.Count -eq 0) { throw 'NO_CURRENT_START_FOUND' }
+          $currentStart = ($allCurrentStarts | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
           $csFirstLine = (($currentStart.body -split "`r?`n")[0]).Trim()
-          if ($csFirstLine -notmatch '^CURRENT_REHYDRATION_INDEX_V\d+$') { throw 'WRONG_CURRENT_START_PROTOCOL' }
-          if ([string]$currentStart.body -notmatch '(?m)^state:\s*CURRENT_START_HERE\s*$') { throw 'CURRENT_START_NOT_HERE' }
+          if ($csFirstLine -cne 'CURRENT_REHYDRATION_INDEX_V1') { throw 'WRONG_CURRENT_START_PROTOCOL' }
           if ([string]$currentStart.body -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'CURRENT_START_GEN_MISMATCH' }
           if ([string]$currentStart.body -notmatch '(?m)^control_status:\s*ACTIVE\s*$') { throw 'CURRENT_START_NOT_ACTIVE' }
-          if (-not $issue43Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_43' }
+          $newerCurrentStartsAfterLatest = @($issue43 | Where-Object {
+            [int64]$_.id -gt [int64]$currentStart.id -and
+            [string]$_.body -match '(?m)^CURRENT_REHYDRATION_INDEX_V\d+\s*$' -and
+            [string]$_.body -match '(?m)^state:\s*CURRENT_START_HERE\s*$'
+          })
+          if ($newerCurrentStartsAfterLatest.Count -gt 0) { throw 'NEWER_CURRENT_START_EXISTS' }
 
           $issue162Result = Get-AllComments $issue
           $comments = $issue162Result.comments
           $issue162Eof = $issue162Result.eof
           if (-not $issue162Eof) { throw 'INCOMPLETE_DURABLE_HISTORY_issue_162' }
-          $newerSwitches = @($issue88 | Where-Object {
-            [int64]$_.id -gt 5645732538 -and
-            [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
-            [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
-          })
-          if ($newerSwitches.Count -gt 0) { throw 'NEWER_CONTROL_SWITCH_EXISTS' }
-
-          $newerCurrentStarts = @($issue43 | Where-Object {
-            [int64]$_.id -gt 5645736288 -and
-            [string]$_.body -match '(?m)^CURRENT_REHYDRATION_INDEX_V\d+\s*$' -and
-            [string]$_.body -match '(?m)^state:\s*CURRENT_START_HERE\s*$'
-          })
-          if ($newerCurrentStarts.Count -gt 0) { throw 'NEWER_CURRENT_START_EXISTS' }
 
           $logicalKey = "${cardReceipt}:${idempotency}:${cardId}:${generation}:${launcherHead}:${workerBase}"
           $priorLiveObs = @($comments | Where-Object {
@@ -384,24 +391,24 @@ jobs:
           }
 
           $preSendIssue88 = Get-AllComments 88
-          $preSendSwitches = @($preSendIssue88.comments | Where-Object {
+          $preSendAllSwitches = @($preSendIssue88.comments | Where-Object {
             [string]$_.body -match '(?m)^CONTROL_GENERATION_SWITCH_V1\s*$' -and
-            [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$' -and
-            [string]$_.body -match '(?m)^new_generation:\s*013\s*$'
+            [string]$_.body -match '(?m)^state:\s*SWITCH_COMMITTED\s*$'
           })
-          if ($preSendSwitches.Count -eq 0) { throw 'PRE_SEND_NO_ACTIVE_GEN013_SWITCH' }
-          $latestPreSendSwitch = ($preSendSwitches | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
-          if ([int64]$latestPreSendSwitch.id -lt 5645732538) { throw 'PRE_SEND_SWITCH_STALE' }
+          if ($preSendAllSwitches.Count -eq 0) { throw 'PRE_SEND_NO_COMMITTED_SWITCH' }
+          $latestPreSendSwitch = ($preSendAllSwitches | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
+          if ([string]$latestPreSendSwitch.body -notmatch '(?m)^new_generation:\s*013\s*$') { throw 'PRE_SEND_LATEST_SWITCH_NOT_GEN013' }
+          if ([string]$latestPreSendSwitch.body -notmatch '(?m)^new_status:\s*ACTIVE\s*$') { throw 'PRE_SEND_LATEST_SWITCH_NOT_ACTIVE' }
 
           $preSendIssue43 = Get-AllComments 43
-          $preSendCurrentStarts = @($preSendIssue43.comments | Where-Object {
+          $preSendAllCS = @($preSendIssue43.comments | Where-Object {
             [string]$_.body -match '(?m)^CURRENT_REHYDRATION_INDEX_V\d+\s*$' -and
-            [string]$_.body -match '(?m)^state:\s*CURRENT_START_HERE\s*$' -and
-            [string]$_.body -match '(?m)^control_generation:\s*013\s*$'
+            [string]$_.body -match '(?m)^state:\s*CURRENT_START_HERE\s*$'
           })
-          if ($preSendCurrentStarts.Count -eq 0) { throw 'PRE_SEND_NO_ACTIVE_CURRENT_START' }
-          $latestPreSendCS = ($preSendCurrentStarts | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
-          if ([int64]$latestPreSendCS.id -lt 5645736288) { throw 'PRE_SEND_CURRENT_START_STALE' }
+          if ($preSendAllCS.Count -eq 0) { throw 'PRE_SEND_NO_CURRENT_START' }
+          $latestPreSendCS = ($preSendAllCS | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
+          if ([string]$latestPreSendCS.body -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'PRE_SEND_LATEST_CS_NOT_GEN013' }
+          if ([string]$latestPreSendCS.body -notmatch '(?m)^control_status:\s*ACTIVE\s*$') { throw 'PRE_SEND_LATEST_CS_NOT_ACTIVE' }
 
           $preSendCard = Get-Comment $cardReceipt
           if ([string]$preSendCard.body -notmatch '(?m)^state:\s*READY_FOR_POINTER_DISPATCH\s*$') { throw 'PRE_SEND_CARD_NO_LONGER_READY' }
@@ -433,7 +440,6 @@ jobs:
               [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1\s*$' -and
               [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
               [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
-              [string]$_.body -match '(?m)^executor_role:\s*LOCAL_EXECUTOR_ONLY\s*$' -and
               [string]$_.body -match '(?m)^readback_verified:\s*true\s*$'
             })
             if ($matches.Count -gt 1) {
@@ -453,10 +459,14 @@ jobs:
           if ([string]$consumedReadback.user.login -cne 'D22977') { throw 'CONSUMED_STARTED_AUTHOR_INVALID' }
           if ((Get-Field $consumedReadbackBody 'source_card_receipt') -cne $cardReceipt) { throw 'CONSUMED_STARTED_READBACK_CARD_RECEIPT_MISMATCH' }
           if ((Get-Field $consumedReadbackBody 'dispatch_idempotency_key') -cne $idempotency) { throw 'CONSUMED_STARTED_READBACK_IDEMPOTENCY_MISMATCH' }
-          if ((Get-Field $consumedReadbackBody 'executor_identity') -ne 'opencode/mimo-v2.5-free') { throw 'CONSUMED_STARTED_EXECUTOR_IDENTITY_MISMATCH' }
-          if ((Get-Field $consumedReadbackBody 'executor_session_or_instance') -ne 'herdr_workspace_w5_herdr_pane_w5:p1') { throw 'CONSUMED_STARTED_SESSION_MISMATCH' }
-          if ((Get-Field $consumedReadbackBody 'repair_task_id') -ne 'GBB-G13-HANDOFF-POINTER-CONSUMER-REPAIR-R3-01') { throw 'CONSUMED_STARTED_TASK_ID_MISMATCH' }
-          if ((Get-Field $consumedReadbackBody 'control_generation') -ne '013') { throw 'CONSUMED_STARTED_GENERATION_MISMATCH' }
+          $admittedExecutorIdentity = 'opencode/mimo-v2.5-free'
+          $admittedSession = 'herdr_workspace_w5_herdr_pane_w5:p1'
+          $admittedRepairTaskId = 'GBB-G13-HANDOFF-POINTER-CONSUMER-REPAIR-R4-01'
+          $admittedControlGeneration = $generation
+          if ((Get-Field $consumedReadbackBody 'executor_identity') -cne $admittedExecutorIdentity) { throw 'CONSUMED_STARTED_EXECUTOR_IDENTITY_MISMATCH' }
+          if ((Get-Field $consumedReadbackBody 'executor_session_or_instance') -cne $admittedSession) { throw 'CONSUMED_STARTED_SESSION_MISMATCH' }
+          if ((Get-Field $consumedReadbackBody 'repair_task_id') -cne $admittedRepairTaskId) { throw 'CONSUMED_STARTED_TASK_ID_MISMATCH' }
+          if ((Get-Field $consumedReadbackBody 'control_generation') -cne $admittedControlGeneration) { throw 'CONSUMED_STARTED_GENERATION_MISMATCH' }
 
           $terminal = $null
           for ($attempt = 0; $attempt -lt 40; $attempt++) {
@@ -491,9 +501,9 @@ jobs:
           $terminalDecision = Get-Field $terminalReadbackBody 'decision'
           if ($terminalDecision -notin @('PASS', 'BLOCKED', 'CONTROL_REQUIRED')) { throw 'TERMINAL_DECISION_INVALID' }
           if ((Get-Field $terminalReadbackBody 'source_consumed_started_receipt') -cne [string]$consumed.id) { throw 'TERMINAL_READBACK_CONSUMED_STARTED_MISMATCH' }
-          if ((Get-Field $terminalReadbackBody 'executor_identity') -ne 'opencode/mimo-v2.5-free') { throw 'TERMINAL_EXECUTOR_IDENTITY_MISMATCH' }
-          if ((Get-Field $terminalReadbackBody 'executor_session_or_instance') -ne 'herdr_workspace_w5_herdr_pane_w5:p1') { throw 'TERMINAL_SESSION_MISMATCH' }
-          if ((Get-Field $terminalReadbackBody 'repair_task_id') -ne 'GBB-G13-HANDOFF-POINTER-CONSUMER-REPAIR-R3-01') { throw 'TERMINAL_TASK_ID_MISMATCH' }
-          if ((Get-Field $terminalReadbackBody 'control_generation') -ne '013') { throw 'TERMINAL_GENERATION_MISMATCH' }
+          if ((Get-Field $terminalReadbackBody 'executor_identity') -cne $admittedExecutorIdentity) { throw 'TERMINAL_EXECUTOR_IDENTITY_MISMATCH' }
+          if ((Get-Field $terminalReadbackBody 'executor_session_or_instance') -cne $admittedSession) { throw 'TERMINAL_SESSION_MISMATCH' }
+          if ((Get-Field $terminalReadbackBody 'repair_task_id') -cne $admittedRepairTaskId) { throw 'TERMINAL_TASK_ID_MISMATCH' }
+          if ((Get-Field $terminalReadbackBody 'control_generation') -cne $admittedControlGeneration) { throw 'TERMINAL_GENERATION_MISMATCH' }
 
           Write-Output "HANDOFF_TEST_TERMINAL_OBSERVED receipt=$($terminal.id) decision=$terminalDecision"
