@@ -169,6 +169,14 @@ jobs:
           if ([string]$card.issue_url -notmatch '/issues/162$') { throw 'CARD_ISSUE_MISMATCH' }
           if ([string]$card.user.login -cne 'D22977' -or [string]$card.author_association -cne 'OWNER') { throw 'CARD_AUTHOR_NOT_OWNER' }
           Require-FirstLine $cardBody 'GBB_G13_HANDOFF_AUTOMATION_TEST_CARD_V1' 'CARD'
+          $allowedCardKeys = @('state','card_protocol','card_id','control_generation','source_consumer_acceptance','target_ref_exact','target_ref_head_exact','launcher_head_sha','worker_base_sha','executor_role','requested_action','allowed_actions','forbidden_actions','logical_handoff_count_max','dispatch_idempotency_key','readback_verified','consumer_workflow_path_exact','consumer_workflow_blob_exact','target_agent_name','target_pane','target_cwd_exact','target_agent_status_required')
+          $cardLines = $cardBody -split "`r?`n"
+          for ($ci = 1; $ci -lt $cardLines.Count; $ci++) {
+            $cline = $cardLines[$ci].Trim()
+            if ([string]::IsNullOrWhiteSpace($cline)) { continue }
+            if ($cline -notmatch '^(?<ckey>[a-z0-9_]+):\s*(?<cval>.+)$') { throw "CARD_BODY_NOT_POINTER_ONLY_LINE_$ci" }
+            if ($allowedCardKeys -notcontains $Matches.ckey) { throw "CARD_UNKNOWN_FIELD_$($Matches.ckey)" }
+          }
           $cardState = Get-Field $cardBody 'state'
           $cardProtocol = Get-Field $cardBody 'card_protocol'
           $cardIdFromCard = Get-Field $cardBody 'card_id'
@@ -263,7 +271,9 @@ jobs:
           if ($allCurrentStarts.Count -eq 0) { throw 'NO_CURRENT_START_FOUND' }
           $currentStart = ($allCurrentStarts | Sort-Object { [int64]$_.id } | Select-Object -Last 1)
           $csFirstLine = (($currentStart.body -split "`r?`n")[0]).Trim()
-          if ($csFirstLine -cne 'CURRENT_REHYDRATION_INDEX_V1') { throw 'WRONG_CURRENT_START_PROTOCOL' }
+          if ($csFirstLine -notmatch '^CURRENT_REHYDRATION_INDEX_V\d+$') { throw 'WRONG_CURRENT_START_PROTOCOL' }
+          $csVersion = [int]($csFirstLine -replace '^CURRENT_REHYDRATION_INDEX_V(\d+)$','$1')
+          if ($csVersion -lt 1) { throw 'CURRENT_START_VERSION_INVALID' }
           if ([string]$currentStart.body -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'CURRENT_START_GEN_MISMATCH' }
           if ([string]$currentStart.body -notmatch '(?m)^control_status:\s*ACTIVE\s*$') { throw 'CURRENT_START_NOT_ACTIVE' }
           $newerCurrentStartsAfterLatest = @($issue43 | Where-Object {
@@ -282,22 +292,32 @@ jobs:
           $priorLiveObs = @($comments | Where-Object {
             [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_LIVE_CONSUMER_OBSERVES_V1\s*$' -and
             [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
+            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
+            [string]$_.body -match "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$" -and
+            [string]$_.body -match "(?m)^control_generation:\s*$([regex]::Escape($generation))\s*$" -and
+            [string]$_.body -match "(?m)^launcher_head_sha:\s*$([regex]::Escape($launcherHead))\s*$" -and
+            [string]$_.body -match "(?m)^worker_base_sha:\s*$([regex]::Escape($workerBase))\s*$"
           })
           $priorConsumed = @($comments | Where-Object {
             [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1\s*$' -and
             [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
+            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
+            [string]$_.body -match "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$" -and
+            [string]$_.body -match "(?m)^control_generation:\s*$([regex]::Escape($generation))\s*$"
           })
           $priorTerminal = @($comments | Where-Object {
             [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1\s*$' -and
             [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
+            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
+            [string]$_.body -match "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$" -and
+            [string]$_.body -match "(?m)^control_generation:\s*$([regex]::Escape($generation))\s*$"
           })
           $priorBlocked = @($comments | Where-Object {
             [string]$_.body -match '(?m)^GBB_G13_HANDOFF_AUTOMATION_CONSUMER_BLOCKED_V1\s*$' -and
             [string]$_.body -match "(?m)^source_card_receipt:\s*$([regex]::Escape($cardReceipt))\s*$" -and
-            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$"
+            [string]$_.body -match "(?m)^dispatch_idempotency_key:\s*$([regex]::Escape($idempotency))\s*$" -and
+            [string]$_.body -match "(?m)^card_id:\s*$([regex]::Escape($cardId))\s*$" -and
+            [string]$_.body -match "(?m)^control_generation:\s*$([regex]::Escape($generation))\s*$"
           })
           if ($priorTerminal.Count -gt 0) {
             Write-Output "NO_OP_DUPLICATE prior terminal receipt=$($priorTerminal[-1].id)"
@@ -460,13 +480,21 @@ jobs:
           if ((Get-Field $consumedReadbackBody 'source_card_receipt') -cne $cardReceipt) { throw 'CONSUMED_STARTED_READBACK_CARD_RECEIPT_MISMATCH' }
           if ((Get-Field $consumedReadbackBody 'dispatch_idempotency_key') -cne $idempotency) { throw 'CONSUMED_STARTED_READBACK_IDEMPOTENCY_MISMATCH' }
           $admittedExecutorIdentity = 'opencode/mimo-v2.5-free'
-          $admittedSession = 'herdr_workspace_w5_herdr_pane_w5:p1'
-          $admittedRepairTaskId = 'GBB-G13-HANDOFF-POINTER-CONSUMER-REPAIR-R4-01'
+          $admittedSession = $targetSession
+          $admittedRepairTaskId = 'GBB-G13-HANDOFF-POINTER-CONSUMER-REPAIR-R5-01'
           $admittedControlGeneration = $generation
-          if ((Get-Field $consumedReadbackBody 'executor_identity') -cne $admittedExecutorIdentity) { throw 'CONSUMED_STARTED_EXECUTOR_IDENTITY_MISMATCH' }
-          if ((Get-Field $consumedReadbackBody 'executor_session_or_instance') -cne $admittedSession) { throw 'CONSUMED_STARTED_SESSION_MISMATCH' }
-          if ((Get-Field $consumedReadbackBody 'repair_task_id') -cne $admittedRepairTaskId) { throw 'CONSUMED_STARTED_TASK_ID_MISMATCH' }
-          if ((Get-Field $consumedReadbackBody 'control_generation') -cne $admittedControlGeneration) { throw 'CONSUMED_STARTED_GENERATION_MISMATCH' }
+          function Validate-ConsumedStarted([string]$body, [string]$expectedExecutor, [string]$expectedSession, [string]$expectedTaskId, [string]$expectedGeneration) {
+            Require-FirstLine $body 'GBB_G13_HANDOFF_POINTER_CONSUMER_REPAIR_R5_CONSUMED_STARTED_V1' 'CONSUMED_STARTED'
+            if ((Get-Field $body 'executor_identity') -cne $expectedExecutor) { throw 'CONSUMED_STARTED_EXECUTOR_IDENTITY_MISMATCH' }
+            if ((Get-Field $body 'executor_session_or_instance') -cne $expectedSession) { throw 'CONSUMED_STARTED_SESSION_MISMATCH' }
+            if ((Get-Field $body 'repair_task_id') -cne $expectedTaskId) { throw 'CONSUMED_STARTED_TASK_ID_MISMATCH' }
+            if ((Get-Field $body 'control_generation') -cne $expectedGeneration) { throw 'CONSUMED_STARTED_GENERATION_MISMATCH' }
+            if ((Get-Field $body 'readback_verified') -cne 'true') { throw 'CONSUMED_STARTED_READBACK_NOT_VERIFIED' }
+            if ((Get-Field $body 'repair_worker_base_sha') -cne $workerBase) { throw 'CONSUMED_STARTED_BASE_SHA_MISMATCH' }
+            if ((Get-Field $body 'repair_worker_branch_exact') -cne $targetBranch) { throw 'CONSUMED_STARTED_BRANCH_MISMATCH' }
+            if ((Get-Field $body 'allowed_changed_path_exact') -ne $workflowPath) { throw 'CONSUMED_STARTED_PATH_MISMATCH' }
+          }
+          Validate-ConsumedStarted $consumedReadbackBody $admittedExecutorIdentity $admittedSession $admittedRepairTaskId $admittedControlGeneration
 
           $terminal = $null
           for ($attempt = 0; $attempt -lt 40; $attempt++) {
