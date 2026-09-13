@@ -58,7 +58,7 @@ jobs:
           }
 
           function Get-Field([string]$body, [string]$name) {
-            $pattern = '(?m)^' + [regex]::Escape($name) + ':\s+(\S[^\r\n]*)$'
+            $pattern = '(?m)^' + [regex]::Escape($name) + ':[ \t]+(\S[^\r\n]*)$'
             $matches = [regex]::Matches($body, $pattern)
             if ($matches.Count -eq 0) { throw "MISSING_FIELD_$name" }
             if ($matches.Count -gt 1) { throw "DUPLICATE_FIELD_$name" }
@@ -141,7 +141,7 @@ jobs:
           $dispatchLines = $dispatchBody -split "`r?`n"
           $seenDispatchKeys = @{}
           for ($i = 1; $i -lt $dispatchLines.Count; $i++) {
-            $line = $dispatchLines[$i].Trim()
+            $line = $dispatchLines[$i]
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
             if ($line -notmatch '^(?<key>[a-z0-9_]+):\s*(?<value>.+)$') { throw 'DISPATCH_BODY_NOT_POINTER_ONLY' }
             if ($allowedDispatchKeys -notcontains $Matches.key) { throw 'DISPATCH_BODY_CONTAINS_TASK_BODY' }
@@ -169,7 +169,7 @@ jobs:
           $allowedCardKeys = @('state','card_protocol','card_id','control_generation','source_consumer_acceptance','target_ref_exact','target_ref_head_exact','launcher_head_sha','worker_base_sha','executor_role','requested_action','allowed_actions','forbidden_actions','logical_handoff_count_max','dispatch_idempotency_key','readback_verified','consumer_workflow_path_exact','consumer_workflow_blob_exact','target_agent_name','target_pane','target_cwd_exact','target_agent_status_required')
           $cardLines = $cardBody -split "`r?`n"
           for ($ci = 1; $ci -lt $cardLines.Count; $ci++) {
-            $cline = $cardLines[$ci].Trim()
+            $cline = $cardLines[$ci]
             if ([string]::IsNullOrWhiteSpace($cline)) { continue }
             if ($cline -notmatch '^(?<ckey>[a-z0-9_]+):\s*(?<cval>.+)$') { throw "CARD_BODY_NOT_POINTER_ONLY_LINE_$ci" }
             if ($allowedCardKeys -notcontains $Matches.ckey) { throw "CARD_UNKNOWN_FIELD_$($Matches.ckey)" }
@@ -238,10 +238,18 @@ jobs:
           if ($acceptanceBody -notmatch '(?m)^card_id:\s*GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01\s*$') { throw 'SOURCE_ACCEPTANCE_CARD_ID_MISMATCH' }
           if ($acceptanceBody -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'SOURCE_ACCEPTANCE_GENERATION_MISMATCH' }
           if ($acceptanceBody -notmatch '(?m)^target_ref_exact:\s*refs/heads/review-base/gbb-gh-01\s*$') { throw 'SOURCE_ACCEPTANCE_TARGET_REF_MISMATCH' }
-          if ($acceptanceBody -notmatch '(?m)^target_ref_head_exact:\s*[0-9a-f]{40}\s*$') { throw 'SOURCE_ACCEPTANCE_TARGET_HEAD_MISMATCH' }
-          if ($acceptanceBody -notmatch '(?m)^target_workflow_blob:\s*[0-9a-f]{40}\s*$') { throw 'SOURCE_ACCEPTANCE_WORKFLOW_BLOB_MISMATCH' }
+          if ((Get-Field $acceptanceBody 'target_ref_head_exact') -cne $targetHead) { throw 'SOURCE_ACCEPTANCE_TARGET_HEAD_NOT_BOUND_VALUE' }
+          if ((Get-Field $acceptanceBody 'target_workflow_blob') -cne $consumerBlob) { throw 'SOURCE_ACCEPTANCE_WORKFLOW_BLOB_NOT_BOUND_VALUE' }
           if ($acceptanceBody -notmatch '(?m)^executor_role:\s*LOCAL_EXECUTOR\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_ROLE_MISMATCH' }
           if ($acceptanceBody -notmatch '(?m)^card_id:\s*GBB-G13-HANDOFF-AUTOMATION-ADVERSARIAL-TEST-01\s*$') { throw 'SOURCE_ACCEPTANCE_CARD_ID_MISSING' }
+          if ($acceptanceBody -notmatch '(?m)^executor_kind:\s*opencode\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_KIND_MISSING' }
+          if ($acceptanceBody -notmatch '(?m)^executor_name:\s*\S+\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_NAME_MISSING' }
+          if ($acceptanceBody -notmatch '(?m)^executor_session_or_instance:\s*ses_[A-Za-z0-9]+\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_SESSION_MISSING' }
+          if ($acceptanceBody -notmatch '(?m)^executor_pane:\s*w5:\S+\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_PANE_MISSING' }
+          if ($acceptanceBody -notmatch '(?m)^executor_workspace:\s*w5\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_WORKSPACE_MISSING' }
+          if ($acceptanceBody -notmatch '(?m)^executor_branch:\s*worker/g13-handoff-pointer-consumer-repair-01\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_BRANCH_MISSING' }
+          if ($acceptanceBody -notmatch '(?m)^executor_head:\s*[0-9a-f]{40}\s*$') { throw 'SOURCE_ACCEPTANCE_EXECUTOR_HEAD_MISSING' }
+          if ($acceptanceBody -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'SOURCE_ACCEPTANCE_RECORDED_BY_ROLE_NOT_CONTROL' }
           $hasRejected = $acceptanceBody -match '(?m)^state:\s*REJECTED\s*$'
           if ($hasRejected) { throw 'SOURCE_ACCEPTANCE_CONFLICTING_PASS_AND_REJECTED' }
           $acceptanceStateLines = @($acceptanceBody -split "`r?`n" | Where-Object { $_ -match '^state:\s*' })
@@ -269,11 +277,11 @@ jobs:
           if ([string]$switch.body -notmatch '(?m)^new_generation:\s*013\s*$') { throw 'SWITCH_NOT_GEN013' }
           if ([string]$switch.body -notmatch '(?m)^new_status:\s*ACTIVE\s*$') { throw 'SWITCH_NOT_ACTIVE' }
           if ([string]$switch.body -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'SWITCH_RECORDED_BY_ROLE_INVALID' }
-          $allowedSwitchKeys = @('state','new_generation','new_status','recorded_by_role')
+          $allowedSwitchKeys = @('state','new_generation','new_status','recorded_by_role','issue')
           $switchLines = [string]$switch.body -split "`r?`n"
           $seenSwitchKeys = @{}
           for ($si = 1; $si -lt $switchLines.Count; $si++) {
-            $sline = $switchLines[$si].Trim()
+            $sline = $switchLines[$si]
             if ([string]::IsNullOrWhiteSpace($sline)) { continue }
             if ($sline -notmatch '^(?<sk>[a-z0-9_]+):\s*(?<sv>.+)$') { throw "SWITCH_BODY_NOT_POINTER_ONLY_LINE_$si" }
             if ($allowedSwitchKeys -notcontains $Matches.sk) { throw "SWITCH_UNKNOWN_FIELD_$($Matches.sk)" }
@@ -314,7 +322,7 @@ jobs:
           $csBodyLines = [string]$currentStart.body -split "`r?`n"
           $csSeenKeys = @{}
           for ($csLi = 1; $csLi -lt $csBodyLines.Count; $csLi++) {
-            $csLine = $csBodyLines[$csLi].Trim()
+            $csLine = $csBodyLines[$csLi]
             if ([string]::IsNullOrWhiteSpace($csLine)) { continue }
             if ($csLine -notmatch '^(?<ck>[a-z0-9_]+):\s*(?<cv>.+)$') { throw "CURRENT_START_BODY_NOT_POINTER_ONLY_LINE_$csLi" }
             if ($csSeenKeys.ContainsKey($Matches.ck)) { throw "CURRENT_START_DUPLICATE_FIELD_$($Matches.ck)" }
@@ -323,9 +331,9 @@ jobs:
           if ([string]$currentStart.body -notmatch '(?m)^control_generation:\s*013\s*$') { throw 'CURRENT_START_GEN_MISMATCH' }
           if ([string]$currentStart.body -notmatch '(?m)^control_status:\s*ACTIVE\s*$') { throw 'CURRENT_START_NOT_ACTIVE' }
           if ([string]$currentStart.body -notmatch '(?m)^recorded_by_role:\s*CHATGPT_WEB_CONTROL\s*$') { throw 'CURRENT_START_RECORDED_BY_ROLE_INVALID' }
-          $allowedCSKeys = @('state','control_generation','control_status','recorded_by_role')
+          $allowedCSKeys = @('state','control_generation','control_status','recorded_by_role','supersedes')
           for ($csLi = 1; $csLi -lt $csBodyLines.Count; $csLi++) {
-            $csLine = $csBodyLines[$csLi].Trim()
+            $csLine = $csBodyLines[$csLi]
             if ([string]::IsNullOrWhiteSpace($csLine)) { continue }
             if ($csLine -notmatch '^(?<ck>[a-z0-9_]+):\s*(?<cv>.+)$') { throw "CURRENT_START_BODY_NOT_POINTER_ONLY_LINE_$csLi" }
             if ($allowedCSKeys -notcontains $Matches.ck) { throw "CURRENT_START_UNKNOWN_FIELD_$($Matches.ck)" }
@@ -426,7 +434,9 @@ jobs:
             [string]$_.pane_id -ceq $targetPane -and
             [string]$_.cwd -ceq $targetCwd -and
             [string]$_.head_sha -ceq $workerBase -and
-            [string]$_.agent_status -ceq $targetStatus
+            [string]$_.agent_status -ceq $targetStatus -and
+            [string]$_.agent_kind -ceq 'opencode' -and
+            [string]$_.workspace -ceq 'w5'
           })
           if ($beforeMatches.Count -ne 1) {
             Publish-Blocker 'VISIBLE_EXECUTOR_ABSENT_OR_AMBIGUOUS' "target_count=$($beforeMatches.Count)" $dispatchId $cardReceipt $cardId $idempotency 0
@@ -455,7 +465,9 @@ jobs:
             [string]$_.branch -ceq $workerBranchName -and
             [string]$_.head_sha -ceq $workerBase -and
             [string]$_.agent_session.value -ceq $targetSession -and
-            [string]$_.agent_status -ceq $targetStatus
+            [string]$_.agent_status -ceq $targetStatus -and
+            [string]$_.agent_kind -ceq 'opencode' -and
+            [string]$_.workspace -ceq 'w5'
           })
           if ($afterMatches.Count -ne 1) {
             Publish-Blocker 'EXECUTOR_BINDING_CHANGED' 'Two fresh inventories did not identify the same unique executor.' $dispatchId $cardReceipt $cardId $idempotency 0
@@ -563,6 +575,32 @@ jobs:
             exit 0
           }
 
+          $finalCheck = Invoke-HerdrJson @('agent', 'list')
+          $finalMatch = @($finalCheck.result.agents | Where-Object {
+            [string]$_.name -ceq $targetAgentName -and
+            [string]$_.pane_id -ceq $targetPane -and
+            [string]$_.cwd -ceq $targetCwd -and
+            [string]$_.branch -ceq $workerBranchName -and
+            [string]$_.head_sha -ceq $workerBase -and
+            [string]$_.agent_session.value -ceq $targetSession -and
+            [string]$_.agent_status -ceq $targetStatus -and
+            [string]$_.agent_kind -ceq $admittedExecutorKind -and
+            [string]$_.workspace -ceq $admittedExecutorWorkspace
+          })
+          if ($finalMatch.Count -ne 1) {
+            Publish-Blocker 'FINAL_BOUNDARY_REENUMERATION_FAILED' 'Final pre-send re-enumeration did not identify the same unique executor.' $dispatchId $cardReceipt $cardId $idempotency 0
+            exit 0
+          }
+          $finalSelected = $finalMatch[0]
+          $finalIdentity = if (-not [string]::IsNullOrWhiteSpace([string]$finalSelected.identity)) { [string]$finalSelected.identity } elseif (-not [string]::IsNullOrWhiteSpace([string]$finalSelected.agent_identity)) { [string]$finalSelected.agent_identity } else { "$admittedExecutorKind/$admittedExecutorName" }
+          if ($finalIdentity -cne $admittedExecutorIdentity) { throw 'FINAL_BOUNDARY_IDENTITY_MISMATCH' }
+          if ([string]$finalSelected.agent_kind -cne $admittedExecutorKind) { throw 'FINAL_BOUNDARY_KIND_MISMATCH' }
+          if ([string]$finalSelected.workspace -cne $admittedExecutorWorkspace) { throw 'FINAL_BOUNDARY_WORKSPACE_MISMATCH' }
+          if ([string]$finalSelected.pane_id -cne $admittedExecutorPane) { throw 'FINAL_BOUNDARY_PANE_MISMATCH' }
+          if ([string]$finalSelected.agent_session.value -cne $admittedSession) { throw 'FINAL_BOUNDARY_SESSION_MISMATCH' }
+          if ([string]$finalSelected.head_sha -cne $admittedExecutorHead) { throw 'FINAL_BOUNDARY_HEAD_MISMATCH' }
+          if ([string]$finalSelected.agent_status -cne $admittedExecutorStatus) { throw 'FINAL_BOUNDARY_STATUS_MISMATCH' }
+
           $pointer = @(
             'GBB_G13_HANDOFF_POINTER_DISPATCH_REQUEST_V1'
             "card_receipt: $cardReceipt"
@@ -608,9 +646,20 @@ jobs:
           if ([string]$consumedReadback.author_association -cne 'OWNER') { throw 'CONSUMED_STARTED_ASSOCIATION_INVALID' }
           if ((Get-Field $consumedReadbackBody 'source_card_receipt') -cne $cardReceipt) { throw 'CONSUMED_STARTED_READBACK_CARD_RECEIPT_MISMATCH' }
           if ((Get-Field $consumedReadbackBody 'dispatch_idempotency_key') -cne $idempotency) { throw 'CONSUMED_STARTED_READBACK_IDEMPOTENCY_MISMATCH' }
-          $admittedExecutorIdentity = [string]$selected.agent
+          $admittedExecutorKind = [string]$selected.agent_kind
+          if ([string]::IsNullOrWhiteSpace($admittedExecutorKind)) { $admittedExecutorKind = [string]$selected.agent }
+          $admittedExecutorName = [string]$selected.name
+          $admittedExecutorIdentity = if (-not [string]::IsNullOrWhiteSpace([string]$selected.identity)) { [string]$selected.identity } elseif (-not [string]::IsNullOrWhiteSpace([string]$selected.agent_identity)) { [string]$selected.agent_identity } else { "$admittedExecutorKind/$admittedExecutorName" }
+          $admittedExecutorRole = 'WORKER'
           $admittedSession = $targetSession
           $admittedControlGeneration = $generation
+          $admittedExecutorPane = $targetPane
+          $admittedExecutorWorkspace = 'w5'
+          $admittedExecutorCwd = $targetCwd
+          $admittedExecutorBranch = $workerBranchName
+          $admittedExecutorHead = $workerBase
+          $admittedExecutorStatus = $targetStatus
+          $admittedExecutorVisibility = 'focused:true'
           function Validate-ConsumedStarted([string]$body, [string]$expectedExecutor, [string]$expectedSession, [string]$expectedGeneration) {
             Require-Exact-FirstLine $body 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1' 'CONSUMED_STARTED'
             if ((Get-Field $body 'source_card_receipt') -cne $cardReceipt) { throw 'CONSUMED_STARTED_CARD_RECEIPT_MISMATCH' }
