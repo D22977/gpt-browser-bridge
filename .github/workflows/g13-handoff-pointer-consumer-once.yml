@@ -71,7 +71,7 @@ jobs:
           }
 
           function Read-Record([string]$body, [string]$protocol, [string[]]$keys, [string[]]$sections = @()) {
-            if ($body.Length -gt 0 -and $body[0] -ceq [char]0xFEFF) { throw 'INVALID_RECORD_ENCODING_BOM' }
+            if ($body.Length -gt 0 -and (Test-OrdinalEquals ([string]$body[0]) ([string][char]0xFEFF))) { throw 'INVALID_RECORD_ENCODING_BOM' }
             if ($body.Contains([char]0)) { throw 'INVALID_RECORD_ENCODING_NUL' }
             if ($body -match '\r(?!\n)') { throw 'INVALID_RECORD_ENCODING_BARE_CR' }
             $lines = $body -split "\r?\n|\n"
@@ -146,11 +146,11 @@ jobs:
           }
           
           function Assert-Comment($comment, [int]$number, [string]$publisher = 'OWNER') {
-            if ([string]$comment.id -cnotmatch '^[1-9][0-9]*$' -or [string]$comment.issue_url -cne "$api/issues/$number") { throw 'COMMENT_ISSUE_OR_ID_MISMATCH' }
-            if ($publisher -ceq 'OWNER') {
-              if ([string]$comment.user.login -cne 'D22977' -or [string]$comment.author_association -cne 'OWNER') { throw 'COMMENT_NOT_OWNER' }
-            } elseif ($publisher -ceq 'WORKFLOW') {
-              if ([string]$comment.user.login -cne 'github-actions[bot]' -or [string]$comment.user.type -cne 'Bot') { throw 'RESERVATION_NOT_WORKFLOW' }
+            if ([string]$comment.id -cnotmatch '^[1-9][0-9]*$' -or -not (Test-OrdinalEquals ([string]$comment.issue_url) "$api/issues/$number")) { throw 'COMMENT_ISSUE_OR_ID_MISMATCH' }
+            if (Test-OrdinalEquals $publisher 'OWNER') {
+              if (-not (Test-OrdinalEquals ([string]$comment.user.login) 'D22977') -or -not (Test-OrdinalEquals ([string]$comment.author_association) 'OWNER')) { throw 'COMMENT_NOT_OWNER' }
+            } elseif (Test-OrdinalEquals $publisher 'WORKFLOW') {
+              if (-not (Test-OrdinalEquals ([string]$comment.user.login) 'github-actions[bot]') -or -not (Test-OrdinalEquals ([string]$comment.user.type) 'Bot')) { throw 'RESERVATION_NOT_WORKFLOW' }
             } else { throw 'UNKNOWN_PUBLISHER_SCHEMA' }
             foreach ($key in @('created_at','updated_at')) {
               $stamp = $comment.$key
@@ -158,14 +158,14 @@ jobs:
               if ($stamp -isnot [datetime] -and $stamp -isnot [datetimeoffset] -and [string]$stamp -cnotmatch '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$') { throw 'INVALID_COMMENT_TIMESTAMP' }
               if ([datetimeoffset]$stamp -gt [datetimeoffset]::UtcNow) { throw 'FUTURE_COMMENT_TIMESTAMP' }
             }
-            if ([string]$comment.created_at -cne [string]$comment.updated_at) { throw 'EDITED_RECEIPT_NO_BLIND_RETRY' }
+            if (-not (Test-OrdinalEquals ([string]$comment.created_at) ([string]$comment.updated_at))) { throw 'EDITED_RECEIPT_NO_BLIND_RETRY' }
           }
           
           function Assert-Unchanged($before, $after) {
             foreach ($key in @('id','issue_url','body','created_at','updated_at','author_association')) {
-              if ([string]$before.$key -cne [string]$after.$key) { throw "EXACT_GET_CHANGED_$key" }
+              if (-not (Test-OrdinalEquals ([string]$before.$key) ([string]$after.$key))) { throw "EXACT_GET_CHANGED_$key" }
             }
-            if ([string]$before.user.login -cne [string]$after.user.login) { throw 'EXACT_GET_AUTHOR_CHANGED' }
+            if (-not (Test-OrdinalEquals ([string]$before.user.login) ([string]$after.user.login))) { throw 'EXACT_GET_AUTHOR_CHANGED' }
           }
           
           function Read-Exact($comment, [int]$number, [string]$publisher = 'OWNER') {
@@ -220,7 +220,7 @@ jobs:
             foreach ($key in @('old_conversation_id','new_conversation_id')) {
               if ($f[$key] -cnotmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$') { throw 'CONTROL_IDENTITY_INVALID' }
             }
-            if ($f['new_conversation_id'] -ceq $f['old_conversation_id'] -or $f['new_conversation_url'] -cnotmatch ('^https://chatgpt\.com/(g/[^/]+/)?c/' + $f['new_conversation_id'] + '$')) { throw 'CONTROL_URL_IDENTITY_MISMATCH' }
+            if ((Test-OrdinalEquals $f['new_conversation_id'] $f['old_conversation_id']) -or $f['new_conversation_url'] -cnotmatch ('^https://chatgpt\.com/(g/[^/]+/)?c/' + $f['new_conversation_id'] + '$')) { throw 'CONTROL_URL_IDENTITY_MISMATCH' }
             return ,$f
           }
           
@@ -276,8 +276,8 @@ jobs:
             # name the immediately preceding records. No state/author-filtered fallback.
             $priorSwitch = @($switches | Where-Object { [int64]$_.id -lt [int64]$switch.id })
             $priorStart = @($starts | Where-Object { [int64]$_.id -lt [int64]$start.id })
-            if ($priorSwitch.Count -eq 0 -or [string]$priorSwitch[-1].id -cne $sf['source_active_switch_012']) { throw 'SWITCH_SUPERSESSION_CONFLICT' }
-            if ($priorStart.Count -eq 0 -or "$($priorStart[-1].id) / CURRENT_REHYDRATION_INDEX_V116" -cne $cf['supersedes']) { throw 'CURRENT_START_SUPERSESSION_CONFLICT' }
+            if ($priorSwitch.Count -eq 0 -or -not (Test-OrdinalEquals ([string]$priorSwitch[-1].id) $sf['source_active_switch_012'])) { throw 'SWITCH_SUPERSESSION_CONFLICT' }
+            if ($priorStart.Count -eq 0 -or -not (Test-OrdinalEquals "$($priorStart[-1].id) / CURRENT_REHYDRATION_INDEX_V116" $cf['supersedes'])) { throw 'CURRENT_START_SUPERSESSION_CONFLICT' }
             return @{ switch=$switch; start=$start }
           }
           
@@ -354,7 +354,7 @@ jobs:
               $p = $agent.PSObject.Properties[$name]
               if ($null -ne $p -and -not [string]::IsNullOrWhiteSpace([string]$p.Value)) { $values += [string]$p.Value }
             }
-            if ($values.Count -eq 0 -or @($values | Where-Object { $_ -cne $values[0] }).Count -gt 0) { throw "LIVE_FIELD_MISSING_OR_CONFLICTING_$($names[0])" }
+            if ($values.Count -eq 0 -or @($values | Where-Object { -not (Test-OrdinalEquals $_ $values[0]) }).Count -gt 0) { throw "LIVE_FIELD_MISSING_OR_CONFLICTING_$($names[0])" }
             return $values[0]
           }
 
@@ -476,12 +476,12 @@ jobs:
           
           function Select-Executor($agents, $expected) {
             # Require both transport name and pane to be unique in the whole inventory.
-            $byName = @($agents | Where-Object { [string]$_.name -ceq $expected['executor_name'] })
-            $byPane = @($agents | Where-Object { [string]$_.pane_id -ceq $expected['executor_pane'] })
+            $byName = @($agents | Where-Object { Test-OrdinalEquals ([string]$_.name) $expected['executor_name'] })
+            $byPane = @($agents | Where-Object { Test-OrdinalEquals ([string]$_.pane_id) $expected['executor_pane'] })
             if ($byName.Count -ne 1 -or $byPane.Count -ne 1) { throw 'EXECUTOR_ABSENT_OR_AMBIGUOUS' }
             $tuple = Get-ExecutorTuple $byName[0]
             foreach ($key in @(Tuple-Keys) + @('executor_role')) {
-              $value = if ($key -ceq 'executor_role' -and $expected.ContainsKey('worker_role')) { $expected['worker_role'] } else { $expected[$key] }
+              $value = if ((Test-OrdinalEquals $key 'executor_role') -and $expected.ContainsKey('worker_role')) { $expected['worker_role'] } else { $expected[$key] }
               Require-Values $tuple @{ $key=$value }
             }
             return $tuple
@@ -511,7 +511,7 @@ jobs:
             # Length-prefixed canonical full tuple; dispatch COMMENT is excluded so two
             # comment IDs carrying one logical event cannot acquire separate reservations.
             $parts = foreach ($key in @($binding.Keys | Sort-Object -CaseSensitive)) {
-              if ($key -ceq 'source_dispatch_comment') { continue }
+              if (Test-OrdinalEquals $key 'source_dispatch_comment') { continue }
               $value = [string]$binding[$key]
               if ([string]::IsNullOrWhiteSpace($value)) { throw 'EMPTY_RESERVATION_TUPLE' }
               "$($key.Length):$key$($value.Length):$value"
@@ -527,7 +527,7 @@ jobs:
             # One POST only. A timeout, lost response or failed exact GET is never retried.
             $created = Invoke-RestMethod "$api/issues/162/comments" -Headers $headers -Method Post -Body (@{body=$body} | ConvertTo-Json -Compress) -ContentType 'application/json' -TimeoutSec 30
             $fresh = Read-Exact $created 162 'WORKFLOW'
-            if ([string]$fresh.body -cne $body) { throw 'PUBLISHED_RECEIPT_READBACK_MISMATCH_NO_BLIND_RETRY' }
+            if (-not (Test-OrdinalEquals ([string]$fresh.body) $body)) { throw 'PUBLISHED_RECEIPT_READBACK_MISMATCH_NO_BLIND_RETRY' }
             return $fresh
           }
           
@@ -545,7 +545,7 @@ jobs:
             foreach ($row in $rows) {
               $first = ([string]$row.body -split "\r?\n|\n",2)[0]
               if ($first.Trim().TrimStart([char]0xFEFF) -imatch '^GBB_G13_HANDOFF_AUTOMATION_(RESERVATION|LIVE_CONSUMER_OBSERVES|CONSUMED_STARTED|HANDOFF_TEST_RESULT|CONSUMER_BLOCKED)_V') {
-                if ([string]$row.id -ceq $ownReservationId) { continue }
+                if (Test-OrdinalEquals ([string]$row.id) $ownReservationId) { continue }
                 # A prior attempt with an incomplete/unknown schema is uncertainty, not an
                 # ignorable non-match. This single-card consumer cannot inherit a send.
                 throw 'NO_BLIND_RETRY_PRIOR_DURABLE_ATTEMPT'
@@ -557,12 +557,12 @@ jobs:
             Assert-Comment $comment 162
             $expected = @{} + $binding
             $expected += @{ recorded_by_role='WORKER'; source_reservation_receipt=[string]$reservation.id; supersedes='NONE'; readback_verified='true' }
-            if ($kind -ceq 'CONSUMED') {
+            if (Test-OrdinalEquals $kind 'CONSUMED') {
               $protocol = 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V1'
               $expected['state'] = 'CONSUMED_STARTED'
               $expected['executor_status'] = 'working'
               Assert-Order $reservation $comment
-            } elseif ($kind -ceq 'TERMINAL' -and $null -ne $consumed) {
+            } elseif ((Test-OrdinalEquals $kind 'TERMINAL') -and $null -ne $consumed) {
               $protocol = 'GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V1'
               $expected['state'] = 'TERMINAL_RESULT'
               $expected['source_consumed_started_receipt'] = [string]$consumed.id
@@ -575,10 +575,10 @@ jobs:
               Assert-Order $consumed $comment
             } else { throw 'UNKNOWN_WORKER_RECEIPT_SCHEMA' }
             $f = Read-Record $comment.body $protocol @($expected.Keys)
-            if ($kind -ceq 'TERMINAL') {
+            if (Test-OrdinalEquals $kind 'TERMINAL') {
               if ($f['decision'] -cnotin @('PASS','BLOCKED','CONTROL_REQUIRED')) { throw 'INVALID_TERMINAL_DECISION' }
               $expected['decision'] = $f['decision']
-              $expected['executor_status'] = if ($f['decision'] -ceq 'PASS') { 'done' } else { 'blocked' }
+              $expected['executor_status'] = if (Test-OrdinalEquals $f['decision'] 'PASS') { 'done' } else { 'blocked' }
             }
             Require-Values $f $expected
             return ,$f
@@ -606,7 +606,7 @@ jobs:
             Assert-Order $freshCard $freshDispatch
             $ref = Invoke-RestMethod "$api/git/ref/heads/review-base/gbb-gh-01" -Headers $headers -Method Get -TimeoutSec 30
             $blob = Invoke-RestMethod "$api/contents/$($workflowPath)?ref=$($df['launcher_head_sha'])" -Headers $headers -Method Get -TimeoutSec 30
-            if ([string]$ref.object.sha -cne $cf['target_ref_head_exact'] -or [string]$blob.sha -cne $cf['consumer_workflow_blob_exact'] -or [string]$env:GITHUB_SHA -cne $df['launcher_head_sha']) { throw 'FINAL_HEAD_OR_BLOB_STALE' }
+            if (-not (Test-OrdinalEquals ([string]$ref.object.sha) $cf['target_ref_head_exact']) -or -not (Test-OrdinalEquals ([string]$blob.sha) $cf['consumer_workflow_blob_exact']) -or -not (Test-OrdinalEquals ([string]$env:GITHUB_SHA) $df['launcher_head_sha'])) { throw 'FINAL_HEAD_OR_BLOB_STALE' }
             $history = Get-AllComments 162
             Assert-AuthorityHistory $history.comments $freshCard $freshAcceptance
             return $history
@@ -620,7 +620,7 @@ jobs:
             $consumedRows = @(Get-Family $rows 'GBB_G13_HANDOFF_AUTOMATION_CONSUMED_STARTED_V')
             $terminalRows = @(Get-Family $rows 'GBB_G13_HANDOFF_AUTOMATION_HANDOFF_TEST_RESULT_V')
             $reservations = @(Get-Family $rows 'GBB_G13_HANDOFF_AUTOMATION_RESERVATION_V')
-            if ($reservations.Count -ne 1 -or [string]$reservations[0].id -cne [string]$reservation.id) { throw 'NO_BLIND_RETRY_RESERVATION_CONFLICT' }
+            if ($reservations.Count -ne 1 -or -not (Test-OrdinalEquals ([string]$reservations[0].id) ([string]$reservation.id))) { throw 'NO_BLIND_RETRY_RESERVATION_CONFLICT' }
             $freshReservation = Read-Exact $reservations[0] 162 'WORKFLOW'
             Assert-Unchanged $reservation $freshReservation
             [void](Validate-Reservation $freshReservation $binding $env:GITHUB_RUN_ID $env:GITHUB_RUN_ATTEMPT)
@@ -650,7 +650,7 @@ jobs:
             $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
             if ([int]$event.issue.number -ne 162) { throw 'EVENT_ISSUE_MISMATCH' }
             $dispatch = Get-Comment ([string]$event.comment.id)
-            if ([string]$dispatch.body -cne [string]$event.comment.body) { throw 'DISPATCH_EDITED_SINCE_EVENT' }
+            if (-not (Test-OrdinalEquals ([string]$dispatch.body) ([string]$event.comment.body))) { throw 'DISPATCH_EDITED_SINCE_EVENT' }
             $df = Validate-Dispatch $dispatch
             $control = Read-Control
             $card = Get-Comment $df['card_receipt']
@@ -664,7 +664,7 @@ jobs:
             $binding = Make-Binding $dispatch $df $card $cf $admittedExecutor
             $history = Read-FinalAuthority $dispatch $card $acceptance $control
             Assert-NoPriorAttempt $history.comments $binding
-            if ($env:GITHUB_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:GITHUB_RUN_ATTEMPT -cne '1') { throw 'NO_BLIND_RETRY_RERUN_OR_RUN_ID_MISSING' }
+            if ($env:GITHUB_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or -not (Test-OrdinalEquals ([string]$env:GITHUB_RUN_ATTEMPT) '1')) { throw 'NO_BLIND_RETRY_RERUN_OR_RUN_ID_MISSING' }
             $reservedFields = @{} + $binding
             $reservedFields += @{ state='RESERVED_NO_RETRY'; recorded_by_role='G13_HANDOFF_CONSUMER_WORKFLOW'; logical_key=(Logical-Key $binding)
               workflow_run_id=$env:GITHUB_RUN_ID; workflow_run_attempt=$env:GITHUB_RUN_ATTEMPT; physical_prompt_count='0'; supersedes='NONE'; readback_verified='true' }
@@ -677,7 +677,7 @@ jobs:
             $finalHistory = Read-FinalAuthority $dispatch $card $acceptance $control
             Assert-NoPriorAttempt $finalHistory.comments $binding ([string]$reservation.id)
             $owned = @(Get-Family $finalHistory.comments 'GBB_G13_HANDOFF_AUTOMATION_RESERVATION_V')
-            if ($owned.Count -ne 1 -or [string]$owned[0].id -cne [string]$reservation.id) { throw 'NO_BLIND_RETRY_RESERVATION_NOT_EXCLUSIVE' }
+            if ($owned.Count -ne 1 -or -not (Test-OrdinalEquals ([string]$owned[0].id) ([string]$reservation.id))) { throw 'NO_BLIND_RETRY_RESERVATION_NOT_EXCLUSIVE' }
             $ownedReadback = Read-Exact $owned[0] 162 'WORKFLOW'
             Assert-Unchanged $reservation $ownedReadback
             [void](Validate-Reservation $ownedReadback $binding $env:GITHUB_RUN_ID $env:GITHUB_RUN_ATTEMPT)
