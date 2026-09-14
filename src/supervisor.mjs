@@ -29,6 +29,15 @@ import writeFileAtomic from "write-file-atomic";
 
 import { projectStateSchema } from "./contracts.mjs";
 import { OrcaAdapter, resolveOrcaCli, resolveActiveTerminal } from "./adapters/orca_adapter.mjs";
+import {
+  buildLogicalEventKey,
+  classifyFutureConsumerBinding,
+  deliverResumeOnce,
+  findExistingDelivery,
+  matchWaitToDecision,
+  parseControlDecision,
+  validateWaitTuple,
+} from "./adapters/herdr_resume.mjs";
 import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -254,6 +263,7 @@ export function defaultRecoveryState() {
     schema_version: 1,
     orca: { unavailableSinceMs: null, attempts: 0, nextRetryAtMs: 0 },
     terminalCrashes: {},
+    residentConsumer: null,
     lastSummaryAtMs: null,
   };
 }
@@ -629,6 +639,148 @@ export async function scanDurableReports(ctx, state, isoNow) {
   return { events, authRequired, authRequiredDetail };
 }
 
+function authorityFingerprint(value) {
+  if (value === undefined || value === null) return null;
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+// The Supervisor is only a resident transport loop. It rereads the durable
+// GitHub decision and delivery comments, delegates exact physical admission to
+// the adapter, and records transport outcomes. It never interprets the
+// decision as semantic Control authority.
+export async function runResumeDeliveryCheck(ctx, {
+  isoNow = new Date().toISOString(),
+  deliveryState = null,
+  persistDeliveryState = null,
+} = {}) {
+  const cfg = ctx?.resumeDelivery;
+  if (!cfg) return { events: [], delivered: false, duplicate: false };
+  const events = [];
+  const consumer = classifyFutureConsumerBinding(cfg.futureConsumerBinding);
+  if (!consumer.bound) {
+    events.push({ type: "resume_delivery_future_consumer_binding_missing", reason: consumer.state });
+    return { events, delivered: false, duplicate: false, reason: consumer.state };
+  }
+
+  let initialAuthority = null;
+  if (cfg.readAuthority) {
+    try {
+      initialAuthority = await cfg.readAuthority({ phase: "start" });
+    } catch (error) {
+      const reason = "CONTROL_REQUIRED_AUTHORITY_READ_FAILED";
+      events.push({ type: "resume_delivery_authority_read_failed", reason, error: String(error?.message ?? error) });
+      return { events, delivered: false, duplicate: false, reason };
+    }
+    if (initialAuthority?.ok === false) {
+      const reason = initialAuthority.reason ?? "CONTROL_REQUIRED_AUTHORITY_READ_FAILED";
+      events.push({ type: "resume_delivery_authority_rejected", reason });
+      return { events, delivered: false, duplicate: false, reason };
+    }
+  }
+  const authority = initialAuthority?.value ?? initialAuthority ?? {};
+  const waitTuple = authority.waitTuple ?? cfg.waitTuple;
+  const tupleCheck = validateWaitTuple(waitTuple);
+  if (!tupleCheck.ok) {
+    events.push({ type: "resume_delivery_wait_tuple_invalid", reason: "INVALID_WAIT_TUPLE", errors: tupleCheck.errors });
+    return { events, delivered: false, duplicate: false, reason: "INVALID_WAIT_TUPLE" };
+  }
+
+  let decisionBody;
+  try {
+    decisionBody = authority.decisionBody ?? (cfg.readDecisionBody
+      ? await cfg.readDecisionBody({ sourceTerminalReceipt: tupleCheck.waitTuple.source_terminal_receipt, waitTuple: tupleCheck.waitTuple })
+      : cfg.decisionBody);
+  } catch (error) {
+    const reason = "CONTROL_REQUIRED_DECISION_READ_FAILED";
+    events.push({ type: "resume_delivery_decision_read_failed", reason, error: String(error?.message ?? error) });
+    return { events, delivered: false, duplicate: false, reason };
+  }
+  const parsed = parseControlDecision(decisionBody);
+  const matched = matchWaitToDecision(tupleCheck.waitTuple, parsed);
+  if (!matched.ok) {
+    events.push({ type: "resume_delivery_decision_not_applicable", reason: matched.reason });
+    return { events, delivered: false, duplicate: false, reason: matched.reason };
+  }
+
+  let comments;
+  try {
+    comments = authority.comments ?? (cfg.readComments
+      ? await cfg.readComments({ waitTuple: tupleCheck.waitTuple, decision: parsed.decision })
+      : cfg.comments ?? []);
+  } catch (error) {
+    const reason = "CONTROL_REQUIRED_COMMENTS_READ_FAILED";
+    events.push({ type: "resume_delivery_comments_read_failed", reason, error: String(error?.message ?? error) });
+    return { events, delivered: false, duplicate: false, reason };
+  }
+  const logicalKey = buildLogicalEventKey(tupleCheck.waitTuple, parsed);
+  const existing = findExistingDelivery(comments, logicalKey, cfg.protocol);
+  if (existing) {
+    events.push({ type: "resume_delivery_duplicate", decision: "NO_OP_DUPLICATE", receipt_id: existing.receipt_id });
+    return { events, delivered: false, duplicate: true, reason: "NO_OP_DUPLICATE" };
+  }
+
+  const persist = persistDeliveryState ?? cfg.persistDeliveryState;
+  const startingFingerprint = authorityFingerprint(authority.fingerprint ?? authority.binding ?? null);
+  const beforeSend = async (details) => {
+    if (cfg.readAuthority) {
+      const latestRaw = await cfg.readAuthority({ phase: "before_send", logicalKey: details.logicalKey });
+      if (latestRaw?.ok === false) return { allow: false, reason: latestRaw.reason ?? "CONTROL_REQUIRED_AUTHORITY_REVALIDATION_FAILED" };
+      const latest = latestRaw?.value ?? latestRaw ?? {};
+      const latestFingerprint = authorityFingerprint(latest.fingerprint ?? latest.binding ?? null);
+      if (startingFingerprint !== null && latestFingerprint !== startingFingerprint) return { allow: false, reason: "AUTHORITY_CHANGED" };
+    }
+    if (cfg.readComments) {
+      const latestComments = await cfg.readComments({ waitTuple: tupleCheck.waitTuple, decision: parsed.decision, logicalKey: details.logicalKey });
+      const duplicate = findExistingDelivery(latestComments, details.logicalKey, cfg.protocol);
+      if (duplicate) return { allow: false, decision: "NO_OP_DUPLICATE", reason: "NO_OP_DUPLICATE" };
+    }
+    return { allow: true };
+  };
+
+  try {
+    const result = await deliverResumeOnce({
+      waitTuple: tupleCheck.waitTuple,
+      decisionBody,
+      comments,
+      herdr: cfg.herdr,
+      publishReceipt: cfg.publishReceipt,
+      protocol: cfg.protocol,
+      now: () => isoNow,
+      deliveryState,
+      persistDeliveryState: persist,
+      beforeSend,
+    });
+    if (result.decision === "DELIVERED") {
+      events.push({
+        type: "resume_delivery_delivered",
+        decision: result.decision,
+        logical_event_key: result.logical_key,
+        receipt_id: result.receipt_id,
+        target: {
+          herdr_workspace_id: result.receipt.target_herdr_workspace_id,
+          herdr_pane_id: result.receipt.target_herdr_pane_id,
+          herdr_agent_session: result.receipt.target_herdr_agent_session,
+        },
+      });
+      return { events, delivered: true, duplicate: false, receipt: result.receipt, state: result.receipt };
+    }
+    if (result.decision === "NO_OP_DUPLICATE") {
+      events.push({ type: "resume_delivery_duplicate", decision: result.decision, receipt_id: result.existing_receipt_id ?? null });
+      return { events, delivered: false, duplicate: true, reason: result.decision };
+    }
+    if (result.decision === "NO_BLIND_RETRY") {
+      events.push({ type: "resume_delivery_no_blind_retry", decision: result.decision, logical_event_key: result.logical_key, receipt_id: result.receipt_id ?? null });
+      return { events, delivered: false, duplicate: false, noBlindRetry: true, reason: result.decision };
+    }
+    events.push({ type: "resume_delivery_rejected", decision: result.decision, reason: result.reason });
+    return { events, delivered: false, duplicate: false, reason: result.reason ?? result.decision };
+  } catch (error) {
+    const reason = "CONTROL_REQUIRED_RESUME_DELIVERY_FAILED";
+    events.push({ type: "resume_delivery_failed", reason, error: String(error?.message ?? error) });
+    return { events, delivered: false, duplicate: false, reason };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Morning summary (§19) - update after every significant tick, at least
 // every 30 minutes regardless.
@@ -667,6 +819,7 @@ function normalizeCtx(ctxIn) {
     sleep: ctxIn.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     maxIterations: ctxIn.maxIterations ?? Infinity,
     intervalMs: ctxIn.intervalMs ?? HEARTBEAT_INTERVAL_MS,
+    resumeDelivery: ctxIn.resumeDelivery ?? ctxIn.residentConsumer,
   };
 }
 
@@ -750,6 +903,19 @@ export async function runLoopOnce(ctxIn) {
   if (reportScan.authRequired && !isStopState(state.state)) {
     state = escalateToNeedsHuman(state, "AUTH_REQUIRED", reportScan.authRequiredDetail, isoNow);
     tickEvents.push({ type: "escalate_needs_human", reason: "AUTH_REQUIRED" });
+  }
+
+  if (ctx.resumeDelivery) {
+    const resume = await runResumeDeliveryCheck(ctx, {
+      isoNow,
+      deliveryState: recoveryState.residentConsumer,
+      persistDeliveryState: async (nextState) => {
+        if (ctx.resumeDelivery.persistDeliveryState) await ctx.resumeDelivery.persistDeliveryState(nextState);
+        recoveryState = { ...recoveryState, residentConsumer: nextState };
+        await writeRecoveryState(paths, recoveryState);
+      },
+    });
+    tickEvents.push(...resume.events);
   }
 
   if (JSON.stringify(state) !== JSON.stringify(stateResult.state)) {

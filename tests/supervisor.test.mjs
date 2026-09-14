@@ -147,6 +147,61 @@ test("runSupervisor writes and refreshes heartbeat without a real interval", asy
   assert.equal(heartbeat.state, "RUNNING");
 });
 
+test("resident GitHub consumer is polled by Supervisor and persists idempotency across ticks", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const waitTuple = {
+    source_terminal_receipt: 1629000001,
+    control_generation: 13,
+    card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01",
+    allowed_action_class: "ISSUE162_RESIDENT_CONSUMER",
+    target: {
+      agent_name: "R49-EXECUTOR",
+      executor_instance_id: "r49-executor-instance",
+      surface: "HERDR",
+      herdr_agent: "codex",
+      herdr_workspace_id: "wR49",
+      herdr_agent_kind: "codex",
+    },
+  };
+  const decisionBody = `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 13
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt 1629000001
+source_control_generation: 13
+resume_card_id: GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01
+
+EXACT_TARGET
+executor_role: WORKER
+agent_name: R49-EXECUTOR
+executor_instance_id: r49-executor-instance
+surface: HERDR
+minimal_wake: Read GitHub directly.
+`;
+  let prompts = 0;
+  const resumeDelivery = {
+    futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] },
+    waitTuple,
+    readDecisionBody: async () => decisionBody,
+    readComments: async () => [],
+    herdr: { prompt: async () => { prompts += 1; return { accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: "r49" }; } },
+    publishReceipt: async () => ({ id: "r49-delivery" }),
+  };
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    resumeDelivery,
+    pid: 41005,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+  });
+  assert.equal(prompts, 1);
+  assert.equal(outcome.events.find((event) => event.type === "resume_delivery_delivered").type, "resume_delivery_delivered");
+  assert.equal((await readJson(paths.recoveryState)).residentConsumer.state, "DELIVERED");
+});
+
 test("live lock owner stops a duplicate Supervisor before ORCA or agent actions", async (t) => {
   const { root, paths } = await tempRuntime(t);
   await mkdir(path.dirname(paths.lock), { recursive: true });
