@@ -7,10 +7,18 @@ import {
   buildLogicalEventKey,
   classifyFutureConsumerBinding,
   createHerdrPrompter,
+  createGhReader,
   createResidentHerdrConsumer,
   deliverResumeOnce,
   findExistingDelivery,
   matchWaitToDecision,
+  normalizeWakeAt,
+  evaluateTimedQuotaState,
+  advanceTimedQuotaState,
+  parseAuthoritativeQuotaEvidence,
+  scheduleQuotaRetry,
+  validatePreSendAuthorityBinding,
+  validateFreeRoute,
   parseControlDecision,
   parseHerdrAgentList,
   resolveActiveControlBinding,
@@ -110,6 +118,253 @@ target_herdr_pane_id: wR49:p1
 target_herdr_agent_session: ${SESSION}
 `;
 }
+
+test("wake_at requires an RFC3339 offset, normalizes to UTC epoch, and blocks early send", () => {
+  const parsed = normalizeWakeAt("2026-11-01T01:30:00-04:00");
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.wake_at, "2026-11-01T05:30:00.000Z");
+  assert.equal(parsed.wake_at_ms, Date.parse("2026-11-01T05:30:00.000Z"));
+  assert.equal(normalizeWakeAt("2026-11-01T01:30:00").ok, false);
+  assert.equal(evaluateTimedQuotaState({ state: "WAITING_FOR_WAKE", wake_at: parsed.wake_at }, { nowMs: parsed.wake_at_ms - 1 }).decision, "WAIT_UNTIL_WAKE");
+  assert.equal(evaluateTimedQuotaState({ state: "WAITING_FOR_WAKE", wake_at: parsed.wake_at }, { nowMs: parsed.wake_at_ms }).decision, "SEND_ALLOWED");
+});
+
+test("late offline catch-up delivers once and a completed timed event is a duplicate", async () => {
+  const tuple = waitTuple();
+  const body = decisionBody();
+  const wakeAt = "2026-11-01T05:30:00.000Z";
+  let prompts = 0;
+  const deliver = (timedQuotaState) => deliverResumeOnce({
+    waitTuple: tuple,
+    decisionBody: body,
+    comments: [],
+    timedQuotaState,
+    now: () => Date.parse("2026-11-01T06:30:00.000Z"),
+    herdr: { prompt: async () => { prompts += 1; return { accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: SESSION }; } },
+    publishReceipt: async () => ({ id: "catch-up" }),
+  });
+  const first = await deliver({ state: "WAITING_FOR_WAKE", wake_at: wakeAt });
+  const second = await deliver({ state: "DELIVERED", wake_at: wakeAt });
+  assert.equal(first.decision, "DELIVERED");
+  assert.equal(second.decision, "NO_OP_DUPLICATE");
+  assert.equal(prompts, 1);
+});
+
+test("only the exact provider, model, and zero-cost route is admissible", () => {
+  const policy = { provider: "deepseek", model: "deepseek-v4-flash-free", billing_class: "FREE", max_cost: 0 };
+  assert.deepEqual(validateFreeRoute(policy, policy), { ok: true, route: policy });
+  assert.equal(validateFreeRoute({ ...policy, max_cost: 1 }, policy).reason, "NONZERO_COST_ROUTE");
+  assert.equal(validateFreeRoute({ ...policy, model: "deepseek-v4-flash" }, policy).reason, "WRONG_MODEL");
+  assert.equal(validateFreeRoute({ ...policy, provider: "openai" }, policy).reason, "WRONG_PROVIDER");
+  assert.equal(validateFreeRoute({ ...policy, billing_class: "PAID" }, policy).reason, "NON_FREE_ROUTE");
+  assert.equal(validateFreeRoute({ ...policy, fallback: { provider: "openai", model: "paid" } }, policy).reason, "PAID_FALLBACK_FORBIDDEN");
+});
+
+test("quota delay accepts only structured authoritative Retry-After or reset evidence", () => {
+  const common = {
+    authoritative: true,
+    provider: "deepseek",
+    model: "deepseek-v4-flash-free",
+    billing_class: "FREE",
+    max_cost: 0,
+    provenance: { source: "provider_http", response_id: "429-1" },
+  };
+  const byRetryAfter = parseAuthoritativeQuotaEvidence({ ...common, retry_after_seconds: 30 }, { observedAtMs: 1_000 });
+  assert.equal(byRetryAfter.ok, true);
+  assert.equal(byRetryAfter.wake_at_ms, 31_000);
+  const byReset = parseAuthoritativeQuotaEvidence({ ...common, reset_at: "2026-11-01T01:30:00-04:00" }, { observedAtMs: 1_000 });
+  assert.equal(byReset.ok, true);
+  assert.equal(byReset.wake_at, "2026-11-01T05:30:00.000Z");
+  assert.equal(parseAuthoritativeQuotaEvidence({ ...common, reset_at: "tomorrow" }, { observedAtMs: 1_000 }).reason, "INVALID_QUOTA_RESET");
+  assert.equal(parseAuthoritativeQuotaEvidence({ ...common, retry_after_seconds: 30, authoritative: false }, { observedAtMs: 1_000 }).reason, "QUOTA_EVIDENCE_NOT_AUTHORITATIVE");
+  assert.equal(parseAuthoritativeQuotaEvidence(common, { observedAtMs: 1_000 }).reason, "QUOTA_RESET_MISSING");
+});
+
+test("quota retry budget is persisted at one and survives restart state", () => {
+  const evidence = parseAuthoritativeQuotaEvidence({
+    authoritative: true,
+    provider: "deepseek",
+    model: "deepseek-v4-flash-free",
+    billing_class: "FREE",
+    max_cost: 0,
+    retry_after_seconds: 5,
+    provenance: { source: "provider_http", response_id: "429-2" },
+  }, { observedAtMs: 10_000 });
+  const scheduled = scheduleQuotaRetry({ state: "WAITING_FOR_WAKE", retry_count: 0, wake_at: "2026-11-01T05:30:00.000Z" }, evidence, { observedAtMs: 10_000 });
+  assert.equal(scheduled.ok, true);
+  assert.equal(scheduled.state.retry_count, 1);
+  assert.equal(scheduled.state.state, "RETRY_PENDING");
+  const restart = scheduleQuotaRetry(scheduled.state, evidence, { observedAtMs: 20_000 });
+  assert.equal(restart.ok, false);
+  assert.equal(restart.reason, "RETRY_BUDGET_EXHAUSTED");
+  assert.equal(scheduleQuotaRetry({ state: "SEND_PENDING", retry_count: 0 }, evidence, { observedAtMs: 10_000 }).reason, "NO_BLIND_RETRY");
+});
+
+test("retry scheduling revalidates the exact admitted free route", () => {
+  const policy = { provider: "deepseek", model: "deepseek-v4-flash-free", billing_class: "FREE", max_cost: 0 };
+  const evidence = parseAuthoritativeQuotaEvidence({
+    authoritative: true, provider: "openai", model: "gpt-paid", billing_class: "FREE", max_cost: 0,
+    retry_after_seconds: 5, provenance: { source: "provider_http", response_id: "429-paid" },
+  }, { observedAtMs: 10_000 });
+  assert.equal(scheduleQuotaRetry({ state: "WAITING_FOR_WAKE", retry_count: 0 }, evidence, { routePolicy: policy, observedAtMs: 10_000 }).reason, "WRONG_PROVIDER");
+});
+
+test("a quota retry is legal only before the physical-send boundary", () => {
+  const nowMs = Date.parse("2026-11-01T06:30:00.000Z");
+  assert.equal(evaluateTimedQuotaState({ state: "RETRY_PENDING", wake_at: "2026-11-01T05:30:00.000Z", retry_count: 1, prompt_submitted: false }, { nowMs }).decision, "SEND_ALLOWED");
+  assert.equal(evaluateTimedQuotaState({ state: "RETRY_PENDING", wake_at: "2026-11-01T05:30:00.000Z", retry_count: 2 }, { nowMs }).reason, "RETRY_BUDGET_EXHAUSTED");
+  assert.equal(evaluateTimedQuotaState({ state: "RETRY_PENDING", wake_at: "2026-11-01T05:30:00.000Z", retry_count: 1, prompt_submitted: true }, { nowMs }).decision, "NO_BLIND_RETRY");
+  assert.equal(evaluateTimedQuotaState({ state: "SEND_PENDING", wake_at: "2026-11-01T05:30:00.000Z", prompt_submitted: false }, { nowMs }).decision, "NO_BLIND_RETRY");
+  assert.equal(evaluateTimedQuotaState({ state: "UNCERTAIN_SEND", wake_at: "2026-11-01T05:30:00.000Z", prompt_submitted: false }, { nowMs }).decision, "NO_BLIND_RETRY");
+});
+
+test("epoch due-time survives DST and forward/backward clock changes without a duplicate", () => {
+  const state = { state: "WAITING_FOR_WAKE", wake_at: "2026-03-08T01:30:00-05:00", logical_event_key: "event-1" };
+  const before = advanceTimedQuotaState(state, { nowMs: Date.parse("2026-03-08T06:29:59.000Z") });
+  assert.equal(before.decision, "WAIT_UNTIL_WAKE");
+  const due = advanceTimedQuotaState(state, { nowMs: Date.parse("2026-03-08T06:30:00.000Z") });
+  assert.equal(due.decision, "SEND_ALLOWED");
+  assert.equal(due.state.wake_at, "2026-03-08T06:30:00.000Z");
+  const afterBackwardJump = advanceTimedQuotaState({ ...due.state, state: "DELIVERED" }, { nowMs: Date.parse("2026-03-08T05:00:00.000Z") });
+  assert.equal(afterBackwardJump.decision, "NO_OP_DUPLICATE");
+});
+
+test("structured pre-send quota failure schedules one retry without blind resend", async () => {
+  const tuple = waitTuple();
+  const body = decisionBody();
+  const logicalKey = buildLogicalEventKey(tuple, parseControlDecision(body));
+  const evidence = {
+    authoritative: true,
+    provider: "deepseek",
+    model: "deepseek-v4-flash-free",
+    billing_class: "FREE",
+    max_cost: 0,
+    retry_after_seconds: 30,
+    provenance: { source: "provider_http", response_id: "429-3" },
+  };
+  let nowMs = 10_000;
+  let prompts = 0;
+  const persisted = [];
+  const herdr = { prompt: async () => {
+    prompts += 1;
+    if (prompts === 1) throw Object.assign(new Error("quota"), { code: "PROVIDER_QUOTA", prompt_submitted: false, quota_evidence: evidence });
+    return { accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: SESSION };
+  } };
+  const base = { waitTuple: tuple, decisionBody: body, comments: [], herdr, publishReceipt: async () => ({ id: "retry-receipt" }), now: () => nowMs, persistDeliveryState: async (state) => { persisted.push(state); }, consumerHostId: "host-a" };
+  const first = await deliverResumeOnce({ ...base, timedQuotaState: { state: "WAITING_FOR_WAKE", wake_at: "1970-01-01T00:00:00.000Z", retry_count: 0 } });
+  assert.equal(first.decision, "RETRY_SCHEDULED");
+  assert.equal(persisted.at(-1).state, "RETRY_PENDING");
+  assert.equal(persisted.at(-1).retry_count, 1);
+  assert.equal(persisted.at(-1).consumer_host_id, "host-a");
+  const scheduled = persisted.at(-1);
+  const early = await deliverResumeOnce({ ...base, timedQuotaState: scheduled, deliveryState: scheduled });
+  assert.equal(early.decision, "WAIT_UNTIL_WAKE");
+  nowMs = scheduled.wake_at_ms;
+  const retry = await deliverResumeOnce({ ...base, timedQuotaState: scheduled, deliveryState: scheduled });
+  assert.equal(retry.decision, "DELIVERED");
+  assert.equal(prompts, 2);
+  assert.equal(logicalKey, retry.logical_key);
+});
+
+test("GitHub auth, rate, pagination, or readback ambiguity is a no-prompt condition", async () => {
+  const reader = createGhReader({ exec: async () => ({ stdout: "" }) });
+  await assert.rejects(reader.readComments({ repo: "D22977/gpt-browser-bridge", issue: 162 }), /GITHUB_COMMENTS_READBACK_AMBIGUOUS/);
+  const invalid = createGhReader({ exec: async () => ({ stdout: '{"message":"rate limit"}' }) });
+  await assert.rejects(invalid.readComments({ repo: "D22977/gpt-browser-bridge", issue: 162 }), /GITHUB_COMMENTS_READBACK_AMBIGUOUS/);
+});
+
+test("pre-send authority revalidation binds card, generation, head, and exact target", () => {
+  const binding = {
+    card_id: CARD_ID,
+    control_generation: GENERATION,
+    source_control_generation: GENERATION,
+    HEAD,
+    target: { agent_name: "R49-EXECUTOR", executor_instance_id: INSTANCE, surface: "HERDR", pane_id: "wR49:p1", agent_session: SESSION },
+  };
+  assert.deepEqual(validatePreSendAuthorityBinding(binding, { ...binding }), { ok: true });
+  assert.equal(validatePreSendAuthorityBinding(binding, { ...binding, HEAD: "different" }).reason, "AUTHORITY_HEAD_CHANGED");
+  assert.equal(validatePreSendAuthorityBinding(binding, { ...binding, control_generation: GENERATION - 1 }).reason, "AUTHORITY_GENERATION_CHANGED");
+  assert.equal(validatePreSendAuthorityBinding(binding, { ...binding, target: { ...binding.target, pane_id: "wR49:p2" } }).reason, "AUTHORITY_TARGET_CHANGED");
+  assert.equal(validatePreSendAuthorityBinding({ ...binding, source_control_generation: undefined }, { ...binding, source_control_generation: undefined }).reason, "AUTHORITY_BINDING_MISSING");
+});
+
+test("resident delivery revalidates exact authority before prompting", async () => {
+  const binding = { card_id: CARD_ID, control_generation: GENERATION, source_control_generation: GENERATION, HEAD, target: { agent_name: "R49-EXECUTOR", executor_instance_id: INSTANCE, surface: "HERDR", pane_id: "wR49:p1", agent_session: SESSION } };
+  let prompts = 0;
+  let reads = 0;
+  const result = await createResidentHerdrConsumer({
+    futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: [CONTROL_DECISION_PROTOCOL] },
+    waitTuple: waitTuple(),
+    readAuthority: async () => ({ value: { binding: reads++ === 0 ? binding : { ...binding, HEAD: "drifted" } } }),
+    readDecisionBody: async () => decisionBody(),
+    readComments: async () => [],
+    herdr: { prompt: async () => { prompts += 1; return {}; } },
+    publishReceipt: async () => ({ id: "never" }),
+    requireExactAuthorityBinding: true,
+  }).consumeOnce();
+  assert.equal(result.decision, "REJECTED");
+  assert.equal(prompts, 0);
+});
+
+test("a timed event is host-bound unless the second host is explicitly authorized", () => {
+  const state = { state: "WAITING_FOR_WAKE", wake_at: "2099-01-01T00:00:00.000Z", consumer_host_id: "host-a" };
+  assert.equal(evaluateTimedQuotaState(state, { nowMs: 0, hostId: "host-a" }).decision, "WAIT_UNTIL_WAKE");
+  assert.equal(evaluateTimedQuotaState(state, { nowMs: 0, hostId: "host-b" }).reason, "HOST_IDENTITY_REJECTED");
+  assert.equal(evaluateTimedQuotaState(state, { nowMs: 0, hostId: "host-b", authorizedHostIds: ["host-b"] }).decision, "WAIT_UNTIL_WAKE");
+});
+
+test("timed delivery without a pre-send authority reader is CONTROL_REQUIRED", async () => {
+  let prompts = 0;
+  const result = await createResidentHerdrConsumer({
+    futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: [CONTROL_DECISION_PROTOCOL] },
+    waitTuple: waitTuple(),
+    decisionBody: decisionBody(),
+    comments: [],
+    timedQuotaState: { state: "WAITING_FOR_WAKE", wake_at: "1970-01-01T00:00:00.000Z", retry_count: 0 },
+    requireExactAuthorityBinding: true,
+    herdr: { prompt: async () => { prompts += 1; return {}; } },
+    publishReceipt: async () => ({ id: "never" }),
+    now: () => 1_000,
+  }).consumeOnce();
+  assert.equal(result.decision, "REJECTED");
+  assert.equal(result.reason, "AUTHORITY_REVALIDATION_MISSING");
+  assert.equal(prompts, 0);
+});
+
+test("CONTROL_DECISION_V1 carries a normalized timed wake and exact free route", () => {
+  const parsed = parseControlDecision(`${decisionBody()}
+TIMED_QUOTA
+wake_at: 2026-11-01T01:30:00-04:00
+provider: deepseek
+model: deepseek-v4-flash-free
+billing_class: FREE
+max_cost: 0
+`);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.decision.wake_at, "2026-11-01T05:30:00.000Z");
+  assert.deepEqual(parsed.decision.quota_route, { provider: "deepseek", model: "deepseek-v4-flash-free", billing_class: "FREE", max_cost: 0 });
+});
+
+test("decision-carried wake_at gates delivery even without a local prebuilt state", async () => {
+  let prompts = 0;
+  const result = await deliverResumeOnce({
+    waitTuple: waitTuple(),
+    decisionBody: `${decisionBody()}
+TIMED_QUOTA
+wake_at: 2099-01-01T00:00:00Z
+provider: deepseek
+model: deepseek-v4-flash-free
+billing_class: FREE
+max_cost: 0
+`,
+    comments: [],
+    now: () => Date.parse("2026-01-01T00:00:00Z"),
+    herdr: { prompt: async () => { prompts += 1; return {}; } },
+    publishReceipt: async () => ({ id: "never" }),
+  });
+  assert.equal(result.decision, "WAIT_UNTIL_WAKE");
+  assert.equal(prompts, 0);
+});
 
 test("exact source, generation, card, and target bindings are required", () => {
   const tuple = waitTuple();

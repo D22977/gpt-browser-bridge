@@ -36,11 +36,13 @@ import {
   findExistingDelivery,
   matchWaitToDecision,
   parseControlDecision,
+  validatePreSendAuthorityBinding,
   validateWaitTuple,
 } from "./adapters/herdr_resume.mjs";
 import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary.mjs";
 
 const execFileAsync = promisify(execFile);
+const lockAcquisitionsInFlight = new Set();
 
 // ---------------------------------------------------------------------------
 // Constants (§15 retry policy)
@@ -205,19 +207,34 @@ async function defaultIsAlive(pid) {
 // owns the lock, we stop rather than fight it (duplicate scheduler
 // invocation). If nobody alive owns it (Supervisor was killed), we take it
 // over. Owning it also renews the timestamp.
-export async function acquireOrConfirmLock(paths, { pid, isAlive, isoNow }) {
+export async function acquireOrConfirmLock(paths, { pid, hostId = null, authorizedHostIds = [], isAlive, isoNow }) {
+  const lockKey = path.resolve(paths.lock);
+  if (lockAcquisitionsInFlight.has(lockKey)) return { owned: false, holder: null, reason: "LOCK_ACQUIRE_IN_FLIGHT" };
+  lockAcquisitionsInFlight.add(lockKey);
   let current = null;
   try {
-    current = JSON.parse(await readFile(paths.lock, "utf8"));
-  } catch {
-    current = null;
+    try {
+      current = JSON.parse(await readFile(paths.lock, "utf8"));
+    } catch {
+      current = null;
+    }
+    if (current && current.pid !== pid) {
+      const authorized = Boolean(current.host_id && hostId && current.host_id !== hostId && authorizedHostIds.includes(hostId));
+      if (current.host_id && hostId && current.host_id !== hostId && !authorized) {
+        return { owned: false, holder: current.pid, reason: "HOST_IDENTITY_REJECTED" };
+      }
+      if (!authorized) {
+        const alive = await isAlive(current.pid);
+        if (alive) return { owned: false, holder: current.pid };
+      }
+    }
+    const record = { pid, at: isoNow };
+    if (hostId) record.host_id = hostId;
+    await writeFileAtomic(paths.lock, JSON.stringify(record));
+    return { owned: true, holder: pid };
+  } finally {
+    lockAcquisitionsInFlight.delete(lockKey);
   }
-  if (current && current.pid !== pid) {
-    const alive = await isAlive(current.pid);
-    if (alive) return { owned: false, holder: current.pid };
-  }
-  await writeFileAtomic(paths.lock, JSON.stringify({ pid, at: isoNow }, null, 2));
-  return { owned: true, holder: pid };
 }
 
 // ---------------------------------------------------------------------------
@@ -271,10 +288,19 @@ export function defaultRecoveryState() {
 export async function readRecoveryState(paths) {
   try {
     const raw = JSON.parse(await readFile(paths.recoveryState, "utf8"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("RECOVERY_STATE_NOT_OBJECT");
+    if (raw.residentConsumer !== null && raw.residentConsumer !== undefined && (typeof raw.residentConsumer !== "object" || Array.isArray(raw.residentConsumer))) {
+      throw new Error("RECOVERY_STATE_RESIDENT_CONSUMER_INVALID");
+    }
     const defaults = defaultRecoveryState();
     return { ...defaults, ...raw, orca: { ...defaults.orca, ...raw.orca } };
-  } catch {
-    return defaultRecoveryState();
+  } catch (error) {
+    if (error?.code === "ENOENT") return defaultRecoveryState();
+    return {
+      ...defaultRecoveryState(),
+      control_required: true,
+      recovery_state_error: String(error?.message ?? error),
+    };
   }
 }
 
@@ -720,12 +746,21 @@ export async function runResumeDeliveryCheck(ctx, {
   }
 
   const persist = persistDeliveryState ?? cfg.persistDeliveryState;
+  const timedQuotaState = cfg.timedQuotaState ?? (deliveryState?.wake_at ? deliveryState : null);
   const startingFingerprint = authorityFingerprint(authority.fingerprint ?? authority.binding ?? null);
   const beforeSend = async (details) => {
+    if (cfg.requireExactAuthorityBinding && !cfg.readAuthority) return { allow: false, reason: "AUTHORITY_REVALIDATION_MISSING" };
     if (cfg.readAuthority) {
       const latestRaw = await cfg.readAuthority({ phase: "before_send", logicalKey: details.logicalKey });
       if (latestRaw?.ok === false) return { allow: false, reason: latestRaw.reason ?? "CONTROL_REQUIRED_AUTHORITY_REVALIDATION_FAILED" };
       const latest = latestRaw?.value ?? latestRaw ?? {};
+      const initialBinding = authority.binding;
+      const latestBinding = latest.binding;
+      if (cfg.requireExactAuthorityBinding && (!initialBinding || !latestBinding)) return { allow: false, reason: "AUTHORITY_BINDING_MISSING" };
+      if (initialBinding && latestBinding) {
+        const bindingCheck = validatePreSendAuthorityBinding(initialBinding, latestBinding);
+        if (!bindingCheck.ok) return { allow: false, reason: bindingCheck.reason };
+      }
       const latestFingerprint = authorityFingerprint(latest.fingerprint ?? latest.binding ?? null);
       if (startingFingerprint !== null && latestFingerprint !== startingFingerprint) return { allow: false, reason: "AUTHORITY_CHANGED" };
     }
@@ -747,6 +782,10 @@ export async function runResumeDeliveryCheck(ctx, {
       protocol: cfg.protocol,
       now: () => isoNow,
       deliveryState,
+      timedQuotaState,
+      quotaRoutePolicy: cfg.quotaRoutePolicy,
+      consumerHostId: cfg.consumerHostId,
+      authorizedHostIds: cfg.authorizedHostIds,
       persistDeliveryState: persist,
       beforeSend,
     });
@@ -771,6 +810,18 @@ export async function runResumeDeliveryCheck(ctx, {
     if (result.decision === "NO_BLIND_RETRY") {
       events.push({ type: "resume_delivery_no_blind_retry", decision: result.decision, logical_event_key: result.logical_key, receipt_id: result.receipt_id ?? null });
       return { events, delivered: false, duplicate: false, noBlindRetry: true, reason: result.decision };
+    }
+    if (result.decision === "WAIT_UNTIL_WAKE") {
+      events.push({ type: "resume_delivery_waiting", decision: result.decision, logical_event_key: result.logical_key, wake_at: result.wake_at, wake_at_ms: result.wake_at_ms, reason: result.decision });
+      return { events, delivered: false, duplicate: false, reason: result.decision, wake_at: result.wake_at, wake_at_ms: result.wake_at_ms };
+    }
+    if (result.decision === "RETRY_SCHEDULED") {
+      events.push({ type: "resume_delivery_retry_scheduled", decision: result.decision, logical_event_key: result.logical_key, wake_at: result.state?.wake_at, wake_at_ms: result.state?.wake_at_ms });
+      return { events, delivered: false, duplicate: false, reason: result.decision, state: result.state };
+    }
+    if (result.decision === "CONTROL_REQUIRED") {
+      events.push({ type: "resume_delivery_control_required", decision: result.decision, logical_event_key: result.logical_key, reason: result.reason });
+      return { events, delivered: false, duplicate: false, reason: result.reason ?? result.decision };
     }
     events.push({ type: "resume_delivery_rejected", decision: result.decision, reason: result.reason });
     return { events, delivered: false, duplicate: false, reason: result.reason ?? result.decision };
@@ -813,6 +864,8 @@ function normalizeCtx(ctxIn) {
     paths: ctxIn.paths ?? resolveRuntimePaths(runtimeRoot),
     orca: ctxIn.orca,
     pid: ctxIn.pid ?? process.pid,
+    hostId: ctxIn.hostId ?? null,
+    authorizedHostIds: ctxIn.authorizedHostIds ?? [],
     now: ctxIn.now ?? (() => Date.now()),
     isAlive: ctxIn.isAlive ?? defaultIsAlive,
     gitExec: ctxIn.gitExec ?? defaultGitExec,
@@ -833,9 +886,9 @@ export async function runLoopOnce(ctxIn) {
   const recoveries = [];
 
   // Step 2: confirm/acquire lock ownership.
-  const lock = await acquireOrConfirmLock(paths, { pid: ctx.pid, isAlive: ctx.isAlive, isoNow });
+  const lock = await acquireOrConfirmLock(paths, { pid: ctx.pid, hostId: ctx.hostId, authorizedHostIds: ctx.authorizedHostIds, isAlive: ctx.isAlive, isoNow });
   if (!lock.owned) {
-    return { stop: true, reason: "LOCK_NOT_OWNED", holder: lock.holder, at: isoNow };
+    return { stop: true, reason: lock.reason ?? "LOCK_NOT_OWNED", holder: lock.holder, at: isoNow };
   }
 
   // Step 3: read project state.
@@ -853,6 +906,12 @@ export async function runLoopOnce(ctxIn) {
 
   let state = stateResult.state;
   let recoveryState = await readRecoveryState(paths);
+  if (recoveryState.control_required && !isStopState(state.state)) {
+    const reason = "CONTROL_REQUIRED_RECOVERY_STATE_UNREADABLE";
+    tickEvents.push({ type: "supervisor_recovery_state_unreadable", reason, detail: recoveryState.recovery_state_error });
+    await appendEvents(paths, tickEvents, isoNow);
+    return { stop: false, at: isoNow, reason };
+  }
 
   // Step 5: ORCA health (always checked - needed for the morning summary
   // even once the project is in a stop state).

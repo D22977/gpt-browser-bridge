@@ -17,9 +17,11 @@ import {
   evaluateOrcaAvailability,
   recordRecoveryFailure,
   readDispatchCheckpoint,
+  readRecoveryState,
   recoverActiveTerminal,
   resolveRuntimePaths,
   runLoopOnce,
+  runResumeDeliveryCheck,
   runSupervisor,
   scanDurableReports,
   writeProjectState,
@@ -204,6 +206,138 @@ minimal_wake: Read GitHub directly.
   assert.equal((await readJson(paths.recoveryState)).residentConsumer.state, "DELIVERED");
 });
 
+test("Supervisor honors resident wake_at and does not prompt before due", async (t) => {
+  const { root } = await tempRuntime(t);
+  const waitTuple = {
+    source_terminal_receipt: 1629000001,
+    control_generation: 13,
+    card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01",
+    allowed_action_class: "ISSUE162_RESIDENT_CONSUMER",
+    executor_role: "WORKER",
+    target: { agent_name: "R49-EXECUTOR", executor_instance_id: "r49-executor-instance", surface: "HERDR", herdr_agent: "codex", herdr_workspace_id: "wR49", herdr_agent_kind: "codex" },
+  };
+  const decisionBody = `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 13
+decision_topic: ISSUE162_RESIDENT_CONSUMER
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt 1629000001
+source_control_generation: 13
+resume_card_id: GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01
+
+EXACT_TARGET
+executor_role: WORKER
+agent_name: R49-EXECUTOR
+executor_instance_id: r49-executor-instance
+surface: HERDR
+minimal_wake: Read GitHub directly.
+`;
+  let prompts = 0;
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    resumeDelivery: {
+      futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] },
+      waitTuple,
+      decisionBody,
+      comments: [],
+      timedQuotaState: { state: "WAITING_FOR_WAKE", wake_at: "2099-01-01T00:00:00.000Z", retry_count: 0 },
+      herdr: { prompt: async () => { prompts += 1; return {}; } },
+      publishReceipt: async () => ({ id: "never" }),
+    },
+    pid: 41009,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+  });
+  assert.equal(prompts, 0);
+  assert.equal(outcome.events.find((event) => event.type === "resume_delivery_waiting").reason, "WAIT_UNTIL_WAKE");
+});
+
+test("persisted RETRY_PENDING state remains gated after Supervisor restart", async (t) => {
+  const { paths } = await tempRuntime(t);
+  const waitTuple = {
+    source_terminal_receipt: 1629000001, control_generation: 13, card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01", allowed_action_class: "ISSUE162_RESIDENT_CONSUMER", executor_role: "WORKER",
+    target: { agent_name: "R49-EXECUTOR", executor_instance_id: "r49-executor-instance", surface: "HERDR", herdr_agent: "codex", herdr_workspace_id: "wR49", herdr_agent_kind: "codex" },
+  };
+  const decisionBody = `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 13
+decision_topic: ISSUE162_RESIDENT_CONSUMER
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt 1629000001
+source_control_generation: 13
+resume_card_id: GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01
+
+EXACT_TARGET
+executor_role: WORKER
+agent_name: R49-EXECUTOR
+executor_instance_id: r49-executor-instance
+surface: HERDR
+minimal_wake: Read GitHub directly.
+`;
+  await writeFile(paths.recoveryState, JSON.stringify({ residentConsumer: { state: "RETRY_PENDING", wake_at: "2099-01-01T00:00:00.000Z", retry_count: 1 } }));
+  let prompts = 0;
+  const result = await runResumeDeliveryCheck({ resumeDelivery: {
+    futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] }, waitTuple, decisionBody, comments: [], herdr: { prompt: async () => { prompts += 1; return {}; } }, publishReceipt: async () => ({ id: "never" }),
+  } }, { isoNow: "2026-08-01T09:00:00+08:00", deliveryState: { state: "RETRY_PENDING", wake_at: "2099-01-01T00:00:00.000Z", retry_count: 1 } });
+  assert.equal(prompts, 0);
+  assert.equal(result.reason, "WAIT_UNTIL_WAKE");
+});
+
+test("corrupt nonterminal recovery state is CONTROL_REQUIRED and never prompts", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.recoveryState, "{not-json");
+  let prompts = 0;
+  const waitTuple = {
+    source_terminal_receipt: 1629000001,
+    control_generation: 13,
+    card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01",
+    allowed_action_class: "ISSUE162_RESIDENT_CONSUMER",
+    executor_role: "WORKER",
+    target: { agent_name: "R49-EXECUTOR", executor_instance_id: "r49-executor-instance", surface: "HERDR", herdr_agent: "codex", herdr_workspace_id: "wR49", herdr_agent_kind: "codex" },
+  };
+  const decisionBody = `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 13
+decision_topic: ISSUE162_RESIDENT_CONSUMER
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt 1629000001
+source_control_generation: 13
+resume_card_id: GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01
+
+EXACT_TARGET
+executor_role: WORKER
+agent_name: R49-EXECUTOR
+executor_instance_id: r49-executor-instance
+surface: HERDR
+minimal_wake: Read GitHub directly.
+`;
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    resumeDelivery: {
+      futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] },
+      waitTuple,
+      decisionBody,
+      comments: [],
+      herdr: { prompt: async () => { prompts += 1; return {}; } },
+      publishReceipt: async () => ({ id: "never" }),
+    },
+    pid: 41006,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+  });
+  assert.equal(outcome.reason, "CONTROL_REQUIRED_RECOVERY_STATE_UNREADABLE");
+  assert.equal(prompts, 0);
+  assert.equal((await readRecoveryState(paths)).control_required, true);
+});
+
 test("live lock owner stops a duplicate Supervisor before ORCA or agent actions", async (t) => {
   const { root, paths } = await tempRuntime(t);
   await mkdir(path.dirname(paths.lock), { recursive: true });
@@ -238,6 +372,34 @@ test("dead lock owner is replaced and the current process becomes sole owner", a
   });
   assert.deepEqual(result, { owned: true, holder: 222 });
   assert.equal((await readJson(paths.lock)).pid, 222);
+});
+
+test("same-host concurrency is single-owner and a second host needs explicit authorization", async (t) => {
+  const { paths } = await tempRuntime(t);
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({ pid: 111, host_id: "host-a", at: "old" }));
+  const rejected = await acquireOrConfirmLock(paths, {
+    pid: 222,
+    hostId: "host-b",
+    isAlive: async () => true,
+    isoNow: "2026-08-01T09:00:00+08:00",
+  });
+  assert.deepEqual(rejected, { owned: false, holder: 111, reason: "HOST_IDENTITY_REJECTED" });
+  const authorized = await acquireOrConfirmLock(paths, {
+    pid: 222,
+    hostId: "host-b",
+    authorizedHostIds: ["host-b"],
+    isAlive: async () => true,
+    isoNow: "2026-08-01T09:00:00+08:00",
+  });
+  assert.equal(authorized.owned, true);
+  const sameHost = await acquireOrConfirmLock(paths, {
+    pid: 333,
+    hostId: "host-b",
+    isAlive: async () => true,
+    isoNow: "2026-08-01T09:00:01+08:00",
+  });
+  assert.equal(sameHost.owned, false);
 });
 
 for (const terminalState of ["COMPLETED", "CANCELLED", "NEEDS_HUMAN"]) {

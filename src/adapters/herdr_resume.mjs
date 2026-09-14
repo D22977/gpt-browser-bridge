@@ -19,6 +19,130 @@ export const DEFAULT_HERDR_EXE = "herdr";
 const SEND_PENDING = "SEND_PENDING";
 const DELIVERED = "DELIVERED";
 const UNCERTAIN_SEND = "UNCERTAIN_SEND";
+const RETRY_PENDING = "RETRY_PENDING";
+const CONTROL_REQUIRED = "CONTROL_REQUIRED";
+
+const RFC3339_OFFSET_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+export function normalizeWakeAt(value) {
+  if (typeof value !== "string" || !RFC3339_OFFSET_PATTERN.test(value)) {
+    return { ok: false, reason: "WAKE_AT_RFC3339_OFFSET_REQUIRED" };
+  }
+  const wakeAtMs = Date.parse(value);
+  if (!Number.isFinite(wakeAtMs)) return { ok: false, reason: "WAKE_AT_INVALID" };
+  return { ok: true, wake_at: new Date(wakeAtMs).toISOString(), wake_at_ms: wakeAtMs };
+}
+
+export function evaluateTimedQuotaState(state, { nowMs = Date.now(), hostId = null, authorizedHostIds = [] } = {}) {
+  if (state?.state === DELIVERED) return { decision: "NO_OP_DUPLICATE", reason: DELIVERED };
+  if (state?.consumer_host_id && state.consumer_host_id !== hostId && !authorizedHostIds.includes(hostId)) {
+    return { decision: CONTROL_REQUIRED, reason: "HOST_IDENTITY_REJECTED" };
+  }
+  if ((Number.isInteger(state?.retry_count) && state.retry_count > 1) || (state?.state === RETRY_PENDING && state?.retry_count !== 1)) {
+    return { decision: CONTROL_REQUIRED, reason: "RETRY_BUDGET_EXHAUSTED" };
+  }
+  if (state?.prompt_submitted === true || state?.physical_send_started === true) {
+    return { decision: "NO_BLIND_RETRY", reason: "PHYSICAL_SEND_BOUNDARY_REACHED" };
+  }
+  if (state?.state === SEND_PENDING || state?.state === UNCERTAIN_SEND) {
+    return { decision: "NO_BLIND_RETRY", reason: state.state };
+  }
+  if (state?.state === CONTROL_REQUIRED) return { decision: CONTROL_REQUIRED, reason: state.reason ?? CONTROL_REQUIRED };
+  const wake = normalizeWakeAt(state?.wake_at);
+  if (!wake.ok) return { decision: CONTROL_REQUIRED, reason: wake.reason };
+  if (nowMs < wake.wake_at_ms) return { decision: "WAIT_UNTIL_WAKE", wake_at: wake.wake_at, wake_at_ms: wake.wake_at_ms };
+  return { decision: "SEND_ALLOWED", wake_at: wake.wake_at, wake_at_ms: wake.wake_at_ms };
+}
+
+export function advanceTimedQuotaState(state, options = {}) {
+  const evaluated = evaluateTimedQuotaState(state, options);
+  const nextState = evaluated.wake_at
+    ? { ...state, wake_at: evaluated.wake_at, wake_at_ms: evaluated.wake_at_ms }
+    : state;
+  return { ...evaluated, state: nextState };
+}
+
+export function validateFreeRoute(route, policy) {
+  if (!route || typeof route !== "object") return { ok: false, reason: "MISSING_ROUTE" };
+  if (route.fallback !== undefined || route.fallbacks !== undefined) {
+    return { ok: false, reason: "PAID_FALLBACK_FORBIDDEN" };
+  }
+  if (route.provider !== policy?.provider) return { ok: false, reason: "WRONG_PROVIDER" };
+  if (route.model !== policy?.model) return { ok: false, reason: "WRONG_MODEL" };
+  if (route.billing_class !== "FREE") return { ok: false, reason: "NON_FREE_ROUTE" };
+  if (route.max_cost !== 0) return { ok: false, reason: "NONZERO_COST_ROUTE" };
+  return { ok: true, route };
+}
+
+export function parseAuthoritativeQuotaEvidence(evidence, { observedAtMs = Date.now() } = {}) {
+  if (!evidence || typeof evidence !== "object" || evidence.authoritative !== true) {
+    return { ok: false, reason: "QUOTA_EVIDENCE_NOT_AUTHORITATIVE" };
+  }
+  if (!Number.isFinite(observedAtMs)) return { ok: false, reason: "QUOTA_OBSERVED_TIME_INVALID" };
+  const route = validateFreeRoute(evidence, evidence);
+  if (!route.ok) return route;
+  if (!evidence.provenance || typeof evidence.provenance !== "object" || typeof evidence.provenance.source !== "string" || !evidence.provenance.source) {
+    return { ok: false, reason: "QUOTA_PROVENANCE_MISSING" };
+  }
+  const wakeCandidates = [];
+  if (evidence.retry_after_seconds !== undefined) {
+    const seconds = Number(evidence.retry_after_seconds);
+    if (!Number.isFinite(seconds) || seconds < 0) return { ok: false, reason: "INVALID_RETRY_AFTER" };
+    wakeCandidates.push(observedAtMs + seconds * 1000);
+  }
+  if (evidence.reset_at !== undefined) {
+    const reset = normalizeWakeAt(evidence.reset_at);
+    if (!reset.ok) return { ok: false, reason: "INVALID_QUOTA_RESET" };
+    wakeCandidates.push(reset.wake_at_ms);
+  }
+  if (wakeCandidates.length === 0) return { ok: false, reason: "QUOTA_RESET_MISSING" };
+  const wakeAtMs = Math.max(...wakeCandidates);
+  return {
+    ok: true,
+    wake_at: new Date(wakeAtMs).toISOString(),
+    wake_at_ms: wakeAtMs,
+    provider: evidence.provider,
+    model: evidence.model,
+    billing_class: evidence.billing_class,
+    max_cost: evidence.max_cost,
+    provenance: evidence.provenance,
+  };
+}
+
+export function scheduleQuotaRetry(state, evidence, { observedAtMs = Date.now(), routePolicy = null } = {}) {
+  if (!evidence?.ok) return { ok: false, reason: evidence?.reason ?? "QUOTA_EVIDENCE_INVALID" };
+  if ([SEND_PENDING, UNCERTAIN_SEND].includes(state?.state) || state?.prompt_submitted === true || state?.physical_send_started === true) {
+    return { ok: false, reason: "NO_BLIND_RETRY" };
+  }
+  if (routePolicy) {
+    const route = validateFreeRoute(evidence, routePolicy);
+    if (!route.ok) return route;
+  }
+  if (!Number.isInteger(state?.retry_count) || state.retry_count < 0) return { ok: false, reason: "RETRY_STATE_INVALID" };
+  if (state.retry_count >= 1) return { ok: false, reason: "RETRY_BUDGET_EXHAUSTED" };
+  if (!Number.isFinite(observedAtMs)) return { ok: false, reason: "QUOTA_OBSERVED_TIME_INVALID" };
+  return {
+    ok: true,
+    state: {
+      ...state,
+      state: RETRY_PENDING,
+      retry_count: 1,
+      retry_budget: 1,
+      wake_at: evidence.wake_at,
+      wake_at_ms: evidence.wake_at_ms,
+      quota_route: {
+        provider: evidence.provider,
+        model: evidence.model,
+        billing_class: evidence.billing_class,
+        max_cost: evidence.max_cost,
+      },
+      quota_evidence: evidence.provenance,
+      prompt_submitted: false,
+      physical_send_started: false,
+      updated_at_ms: observedAtMs,
+    },
+  };
+}
 
 export class ResumeDeliveryError extends Error {
   constructor(code, options) {
@@ -78,6 +202,20 @@ export function parseControlDecision(body) {
   if (!Number.isInteger(sourceGeneration) || sourceGeneration <= 0) {
     return { ok: false, reason: "MISSING_SOURCE_CONTROL_GENERATION" };
   }
+  let timedWake = null;
+  const wakeAtRaw = values["TIMED_QUOTA.wake_at"] ?? values["top.wake_at"];
+  if (wakeAtRaw) {
+    const normalized = normalizeWakeAt(wakeAtRaw);
+    if (!normalized.ok) return { ok: false, reason: normalized.reason };
+    timedWake = normalized;
+  }
+  const provider = values["TIMED_QUOTA.provider"];
+  const model = values["TIMED_QUOTA.model"];
+  const billingClass = values["TIMED_QUOTA.billing_class"];
+  const maxCostRaw = values["TIMED_QUOTA.max_cost"];
+  const quotaRoute = provider || model || billingClass || maxCostRaw !== undefined
+    ? { provider: provider ?? "", model: model ?? "", billing_class: billingClass ?? "", max_cost: Number(maxCostRaw) }
+    : null;
   return {
     ok: true,
     decision: {
@@ -96,6 +234,9 @@ export function parseControlDecision(body) {
       },
       wake_action: values["EXACT_TARGET.wake_action"] ?? "",
       minimal_wake: values["EXACT_TARGET.minimal_wake"] ?? "",
+      wake_at: timedWake?.wake_at ?? null,
+      wake_at_ms: timedWake?.wake_at_ms ?? null,
+      quota_route: quotaRoute,
     },
   };
 }
@@ -408,6 +549,10 @@ export async function deliverResumeOnce({
   protocol = HERDR_RESUME_DELIVERY_PROTOCOL,
   now = () => new Date().toISOString(),
   deliveryState = null,
+  timedQuotaState = null,
+  quotaRoutePolicy = null,
+  consumerHostId = null,
+  authorizedHostIds = [],
   persistDeliveryState = null,
   beforeSend = null,
 }) {
@@ -418,6 +563,19 @@ export async function deliverResumeOnce({
   const matched = matchWaitToDecision(tuple, parsed);
   if (!matched.ok) return { decision: "REJECTED", reason: matched.reason, detail: matched };
   const logicalKey = buildLogicalEventKey(tuple, parsed);
+  const timedStateBase = timedQuotaState ?? (parsed.decision.wake_at
+    ? { state: "WAITING_FOR_WAKE", wake_at: parsed.decision.wake_at, wake_at_ms: parsed.decision.wake_at_ms, retry_count: 0, quota_route: parsed.decision.quota_route }
+    : null);
+  const activeTimedQuotaState = timedStateBase && consumerHostId && !timedStateBase.consumer_host_id
+    ? { ...timedStateBase, consumer_host_id: consumerHostId }
+    : timedStateBase;
+  const activeQuotaRoutePolicy = quotaRoutePolicy ?? parsed.decision.quota_route;
+  if (activeTimedQuotaState) {
+    const rawNow = now();
+    const nowMs = typeof rawNow === "number" ? rawNow : Date.parse(rawNow);
+    const timed = evaluateTimedQuotaState(activeTimedQuotaState, { nowMs, hostId: consumerHostId, authorizedHostIds });
+    if (timed.decision !== "SEND_ALLOWED") return { ...timed, logical_key: logicalKey };
+  }
   const localState = stateForLogicalKey(deliveryState, logicalKey);
   if (localState?.state === DELIVERED) return { decision: "NO_OP_DUPLICATE", logical_key: logicalKey, existing_state: DELIVERED };
   if (localState?.state === SEND_PENDING || localState?.state === UNCERTAIN_SEND) {
@@ -457,6 +615,23 @@ export async function deliverResumeOnce({
   try {
     evidence = await herdr.prompt(tuple.target, matched.pointer);
   } catch (error) {
+    const quotaFailure = error?.code === "PROVIDER_QUOTA" || error?.quota === true;
+    if (activeTimedQuotaState && quotaFailure && error?.prompt_submitted === false) {
+      const rawNow = now();
+      const observedAtMs = typeof rawNow === "number" ? rawNow : Date.parse(rawNow);
+      const quotaEvidence = parseAuthoritativeQuotaEvidence(error.quota_evidence, { observedAtMs });
+      const scheduled = scheduleQuotaRetry(activeTimedQuotaState, quotaEvidence, { observedAtMs, routePolicy: activeQuotaRoutePolicy });
+      if (!scheduled.ok) {
+        const controlState = { ...activeTimedQuotaState, logical_event_key: logicalKey, state: CONTROL_REQUIRED, reason: scheduled.reason };
+        try { if (persistDeliveryState) await persistDeliveryState(controlState); } catch { /* keep the no-prompt boundary */ }
+        return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: scheduled.reason };
+      }
+      const retryState = { ...scheduled.state, logical_event_key: logicalKey };
+      try { if (persistDeliveryState) await persistDeliveryState(retryState); } catch (persistError) {
+        return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: "PERSISTED_IDEMPOTENCY_WRITE_FAILED", error: String(persistError?.message ?? persistError) };
+      }
+      return { decision: "RETRY_SCHEDULED", logical_key: logicalKey, state: retryState };
+    }
     const uncertain = {
       schema: protocol,
       protocol,
@@ -528,6 +703,29 @@ function authorityFingerprint(value) {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
+export function validatePreSendAuthorityBinding(initial, latest) {
+  if (!initial || !latest) return { ok: false, reason: "AUTHORITY_BINDING_MISSING" };
+  const initialHead = initial.HEAD ?? initial.head;
+  const latestHead = latest.HEAD ?? latest.head;
+  const initialTarget = initial.target ?? {};
+  const latestTarget = latest.target ?? {};
+  if (!initial.card_id || !latest.card_id || !Number.isInteger(initial.control_generation) || initial.control_generation <= 0 || !Number.isInteger(latest.control_generation) || latest.control_generation <= 0 || !Number.isInteger(initial.source_control_generation) || initial.source_control_generation <= 0 || !Number.isInteger(latest.source_control_generation) || latest.source_control_generation <= 0 || !initialHead || !latestHead || !initialTarget.agent_name || !latestTarget.agent_name || !initialTarget.executor_instance_id || !latestTarget.executor_instance_id || !initialTarget.surface || !latestTarget.surface) {
+    return { ok: false, reason: "AUTHORITY_BINDING_MISSING" };
+  }
+  if (initial.card_id !== latest.card_id) return { ok: false, reason: "AUTHORITY_CARD_CHANGED" };
+  if (initial.control_generation !== latest.control_generation || initial.source_control_generation !== latest.source_control_generation) {
+    return { ok: false, reason: "AUTHORITY_GENERATION_CHANGED" };
+  }
+  if (initialHead !== latestHead) return { ok: false, reason: "AUTHORITY_HEAD_CHANGED" };
+  if ((initial.branch ?? null) !== (latest.branch ?? null) || (initial.ref ?? null) !== (latest.ref ?? null)) {
+    return { ok: false, reason: "AUTHORITY_REF_CHANGED" };
+  }
+  for (const key of ["agent_name", "executor_instance_id", "surface", "pane_id", "agent_session", "workspace_id", "cwd", "branch", "HEAD"]) {
+    if ((initialTarget[key] ?? null) !== (latestTarget[key] ?? null)) return { ok: false, reason: "AUTHORITY_TARGET_CHANGED", field: key };
+  }
+  return { ok: true };
+}
+
 export function createResidentHerdrConsumer(config = {}) {
   return {
     async consumeOnce() {
@@ -547,6 +745,7 @@ export function createResidentHerdrConsumer(config = {}) {
       const comments = authority.comments ?? (config.readComments ? await config.readComments({ waitTuple }) : config.comments ?? []);
       const startingFingerprint = authorityFingerprint(authority.fingerprint ?? authority.binding ?? null);
       const deliveryState = config.readState ? await config.readState() : config.deliveryState ?? null;
+      const timedQuotaState = config.timedQuotaState ?? (deliveryState?.wake_at ? deliveryState : null);
 
       const result = await deliverResumeOnce({
         waitTuple,
@@ -557,12 +756,24 @@ export function createResidentHerdrConsumer(config = {}) {
         protocol: config.protocol,
         now: config.now,
         deliveryState,
+        timedQuotaState,
         persistDeliveryState: config.writeState,
+        quotaRoutePolicy: config.quotaRoutePolicy,
+        consumerHostId: config.consumerHostId,
+        authorizedHostIds: config.authorizedHostIds,
         beforeSend: async (details) => {
+          if (config.requireExactAuthorityBinding && !config.readAuthority) return { allow: false, reason: "AUTHORITY_REVALIDATION_MISSING" };
           if (config.readAuthority) {
             const latestRaw = await config.readAuthority({ phase: "before_send", logicalKey: details.logicalKey });
             if (latestRaw?.ok === false) return { allow: false, reason: latestRaw.reason ?? "AUTHORITY_REVALIDATION_FAILED" };
             const latest = latestRaw?.value ?? latestRaw ?? {};
+            const initialBinding = authority.binding;
+            const latestBinding = latest.binding;
+            if (config.requireExactAuthorityBinding && (!initialBinding || !latestBinding)) return { allow: false, reason: "AUTHORITY_BINDING_MISSING" };
+            if (initialBinding && latestBinding) {
+              const bindingCheck = validatePreSendAuthorityBinding(initialBinding, latestBinding);
+              if (!bindingCheck.ok) return { allow: false, reason: bindingCheck.reason };
+            }
             const latestFingerprint = authorityFingerprint(latest.fingerprint ?? latest.binding ?? null);
             if (startingFingerprint !== null && latestFingerprint !== startingFingerprint) {
               return { allow: false, reason: "AUTHORITY_CHANGED" };
@@ -587,17 +798,31 @@ export async function runResidentConsumerOnce(config) {
 
 function parseGhComments(stdout) {
   const raw = String(stdout ?? "").trim();
-  if (!raw) return [];
+  if (!raw) throw new ResumeDeliveryError("GITHUB_COMMENTS_READBACK_AMBIGUOUS");
   try {
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed.flatMap((page) => Array.isArray(page) ? page : [page]);
-    return [parsed];
-  } catch {
+    if (!Array.isArray(parsed)) throw new ResumeDeliveryError("GITHUB_COMMENTS_READBACK_AMBIGUOUS");
+    const comments = parsed.every((page) => Array.isArray(page))
+      ? parsed.flat()
+      : parsed.every((comment) => comment && typeof comment === "object")
+        ? parsed
+        : (() => { throw new ResumeDeliveryError("GITHUB_COMMENTS_READBACK_AMBIGUOUS"); })();
+    if (comments.length === 0 || comments.some((comment) => !comment || typeof comment !== "object" || comment.message)) {
+      throw new ResumeDeliveryError("GITHUB_COMMENTS_READBACK_AMBIGUOUS");
+    }
+    return comments;
+  } catch (error) {
+    if (error instanceof ResumeDeliveryError) throw error;
     const comments = [];
     for (const line of String(stdout).split(/\r?\n/)) {
       if (!line.trim()) continue;
-      try { comments.push(JSON.parse(line)); } catch { throw new ResumeDeliveryError("GITHUB_COMMENTS_INVALID_JSON"); }
+      try {
+        const parsedLine = JSON.parse(line);
+        if (!parsedLine || typeof parsedLine !== "object" || parsedLine.message) throw new Error("ambiguous");
+        comments.push(parsedLine);
+      } catch { throw new ResumeDeliveryError("GITHUB_COMMENTS_INVALID_JSON"); }
     }
+    if (comments.length === 0) throw new ResumeDeliveryError("GITHUB_COMMENTS_READBACK_AMBIGUOUS");
     return comments;
   }
 }
@@ -606,7 +831,9 @@ export function createGhReader({ gh = DEFAULT_GH, exec = defaultExec } = {}) {
   return {
     readDecisionBody: async ({ repo, receiptId }) => {
       const { stdout } = await exec(gh, ["api", `repos/${repo}/issues/comments/${receiptId}`, "--jq", ".body"]);
-      return stdout.trim();
+      const body = stdout.trim();
+      if (!body) throw new ResumeDeliveryError("GITHUB_DECISION_READBACK_AMBIGUOUS");
+      return body;
     },
     readComments: async ({ repo, issue }) => {
       const { stdout } = await exec(gh, ["api", `repos/${repo}/issues/${issue}/comments`, "--paginate", "--slurp"]);
