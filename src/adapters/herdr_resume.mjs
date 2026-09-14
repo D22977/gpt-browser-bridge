@@ -73,9 +73,8 @@ export function parseControlDecision(body) {
     return { ok: false, reason: "MISSING_CONTROL_GENERATION" };
   }
   const sourceRef = parseReceiptRef(values["SOURCE_BINDING.source_terminal_receipt"]);
-  const sourceGeneration = Number(
-    values["SOURCE_BINDING.source_control_generation"] ?? values["top.control_generation"],
-  );
+  const sourceGenerationValue = values["SOURCE_BINDING.source_control_generation"];
+  const sourceGeneration = Number(sourceGenerationValue);
   if (!Number.isInteger(sourceGeneration) || sourceGeneration <= 0) {
     return { ok: false, reason: "MISSING_SOURCE_CONTROL_GENERATION" };
   }
@@ -126,6 +125,7 @@ export const waitTupleSchema = z.object({
   control_generation: z.number().int().positive(),
   card_id: z.string().min(1),
   allowed_action_class: z.string().min(1),
+  executor_role: z.string().min(1),
   target: targetSchema,
 });
 
@@ -150,8 +150,14 @@ export function matchWaitToDecision(waitTuple, decision) {
   if (d.source_control_generation !== waitTuple.control_generation) {
     return { ok: false, reason: "WRONG_SOURCE_GENERATION", got: d.source_control_generation, expected: waitTuple.control_generation };
   }
-  if (!d.resume_card_id.toLowerCase().includes(waitTuple.card_id.toLowerCase())) {
+  if (d.resume_card_id.trim().toLowerCase() !== waitTuple.card_id.trim().toLowerCase()) {
     return { ok: false, reason: "WRONG_CARD", got: d.resume_card_id, expected: waitTuple.card_id };
+  }
+  if (d.target.role !== waitTuple.executor_role) {
+    return { ok: false, reason: "WRONG_EXECUTOR_ROLE", got: d.target.role, expected: waitTuple.executor_role };
+  }
+  if (d.decision_topic !== waitTuple.allowed_action_class) {
+    return { ok: false, reason: "WRONG_DECISION_TOPIC", got: d.decision_topic, expected: waitTuple.allowed_action_class };
   }
   if (d.target.agent_name !== waitTuple.target.agent_name) {
     return { ok: false, reason: "WRONG_TARGET_AGENT", got: d.target.agent_name, expected: waitTuple.target.agent_name };

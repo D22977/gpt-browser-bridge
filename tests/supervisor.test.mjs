@@ -154,6 +154,7 @@ test("resident GitHub consumer is polled by Supervisor and persists idempotency 
     control_generation: 13,
     card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01",
     allowed_action_class: "ISSUE162_RESIDENT_CONSUMER",
+    executor_role: "WORKER",
     target: {
       agent_name: "R49-EXECUTOR",
       executor_instance_id: "r49-executor-instance",
@@ -167,6 +168,7 @@ test("resident GitHub consumer is polled by Supervisor and persists idempotency 
 
 state: EXECUTE_NOW
 control_generation: 13
+decision_topic: ISSUE162_RESIDENT_CONSUMER
 
 SOURCE_BINDING
 source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt 1629000001

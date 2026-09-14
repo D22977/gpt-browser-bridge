@@ -34,6 +34,7 @@ function waitTuple(overrides = {}) {
     control_generation: GENERATION,
     card_id: CARD_ID,
     allowed_action_class: "ISSUE162_RESIDENT_CONSUMER",
+    executor_role: "WORKER",
     target: {
       agent_name: "R49-EXECUTOR",
       executor_instance_id: INSTANCE,
@@ -57,19 +58,21 @@ function waitTuple(overrides = {}) {
 }
 
 function decisionBody(overrides = {}) {
+  const sourceGeneration = overrides.omitSourceGeneration
+    ? ""
+    : `source_control_generation: ${overrides.sourceGeneration ?? GENERATION}\n`;
   return `${CONTROL_DECISION_PROTOCOL}
 
 state: EXECUTE_NOW
 control_generation: ${overrides.generation ?? GENERATION}
-decision_topic: ISSUE162_RESIDENT_CONSUMER
+decision_topic: ${overrides.decisionTopic ?? "ISSUE162_RESIDENT_CONSUMER"}
 
 SOURCE_BINDING
 source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt ${overrides.sourceReceipt ?? SOURCE_RECEIPT}
-source_control_generation: ${overrides.sourceGeneration ?? GENERATION}
-resume_card_id: ${overrides.cardId ?? CARD_ID}
+${sourceGeneration}resume_card_id: ${overrides.cardId ?? CARD_ID}
 
 EXACT_TARGET
-executor_role: WORKER
+executor_role: ${overrides.executorRole ?? "WORKER"}
 agent_name: ${overrides.agentName ?? "R49-EXECUTOR"}
 executor_instance_id: ${overrides.instanceId ?? INSTANCE}
 surface: ${overrides.surface ?? "HERDR"}
@@ -116,6 +119,76 @@ test("exact source, generation, card, and target bindings are required", () => {
   assert.equal(matchWaitToDecision(tuple, parseControlDecision(decisionBody({ generation: 12 }))).reason, "WRONG_GENERATION");
   assert.equal(matchWaitToDecision(tuple, parseControlDecision(decisionBody({ cardId: "OTHER-CARD" }))).reason, "WRONG_CARD");
   assert.equal(matchWaitToDecision(tuple, parseControlDecision("NOT_CONTROL_DECISION")).ok, false);
+});
+
+test("card binding rejects prefix, suffix, and superstring variants before send", async () => {
+  const variants = [
+    `prefix-${CARD_ID}`,
+    `${CARD_ID}-suffix`,
+    `prefix-${CARD_ID}-suffix`,
+  ];
+  for (const cardId of variants) {
+    let prompts = 0;
+    let persisted = false;
+    const result = await deliverResumeOnce({
+      waitTuple: waitTuple(),
+      decisionBody: decisionBody({ cardId }),
+      comments: [],
+      herdr: { prompt: async () => { prompts += 1; } },
+      persistDeliveryState: async () => { persisted = true; },
+      publishReceipt: async () => ({ id: "never" }),
+    });
+    assert.equal(result.reason, "WRONG_CARD");
+    assert.equal(prompts, 0);
+    assert.equal(persisted, false);
+  }
+});
+
+test("source control generation is explicit, positive, and exactly matched before send", async () => {
+  for (const sourceGeneration of ["not-an-integer", "13.5", "0", "-1"]) {
+    const parsed = parseControlDecision(decisionBody({ sourceGeneration }));
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.reason, "MISSING_SOURCE_CONTROL_GENERATION");
+  }
+  const omitted = parseControlDecision(decisionBody({ omitSourceGeneration: true }));
+  assert.deepEqual(omitted, { ok: false, reason: "MISSING_SOURCE_CONTROL_GENERATION" });
+
+  let prompts = 0;
+  let persisted = false;
+  const result = await deliverResumeOnce({
+    waitTuple: waitTuple(),
+    decisionBody: decisionBody({ sourceGeneration: GENERATION - 1 }),
+    comments: [],
+    herdr: { prompt: async () => { prompts += 1; } },
+    persistDeliveryState: async () => { persisted = true; },
+    publishReceipt: async () => ({ id: "never" }),
+  });
+  assert.equal(result.reason, "WRONG_SOURCE_GENERATION");
+  assert.equal(prompts, 0);
+  assert.equal(persisted, false);
+});
+
+test("executor role and decision topic bind exactly to the wait tuple before send", async () => {
+  assert.equal(matchWaitToDecision(waitTuple(), parseControlDecision(decisionBody())).ok, true);
+  for (const [overrides, tupleOverride, expectedReason] of [
+    [{ executorRole: "REVIEWER" }, {}, "WRONG_EXECUTOR_ROLE"],
+    [{ decisionTopic: "ISSUE162_RESIDENT_CONSUMER_EXTRA" }, {}, "WRONG_DECISION_TOPIC"],
+    [{}, { allowed_action_class: "OTHER_ACTION" }, "WRONG_DECISION_TOPIC"],
+  ]) {
+    let prompts = 0;
+    let persisted = false;
+    const result = await deliverResumeOnce({
+      waitTuple: waitTuple(tupleOverride),
+      decisionBody: decisionBody(overrides),
+      comments: [],
+      herdr: { prompt: async () => { prompts += 1; } },
+      persistDeliveryState: async () => { persisted = true; },
+      publishReceipt: async () => ({ id: "never" }),
+    });
+    assert.equal(result.reason, expectedReason);
+    assert.equal(prompts, 0);
+    assert.equal(persisted, false);
+  }
 });
 
 test("one visible exact Herdr target is selected with cwd, branch, HEAD, and model bindings", () => {
