@@ -187,8 +187,6 @@ function Get-GbbBindingDecision {
 }
 
 $observedFacts = Get-GbbExecutionFacts $BoundRuntimeRoot
-$repo = $observedFacts.ActualRepoRoot
-$observedEntrypoint = Join-Path $repo "src\supervisor.mjs"
 $binding = Get-GbbBindingDecision -TrustedRepoRoot $TrustedRepoRoot -ExpectedRepoRoot $ExpectedRepoRoot -ExpectedRef $ExpectedRef -BoundRef $BoundRef -ExpectedHead $ExpectedHead -BoundHead $BoundHead -ExpectedEntrypoint $ExpectedEntrypoint -BoundEntrypoint $BoundEntrypoint -ExpectedRuntimeRoot $ExpectedRuntimeRoot -BoundRuntimeRoot $BoundRuntimeRoot -ExpectedRuntimeIdentity $ExpectedRuntimeIdentity -BoundRuntimeIdentity $BoundRuntimeIdentity -ObservedFacts $observedFacts
 
 if (-not $binding.StartAllowed) {
