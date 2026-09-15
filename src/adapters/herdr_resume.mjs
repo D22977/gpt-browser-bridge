@@ -13,6 +13,7 @@ import { z } from "zod";
 
 export const HERDR_RESUME_DELIVERY_PROTOCOL = "HERDR_RESUME_DELIVERY_V1";
 export const CONTROL_DECISION_PROTOCOL = "CONTROL_DECISION_V1";
+export const CURRENT_COMMENT_READBACK_PROTOCOL = "GITHUB_ISSUE_COMMENTS_PAGINATED_READBACK_V1";
 export const DEFAULT_GH = "gh";
 export const DEFAULT_HERDR_EXE = "herdr";
 
@@ -91,6 +92,22 @@ export function validateFreeRoute(route, policy) {
   if (route.billing_class !== "FREE") return { ok: false, reason: "NON_FREE_ROUTE" };
   if (route.max_cost !== 0) return { ok: false, reason: "NONZERO_COST_ROUTE" };
   return { ok: true, route };
+}
+
+export function validateFreeRouteAgainstPhysicalTarget(policy, target) {
+  const policyCheck = validateFreeRoutePolicy(policy);
+  if (!policyCheck.ok) return policyCheck;
+  if (!target || typeof target !== "object" || Array.isArray(target)) {
+    return { ok: false, reason: "MISSING_PHYSICAL_TARGET_BINDING" };
+  }
+  const provider = target.herdr_agent_provider ?? target.agent_provider;
+  const model = target.herdr_model ?? target.model;
+  if (typeof provider !== "string" || !provider || typeof model !== "string" || !model) {
+    return { ok: false, reason: "MISSING_PHYSICAL_TARGET_BINDING" };
+  }
+  if (provider !== policy.provider) return { ok: false, reason: "WRONG_PROVIDER" };
+  if (model !== policy.model) return { ok: false, reason: "WRONG_MODEL" };
+  return { ok: true, target };
 }
 
 export function parseAuthoritativeQuotaEvidence(evidence, { routePolicy = null, observedAtMs = Date.now() } = {}) {
@@ -498,12 +515,16 @@ export function createHerdrPrompter({ herdrExe = DEFAULT_HERDR_EXE, exec = defau
   };
   return {
     listAgents,
-    prompt: async (target, text) => {
+    prompt: async (target, text, { quotaRoutePolicy = null } = {}) => {
       const first = resolveExactHerdrTarget(target, await listAgents());
       if (!first.ok) throw new ResumeDeliveryError(first.reason);
       const second = resolveExactHerdrTarget(target, await listAgents());
       if (!second.ok) throw new ResumeDeliveryError("STALE_PHYSICAL_TARGET", { cause: second.reason });
       if (!samePhysicalTarget(first.target, second.target)) throw new ResumeDeliveryError("STALE_PHYSICAL_TARGET");
+      if (quotaRoutePolicy) {
+        const routeCheck = validateFreeRouteAgainstPhysicalTarget(quotaRoutePolicy, second.target);
+        if (!routeCheck.ok) throw new ResumeDeliveryError(routeCheck.reason);
+      }
       try {
         await exec(herdrExe, ["agent", "prompt", second.target.pane_id, text]);
       } catch (error) {
@@ -560,9 +581,25 @@ function normalizeGateResult(result) {
   return { allow: true };
 }
 
-function normalizeCurrentComments(value) {
-  const comments = Array.isArray(value) ? value : value?.comments;
-  if (!Array.isArray(comments)) throw new ResumeDeliveryError("GITHUB_COMMENTS_READBACK_AMBIGUOUS");
+export function normalizeCurrentComments(value) {
+  const comments = value && !Array.isArray(value) ? value.comments : null;
+  const provenance = value && !Array.isArray(value) ? value.readback_provenance : null;
+  const complete = value && !Array.isArray(value) && value.pagination_complete === true;
+  const provenanceValid = Boolean(
+    provenance
+    && typeof provenance === "object"
+    && !Array.isArray(provenance)
+    && provenance.protocol === CURRENT_COMMENT_READBACK_PROTOCOL
+    && provenance.source === "github"
+    && provenance.method === "GET"
+    && provenance.pagination === "complete"
+    && provenance.readback === "exact_get"
+    && typeof provenance.endpoint === "string"
+    && provenance.endpoint.length > 0,
+  );
+  if (!Array.isArray(comments) || !complete || !provenanceValid) {
+    throw new ResumeDeliveryError("GITHUB_COMMENTS_READBACK_AMBIGUOUS");
+  }
   return comments;
 }
 
@@ -612,11 +649,15 @@ export async function deliverResumeOnce({
       const decisionRouteCheck = validateFreeRoute(parsed.decision.quota_route, activeQuotaRoutePolicy);
       if (!decisionRouteCheck.ok) return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: decisionRouteCheck.reason };
     }
+    const targetRouteCheck = validateFreeRouteAgainstPhysicalTarget(activeQuotaRoutePolicy, tuple.target);
+    if (!targetRouteCheck.ok) return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: targetRouteCheck.reason };
   } else if (parsed.decision.quota_route) {
     const policyCheck = validateFreeRoutePolicy(activeQuotaRoutePolicy);
     if (!policyCheck.ok) return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: policyCheck.reason };
     const decisionRouteCheck = validateFreeRoute(parsed.decision.quota_route, activeQuotaRoutePolicy);
     if (!decisionRouteCheck.ok) return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: decisionRouteCheck.reason };
+    const targetRouteCheck = validateFreeRouteAgainstPhysicalTarget(activeQuotaRoutePolicy, tuple.target);
+    if (!targetRouteCheck.ok) return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: targetRouteCheck.reason };
   }
   const existing = findExistingDelivery(comments, logicalKey, protocol);
   if (existing) return { decision: "NO_OP_DUPLICATE", logical_key: logicalKey, existing_receipt_id: existing.receipt_id, existing_state: existing.state };
@@ -650,7 +691,9 @@ export async function deliverResumeOnce({
 
   let evidence;
   try {
-    evidence = await herdr.prompt(tuple.target, matched.pointer);
+    evidence = await herdr.prompt(tuple.target, matched.pointer, {
+      quotaRoutePolicy: activeTimedQuotaState || parsed.decision.quota_route ? activeQuotaRoutePolicy : null,
+    });
   } catch (error) {
     const quotaFailure = error?.code === "PROVIDER_QUOTA" || error?.quota === true;
     if (activeTimedQuotaState && quotaFailure && error?.prompt_submitted === false) {
@@ -894,8 +937,20 @@ export function createGhReader({ gh = DEFAULT_GH, exec = defaultExec } = {}) {
       return body;
     },
     readComments: async ({ repo, issue }) => {
-      const { stdout } = await exec(gh, ["api", `repos/${repo}/issues/${issue}/comments`, "--paginate", "--slurp"]);
-      return parseGhComments(stdout).map(({ id, created_at, body }) => ({ id, created_at, body }));
+      const endpoint = `repos/${repo}/issues/${issue}/comments`;
+      const { stdout } = await exec(gh, ["api", endpoint, "--paginate", "--slurp"]);
+      return {
+        comments: parseGhComments(stdout).map(({ id, created_at, body }) => ({ id, created_at, body })),
+        pagination_complete: true,
+        readback_provenance: {
+          protocol: CURRENT_COMMENT_READBACK_PROTOCOL,
+          source: "github",
+          method: "GET",
+          endpoint,
+          pagination: "complete",
+          readback: "exact_get",
+        },
+      };
     },
     publishComment: async ({ repo, issue, body }) => {
       const directory = await mkdtemp(path.join(os.tmpdir(), "gbb-herdr-resume-"));

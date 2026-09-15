@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   CONTROL_DECISION_PROTOCOL,
+  CURRENT_COMMENT_READBACK_PROTOCOL,
   HERDR_RESUME_DELIVERY_PROTOCOL,
   buildLogicalEventKey,
   classifyFutureConsumerBinding,
@@ -35,7 +36,8 @@ const GENERATION = 13;
 const CARD_ID = "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01";
 const SESSION = "fresh-session-r49";
 const INSTANCE = "r49-executor-instance";
-const FREE_ROUTE_POLICY = { provider: "deepseek", model: "deepseek-v4-flash-free", billing_class: "FREE", max_cost: 0 };
+const FREE_ROUTE_POLICY = { provider: "herdr:codex", model: "gpt-5.6-luna", billing_class: "FREE", max_cost: 0 };
+const DEEPSEEK_FREE_ROUTE_POLICY = { provider: "deepseek", model: "deepseek-v4-flash-free", billing_class: "FREE", max_cost: 0 };
 
 function waitTuple(overrides = {}) {
   return {
@@ -120,6 +122,21 @@ target_herdr_agent_session: ${SESSION}
 `;
 }
 
+function completeComments(comments = []) {
+  return {
+    comments,
+    pagination_complete: true,
+    readback_provenance: {
+      protocol: CURRENT_COMMENT_READBACK_PROTOCOL,
+      source: "github",
+      method: "GET",
+      endpoint: "repos/D22977/gpt-browser-bridge/issues/162/comments",
+      pagination: "complete",
+      readback: "exact_get",
+    },
+  };
+}
+
 function authorityBinding(overrides = {}) {
   return {
     card_id: CARD_ID,
@@ -187,8 +204,8 @@ test("only the exact provider, model, and zero-cost route is admissible", () => 
 test("quota delay accepts only structured authoritative Retry-After or reset evidence", () => {
   const common = {
     authoritative: true,
-    provider: "deepseek",
-    model: "deepseek-v4-flash-free",
+    provider: FREE_ROUTE_POLICY.provider,
+    model: FREE_ROUTE_POLICY.model,
     billing_class: "FREE",
     max_cost: 0,
     provenance: { source: "provider_http", response_id: "429-1" },
@@ -207,8 +224,8 @@ test("quota delay accepts only structured authoritative Retry-After or reset evi
 test("quota retry budget is persisted at one and survives restart state", () => {
   const evidence = parseAuthoritativeQuotaEvidence({
     authoritative: true,
-    provider: "deepseek",
-    model: "deepseek-v4-flash-free",
+    provider: FREE_ROUTE_POLICY.provider,
+    model: FREE_ROUTE_POLICY.model,
     billing_class: "FREE",
     max_cost: 0,
     retry_after_seconds: 5,
@@ -259,8 +276,8 @@ test("structured pre-send quota failure schedules one retry without blind resend
   const logicalKey = buildLogicalEventKey(tuple, parseControlDecision(body));
   const evidence = {
     authoritative: true,
-    provider: "deepseek",
-    model: "deepseek-v4-flash-free",
+    provider: FREE_ROUTE_POLICY.provider,
+    model: FREE_ROUTE_POLICY.model,
     billing_class: "FREE",
     max_cost: 0,
     retry_after_seconds: 30,
@@ -297,6 +314,21 @@ test("GitHub auth, rate, pagination, or readback ambiguity is a no-prompt condit
   await assert.rejects(invalid.readComments({ repo: "D22977/gpt-browser-bridge", issue: 162 }), /GITHUB_COMMENTS_READBACK_AMBIGUOUS/);
 });
 
+test("GitHub comment reader returns pagination-complete exact-readback provenance", async () => {
+  const reader = createGhReader({ exec: async () => ({ stdout: "[[{\"id\":1,\"created_at\":\"now\",\"body\":\"receipt\"}]]" }) });
+  const result = await reader.readComments({ repo: "D22977/gpt-browser-bridge", issue: 162 });
+  assert.deepEqual(result.comments, [{ id: 1, created_at: "now", body: "receipt" }]);
+  assert.equal(result.pagination_complete, true);
+  assert.deepEqual(result.readback_provenance, {
+    protocol: CURRENT_COMMENT_READBACK_PROTOCOL,
+    source: "github",
+    method: "GET",
+    endpoint: "repos/D22977/gpt-browser-bridge/issues/162/comments",
+    pagination: "complete",
+    readback: "exact_get",
+  });
+});
+
 test("pre-send authority revalidation binds card, generation, head, and exact target", () => {
   const binding = authorityBinding();
   assert.deepEqual(validatePreSendAuthorityBinding(binding, { ...binding }), { ok: true });
@@ -315,7 +347,7 @@ test("resident delivery revalidates exact authority before prompting", async () 
     waitTuple: waitTuple(),
     readAuthority: async () => ({ value: { binding: reads++ === 0 ? binding : { ...binding, HEAD: "drifted" } } }),
     readDecisionBody: async () => decisionBody(),
-    readComments: async () => [],
+    readComments: async () => completeComments(),
     herdr: { prompt: async () => { prompts += 1; return {}; } },
     publishReceipt: async () => ({ id: "never" }),
     requireExactAuthorityBinding: true,
@@ -386,6 +418,63 @@ max_cost: 0
   assert.equal(prompts, 0);
 });
 
+test("timed delivery rejects a free route policy that mismatches the exact physical Herdr target", async () => {
+  let prompts = 0;
+  const result = await deliverResumeOnce({
+    waitTuple: waitTuple(),
+    decisionBody: decisionBody(),
+    comments: [],
+    timedQuotaState: { state: "WAITING_FOR_WAKE", wake_at: "1970-01-01T00:00:00.000Z", retry_count: 0 },
+    quotaRoutePolicy: DEEPSEEK_FREE_ROUTE_POLICY,
+    now: () => 1_000,
+    herdr: { prompt: async () => { prompts += 1; } },
+    publishReceipt: async () => ({ id: "never" }),
+  });
+  assert.equal(result.decision, "CONTROL_REQUIRED");
+  assert.equal(result.reason, "WRONG_PROVIDER");
+  assert.equal(prompts, 0);
+});
+
+test("resolved Herdr route identity is checked before the prompt command", async () => {
+  const calls = [];
+  const prompter = createHerdrPrompter({
+    exec: async (_exe, args) => {
+      calls.push(args);
+      if (args[0] === "agent" && args[1] === "list") return { stdout: agentList([agent()]) };
+      throw new Error(`unexpected prompt command: ${args.join(" ")}`);
+    },
+  });
+  await assert.rejects(
+    prompter.prompt(waitTuple().target, "wake", { quotaRoutePolicy: DEEPSEEK_FREE_ROUTE_POLICY }),
+    /WRONG_PROVIDER/,
+  );
+  assert.equal(calls.filter((args) => args[1] === "prompt").length, 0);
+});
+
+test("resident delivery rejects a syntactically valid but incomplete current-comment page", async () => {
+  let prompts = 0;
+  const incomplete = {
+    comments: [],
+    pagination_complete: false,
+    readback_provenance: { source: "github", pagination: "partial", readback: "exact_get" },
+  };
+  const result = await createResidentHerdrConsumer({
+    futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: [CONTROL_DECISION_PROTOCOL] },
+    waitTuple: waitTuple(),
+    decisionBody: decisionBody(),
+    readAuthority: async () => ({ binding: authorityBinding() }),
+    readComments: async () => incomplete,
+    timedQuotaState: { state: "WAITING_FOR_WAKE", wake_at: "1970-01-01T00:00:00.000Z", retry_count: 0 },
+    quotaRoutePolicy: { provider: "herdr:codex", model: "gpt-5.6-luna", billing_class: "FREE", max_cost: 0 },
+    now: () => 1_000,
+    herdr: { prompt: async () => { prompts += 1; } },
+    publishReceipt: async () => ({ id: "never" }),
+  }).consumeOnce();
+  assert.equal(result.decision, "CONTROL_REQUIRED");
+  assert.match(result.reason, /COMMENTS/);
+  assert.equal(prompts, 0);
+});
+
 test("quota evidence cannot self-validate its provider and model", () => {
   const evidence = parseAuthoritativeQuotaEvidence({
     authoritative: true,
@@ -411,7 +500,7 @@ test("resident physical delivery requires fresh authority and current comments r
       timedQuotaState: { state: "WAITING_FOR_WAKE", wake_at: "1970-01-01T00:00:00.000Z", retry_count: 0 },
       quotaRoutePolicy: FREE_ROUTE_POLICY,
       readAuthority: missing === "authority" ? undefined : async () => ({ binding: authorityBinding() }),
-      readComments: missing === "comments" ? undefined : async () => [],
+      readComments: missing === "comments" ? undefined : async () => completeComments(),
       herdr: { prompt: async () => { prompts += 1; } },
       publishReceipt: async () => ({ id: "never" }),
       now: () => "2026-09-14T00:00:00.000Z",
@@ -431,7 +520,7 @@ test("resident physical delivery requires exact tree on both authority reads", a
       waitTuple: waitTuple(),
       decisionBody: decisionBody(),
       readAuthority: async ({ phase }) => ({ binding: phase === "start" ? authorityBinding() : latest }),
-      readComments: async () => [],
+      readComments: async () => completeComments(),
       quotaRoutePolicy: FREE_ROUTE_POLICY,
       herdr: { prompt: async () => { prompts += 1; } },
       publishReceipt: async () => ({ id: "never" }),
@@ -753,7 +842,7 @@ test("resident consumer rereads authority before send and persists delivery stat
     waitTuple: tuple,
     readAuthority: async ({ phase }) => { authorityPhases.push(phase); return { fingerprint: "authority-v1", binding: authorityBinding() }; },
     readDecisionBody: async () => decisionBody(),
-    readComments: async ({ logicalKey }) => { commentsPhases.push(logicalKey ? "before_send" : "initial"); return []; },
+    readComments: async ({ logicalKey }) => { commentsPhases.push(logicalKey ? "before_send" : "initial"); return completeComments(); },
     readState: async () => null,
     writeState: async (state) => { states.push(state.state); },
     herdr: { prompt: async () => ({ accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: SESSION, cwd: CWD, branch: BRANCH, HEAD, visible: true }) },

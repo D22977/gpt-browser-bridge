@@ -35,6 +35,7 @@ import {
   deliverResumeOnce,
   findExistingDelivery,
   matchWaitToDecision,
+  normalizeCurrentComments,
   parseControlDecision,
   validatePreSendAuthorityBinding,
   validateWaitTuple,
@@ -42,6 +43,7 @@ import {
 import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary.mjs";
 
 const execFileAsync = promisify(execFile);
+const FENCING_HANDOFF_PROTOCOL = "GBB_SUPERVISOR_FENCING_HANDOFF_V1";
 
 // ---------------------------------------------------------------------------
 // Constants (§15 retry policy)
@@ -206,7 +208,47 @@ function validLockRecord(record) {
   return Boolean(record && typeof record === "object" && !Array.isArray(record)
     && Number.isInteger(record.pid) && record.pid > 0
     && typeof record.at === "string" && record.at.length > 0
-    && (record.host_id === undefined || (typeof record.host_id === "string" && record.host_id.length > 0)));
+    && (record.host_id === undefined || (typeof record.host_id === "string" && record.host_id.length > 0))
+    && (record.fencing_handoff === undefined || validFencingHandoff(record.fencing_handoff)));
+}
+
+function validFencingHandoff(handoff) {
+  return Boolean(handoff && typeof handoff === "object" && !Array.isArray(handoff)
+    && handoff.protocol === FENCING_HANDOFF_PROTOCOL
+    && typeof handoff.token === "string" && handoff.token.length > 0
+    && handoff.status === "FENCED"
+    && Number.isInteger(handoff.from_pid) && handoff.from_pid > 0
+    && typeof handoff.from_host_id === "string" && handoff.from_host_id.length > 0
+    && typeof handoff.to_host_id === "string" && handoff.to_host_id.length > 0
+    && typeof handoff.issued_at === "string" && Number.isFinite(Date.parse(handoff.issued_at))
+    && typeof handoff.expires_at === "string" && Number.isFinite(Date.parse(handoff.expires_at))
+    && Date.parse(handoff.expires_at) > Date.parse(handoff.issued_at));
+}
+
+function allowsLiveOwnerTakeover(current, hostId, handoffToken, isoNow) {
+  const handoff = current?.fencing_handoff;
+  return Boolean(
+    hostId
+    && typeof handoffToken === "string"
+    && validFencingHandoff(handoff)
+    && handoff.token === handoffToken
+    && handoff.from_pid === current.pid
+    && handoff.from_host_id === current.host_id
+    && handoff.to_host_id === hostId
+    && Date.parse(handoff.expires_at) > Date.parse(isoNow),
+  );
+}
+
+function confirmsFencingForOwner(current, hostId, handoffToken, isoNow) {
+  const handoff = current?.fencing_handoff;
+  return Boolean(
+    hostId
+    && typeof handoffToken === "string"
+    && validFencingHandoff(handoff)
+    && handoff.token === handoffToken
+    && handoff.to_host_id === hostId
+    && Date.parse(handoff.expires_at) > Date.parse(isoNow),
+  );
 }
 
 function lockRecordKey(record) {
@@ -260,7 +302,7 @@ async function releaseTakeoverGuard(guardPath) {
 // over. Absent-lock acquisition uses an OS-level exclusive create. Stale or
 // explicitly authorized takeover is serialized by an exclusive sidecar guard
 // and a second owner reread, so two independent processes cannot both win.
-export async function acquireOrConfirmLock(paths, { pid, hostId = null, authorizedHostIds = [], isAlive, isoNow }) {
+export async function acquireOrConfirmLock(paths, { pid, hostId = null, authorizedHostIds = [], handoffToken = null, isAlive, isoNow }) {
   const guardPath = `${path.resolve(paths.lock)}.takeover`;
   if (!Number.isInteger(pid) || pid <= 0 || typeof isoNow !== "string" || !isoNow) {
     return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
@@ -295,10 +337,14 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
       return { owned: false, holder: current.pid, reason: "HOST_IDENTITY_REJECTED" };
     }
     if (current.pid === pid) {
-      await writeFileAtomic(paths.lock, JSON.stringify(newRecord));
+      await writeFileAtomic(paths.lock, JSON.stringify(current.fencing_handoff ? { ...newRecord, fencing_handoff: current.fencing_handoff } : newRecord));
       return { owned: true, holder: pid };
     }
-    if (!authorizedSecondHost && await isAlive(current.pid)) {
+    const liveOwner = await isAlive(current.pid);
+    if (authorizedSecondHost && liveOwner && !allowsLiveOwnerTakeover(current, hostId, handoffToken, isoNow)) {
+      return { owned: false, holder: current.pid, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" };
+    }
+    if (!authorizedSecondHost && liveOwner) {
       return { owned: false, holder: current.pid };
     }
 
@@ -310,6 +356,12 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
       const reread = await readLockRecord(paths.lock);
       if (reread.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
       if (reread.present && lockRecordKey(reread.record) !== lockRecordKey(current)) continue;
+      if (reread.present && authorizedSecondHost && await isAlive(reread.record.pid) && !allowsLiveOwnerTakeover(reread.record, hostId, handoffToken, isoNow)) {
+        return { owned: false, holder: reread.record.pid, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" };
+      }
+      if (authorizedSecondHost && allowsLiveOwnerTakeover(current, hostId, handoffToken, isoNow)) {
+        newRecord.fencing_handoff = current.fencing_handoff;
+      }
       if (!reread.present) {
         const created = await createExclusiveJson(paths.lock, newRecord);
         if (created.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
@@ -326,6 +378,19 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
     }
   }
   return { owned: false, holder: null, reason: "LOCK_ACQUIRE_RACE_UNRESOLVED" };
+}
+
+export async function confirmLockOwnership(paths, { pid, hostId = null, handoffToken = null, isoNow }) {
+  const state = await readLockRecord(paths.lock);
+  if (state.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
+  if (!state.present) return { owned: false, holder: null, reason: "LOCK_NOT_OWNED" };
+  if (state.record.pid !== pid || (state.record.host_id ?? null) !== (hostId ?? null)) {
+    return { owned: false, holder: state.record.pid, reason: "LOCK_NOT_OWNED" };
+  }
+  if (state.record.fencing_handoff && !confirmsFencingForOwner(state.record, hostId, handoffToken, isoNow)) {
+    return { owned: false, holder: pid, reason: "CONTROL_REQUIRED_FENCING_REVALIDATION_FAILED" };
+  }
+  return { owned: true, holder: pid };
 }
 
 // ---------------------------------------------------------------------------
@@ -761,12 +826,6 @@ function authorityFingerprint(value) {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
-function normalizeCurrentComments(value) {
-  const comments = Array.isArray(value) ? value : value?.comments;
-  if (!Array.isArray(comments)) throw new Error("GITHUB_COMMENTS_READBACK_AMBIGUOUS");
-  return comments;
-}
-
 // The Supervisor is only a resident transport loop. It rereads the durable
 // GitHub decision and delivery comments, delegates exact physical admission to
 // the adapter, and records transport outcomes. It never interprets the
@@ -775,9 +834,11 @@ export async function runResumeDeliveryCheck(ctx, {
   isoNow = new Date().toISOString(),
   deliveryState = null,
   persistDeliveryState = null,
+  revalidateOwnership = null,
 } = {}) {
   const cfg = ctx?.resumeDelivery;
   if (!cfg) return { events: [], delivered: false, duplicate: false };
+  const ownershipRevalidator = revalidateOwnership ?? cfg.revalidateOwnership;
   const events = [];
   const consumer = classifyFutureConsumerBinding(cfg.futureConsumerBinding);
   if (!consumer.bound) {
@@ -872,6 +933,10 @@ export async function runResumeDeliveryCheck(ctx, {
       const latestComments = normalizeCurrentComments(await cfg.readComments({ waitTuple: tupleCheck.waitTuple, decision: parsed.decision, logicalKey: details.logicalKey, phase: "before_send" }));
       const duplicate = findExistingDelivery(latestComments, details.logicalKey, cfg.protocol);
       if (duplicate) return { allow: false, decision: "NO_OP_DUPLICATE", reason: "NO_OP_DUPLICATE" };
+      if (typeof ownershipRevalidator === "function") {
+        const ownership = await ownershipRevalidator({ logicalKey: details.logicalKey, waitTuple: details.waitTuple });
+        if (!ownership?.owned) return { allow: false, decision: "CONTROL_REQUIRED", reason: ownership?.reason ?? "CONTROL_REQUIRED_LOCK_NOT_OWNED" };
+      }
     } catch (error) {
       return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_AUTHORITY_REVALIDATION_FAILED", error: String(error?.message ?? error) };
     }
@@ -972,6 +1037,7 @@ function normalizeCtx(ctxIn) {
     pid: ctxIn.pid ?? process.pid,
     hostId: ctxIn.hostId ?? null,
     authorizedHostIds: ctxIn.authorizedHostIds ?? [],
+    handoffToken: ctxIn.handoffToken ?? null,
     now: ctxIn.now ?? (() => Date.now()),
     isAlive: ctxIn.isAlive ?? defaultIsAlive,
     gitExec: ctxIn.gitExec ?? defaultGitExec,
@@ -992,7 +1058,7 @@ export async function runLoopOnce(ctxIn) {
   const recoveries = [];
 
   // Step 2: confirm/acquire lock ownership.
-  const lock = await acquireOrConfirmLock(paths, { pid: ctx.pid, hostId: ctx.hostId, authorizedHostIds: ctx.authorizedHostIds, isAlive: ctx.isAlive, isoNow });
+  const lock = await acquireOrConfirmLock(paths, { pid: ctx.pid, hostId: ctx.hostId, authorizedHostIds: ctx.authorizedHostIds, handoffToken: ctx.handoffToken, isAlive: ctx.isAlive, isoNow });
   if (!lock.owned) {
     return { stop: true, reason: lock.reason ?? "LOCK_NOT_OWNED", holder: lock.holder, at: isoNow };
   }
@@ -1079,6 +1145,12 @@ export async function runLoopOnce(ctxIn) {
         recoveryState = { ...recoveryState, residentConsumer: nextState };
         await writeRecoveryState(paths, recoveryState);
       },
+      revalidateOwnership: async () => confirmLockOwnership(paths, {
+        pid: ctx.pid,
+        hostId: ctx.hostId,
+        handoffToken: ctx.handoffToken,
+        isoNow,
+      }),
     });
     tickEvents.push(...resume.events);
   }

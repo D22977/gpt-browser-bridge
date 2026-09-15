@@ -28,6 +28,7 @@ import {
   writeProjectState,
 } from "../src/supervisor.mjs";
 import { OrcaAdapter, resolveActiveTerminal } from "../src/adapters/orca_adapter.mjs";
+import { CURRENT_COMMENT_READBACK_PROTOCOL } from "../src/adapters/herdr_resume.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE_ROOT = path.join(REPO_ROOT, "fixtures", "orca");
@@ -100,6 +101,21 @@ function residentAuthorityBinding(overrides = {}) {
       HEAD: "0123456789abcdef0123456789abcdef01234567",
     },
     ...overrides,
+  };
+}
+
+function completeComments(comments = []) {
+  return {
+    comments,
+    pagination_complete: true,
+    readback_provenance: {
+      protocol: CURRENT_COMMENT_READBACK_PROTOCOL,
+      source: "github",
+      method: "GET",
+      endpoint: "repos/D22977/gpt-browser-bridge/issues/162/comments",
+      pagination: "complete",
+      readback: "exact_get",
+    },
   };
 }
 
@@ -240,7 +256,7 @@ minimal_wake: Read GitHub directly.
     waitTuple,
     readAuthority: async () => ({ binding: residentAuthorityBinding() }),
     readDecisionBody: async () => decisionBody,
-    readComments: async () => [],
+    readComments: async () => completeComments(),
     herdr: { prompt: async () => { prompts += 1; return { accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: "r49" }; } },
     publishReceipt: async () => ({ id: "r49-delivery" }),
   };
@@ -297,7 +313,7 @@ minimal_wake: Read GitHub directly.
       comments: [],
       timedQuotaState: { state: "WAITING_FOR_WAKE", wake_at: "2099-01-01T00:00:00.000Z", retry_count: 0 },
       quotaRoutePolicy: { provider: "deepseek", model: "deepseek-v4-flash-free", billing_class: "FREE", max_cost: 0 },
-      readComments: async () => [],
+      readComments: async () => completeComments(),
       herdr: { prompt: async () => { prompts += 1; return {}; } },
       publishReceipt: async () => ({ id: "never" }),
     },
@@ -336,7 +352,7 @@ minimal_wake: Read GitHub directly.
   await writeFile(paths.recoveryState, JSON.stringify({ residentConsumer: { state: "RETRY_PENDING", wake_at: "2099-01-01T00:00:00.000Z", retry_count: 1 } }));
   let prompts = 0;
   const result = await runResumeDeliveryCheck({ resumeDelivery: {
-    futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] }, waitTuple, readAuthority: async () => ({ binding: residentAuthorityBinding() }), readComments: async () => [], decisionBody, comments: [], herdr: { prompt: async () => { prompts += 1; return {}; } }, publishReceipt: async () => ({ id: "never" }), quotaRoutePolicy: { provider: "deepseek", model: "deepseek-v4-flash-free", billing_class: "FREE", max_cost: 0 },
+    futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] }, waitTuple, readAuthority: async () => ({ binding: residentAuthorityBinding() }), readComments: async () => completeComments(), decisionBody, comments: [], herdr: { prompt: async () => { prompts += 1; return {}; } }, publishReceipt: async () => ({ id: "never" }), quotaRoutePolicy: { provider: "herdr:codex", model: "gpt-5.6-luna", billing_class: "FREE", max_cost: 0 },
   } }, { isoNow: "2026-08-01T09:00:00+08:00", deliveryState: { state: "RETRY_PENDING", wake_at: "2099-01-01T00:00:00.000Z", retry_count: 1 } });
   assert.equal(prompts, 0);
   assert.equal(result.reason, "WAIT_UNTIL_WAKE");
@@ -381,7 +397,7 @@ minimal_wake: Read GitHub directly.
       readAuthority: async () => ({ binding: residentAuthorityBinding() }),
       decisionBody,
       comments: [],
-      readComments: async () => [],
+      readComments: async () => completeComments(),
       herdr: { prompt: async () => { prompts += 1; return {}; } },
       publishReceipt: async () => ({ id: "never" }),
     },
@@ -448,7 +464,7 @@ test("same-host concurrency is single-owner and a second host needs explicit aut
     isAlive: async () => true,
     isoNow: "2026-08-01T09:00:00+08:00",
   });
-  assert.equal(authorized.owned, true);
+  assert.deepEqual(authorized, { owned: false, holder: 111, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" });
   const sameHost = await acquireOrConfirmLock(paths, {
     pid: 333,
     hostId: "host-b",
@@ -456,6 +472,161 @@ test("same-host concurrency is single-owner and a second host needs explicit aut
     isoNow: "2026-08-01T09:00:01+08:00",
   });
   assert.equal(sameHost.owned, false);
+});
+
+test("an authorized second host cannot replace a live owner without a completed fencing handoff", async (t) => {
+  const { paths } = await tempRuntime(t);
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({ pid: 111, host_id: "host-a", at: "old" }));
+  const result = await acquireOrConfirmLock(paths, {
+    pid: 222,
+    hostId: "host-b",
+    authorizedHostIds: ["host-b"],
+    isAlive: async () => true,
+    isoNow: "2026-08-01T09:00:00+08:00",
+  });
+  assert.deepEqual(result, { owned: false, holder: 111, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" });
+});
+
+test("a completed fencing handoff permits one bounded second-host takeover", async (t) => {
+  const { paths } = await tempRuntime(t);
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  const handoff = {
+    protocol: "GBB_SUPERVISOR_FENCING_HANDOFF_V1",
+    token: "handoff-1",
+    status: "FENCED",
+    from_pid: 111,
+    from_host_id: "host-a",
+    to_host_id: "host-b",
+    issued_at: "2026-08-01T08:59:00+08:00",
+    expires_at: "2026-08-01T09:05:00+08:00",
+  };
+  await writeFile(paths.lock, JSON.stringify({ pid: 111, host_id: "host-a", at: "old", fencing_handoff: handoff }));
+  const result = await acquireOrConfirmLock(paths, {
+    pid: 222,
+    hostId: "host-b",
+    authorizedHostIds: ["host-b"],
+    handoffToken: "handoff-1",
+    isAlive: async () => true,
+    isoNow: "2026-08-01T09:00:00+08:00",
+  });
+  assert.deepEqual(result, { owned: true, holder: 222 });
+  const owner = await readJson(paths.lock);
+  assert.equal(owner.pid, 222);
+  assert.equal(owner.fencing_handoff.token, "handoff-1");
+});
+
+test("an expired or mismatched fencing handoff blocks a live-owner takeover", async (t) => {
+  for (const handoffToken of ["wrong-token", "handoff-1"]) {
+    const { paths } = await tempRuntime(t);
+    await mkdir(path.dirname(paths.lock), { recursive: true });
+    await writeFile(paths.lock, JSON.stringify({
+      pid: 111,
+      host_id: "host-a",
+      at: "old",
+      fencing_handoff: {
+        protocol: "GBB_SUPERVISOR_FENCING_HANDOFF_V1",
+        token: "handoff-1",
+        status: "FENCED",
+        from_pid: 111,
+        from_host_id: "host-a",
+        to_host_id: "host-b",
+        issued_at: "2026-08-01T08:59:00+08:00",
+        expires_at: handoffToken === "handoff-1" ? "2026-08-01T08:59:30+08:00" : "2026-08-01T09:05:00+08:00",
+      },
+    }));
+    const result = await acquireOrConfirmLock(paths, {
+      pid: 222,
+      hostId: "host-b",
+      authorizedHostIds: ["host-b"],
+      handoffToken,
+      isAlive: async () => true,
+      isoNow: "2026-08-01T09:00:00+08:00",
+    });
+    assert.deepEqual(result, { owned: false, holder: 111, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" });
+  }
+});
+
+test("concurrent authorized takeover attempts yield at most one owner", async (t) => {
+  const { paths } = await tempRuntime(t);
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({
+    pid: 111,
+    host_id: "host-a",
+    at: "old",
+    fencing_handoff: {
+      protocol: "GBB_SUPERVISOR_FENCING_HANDOFF_V1",
+      token: "handoff-1",
+      status: "FENCED",
+      from_pid: 111,
+      from_host_id: "host-a",
+      to_host_id: "host-b",
+      issued_at: "2026-08-01T08:59:00+08:00",
+      expires_at: "2026-08-01T09:05:00+08:00",
+    },
+  }));
+  const results = await Promise.all([222, 333].map((pid) => acquireOrConfirmLock(paths, {
+    pid,
+    hostId: "host-b",
+    authorizedHostIds: ["host-b"],
+    handoffToken: "handoff-1",
+    isAlive: async () => true,
+    isoNow: "2026-08-01T09:00:00+08:00",
+  })));
+  assert.equal(results.filter((result) => result.owned).length, 1);
+  assert.equal(results.filter((result) => !result.owned).length, 1);
+});
+
+test("Supervisor revalidates lock ownership immediately before a physical prompt", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const waitTuple = {
+    source_terminal_receipt: 1629000001,
+    control_generation: 13,
+    card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01",
+    allowed_action_class: "ISSUE162_RESIDENT_CONSUMER",
+    executor_role: "WORKER",
+    target: { agent_name: "R49-EXECUTOR", executor_instance_id: "r49-executor-instance", surface: "HERDR", herdr_agent: "codex", herdr_workspace_id: "wR49", herdr_agent_kind: "codex" },
+  };
+  const decisionBody = `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 13
+decision_topic: ISSUE162_RESIDENT_CONSUMER
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt 1629000001
+source_control_generation: 13
+resume_card_id: GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01
+
+EXACT_TARGET
+executor_role: WORKER
+agent_name: R49-EXECUTOR
+executor_instance_id: r49-executor-instance
+surface: HERDR
+minimal_wake: Read GitHub directly.
+`;
+  let prompts = 0;
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    resumeDelivery: {
+      futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] },
+      waitTuple,
+      readAuthority: async ({ phase }) => {
+        if (phase === "before_send") await writeFile(paths.lock, JSON.stringify({ pid: 999, at: "foreign" }));
+        return { binding: residentAuthorityBinding() };
+      },
+      decisionBody,
+      readComments: async () => completeComments(),
+      herdr: { prompt: async () => { prompts += 1; return {}; } },
+      publishReceipt: async () => ({ id: "never" }),
+    },
+    pid: 41007,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+  });
+  assert.equal(prompts, 0);
+  assert.equal(outcome.events.find((event) => event.type === "resume_delivery_control_required").reason, "LOCK_NOT_OWNED");
 });
 
 test("resident delivery without fresh authority or paginated comment readers is CONTROL_REQUIRED", async (t) => {
