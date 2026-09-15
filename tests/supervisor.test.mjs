@@ -84,7 +84,7 @@ function quietOrca(overrides = {}) {
   };
 }
 
-async function runTakeoverGuardLoop(t, { guard, isAlive }) {
+async function runTakeoverGuardLoop(t, { guard, isAlive, livenessExec }) {
   const { root, paths } = await tempRuntime(t);
   await mkdir(path.dirname(paths.lock), { recursive: true });
   const owner = { pid: 111, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 6 };
@@ -94,6 +94,14 @@ async function runTakeoverGuardLoop(t, { guard, isAlive }) {
   await writeFile(`${paths.lock}.takeover`, guardRaw);
   let prompts = 0;
   let probeCalls = 0;
+  const livenessContext = typeof livenessExec === "function"
+    ? { livenessExec }
+    : {
+        isAlive: async (...args) => {
+          probeCalls += 1;
+          return isAlive(...args, `${paths.lock}.takeover`);
+        },
+      };
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -101,10 +109,7 @@ async function runTakeoverGuardLoop(t, { guard, isAlive }) {
     hostId: "host-b",
     authorizedHostIds: ["host-b"],
     now: () => BASE_MS,
-    isAlive: async (...args) => {
-      probeCalls += 1;
-      return isAlive(...args);
-    },
+    ...livenessContext,
     resumeDelivery: { herdr: { prompt: async () => { prompts += 1; } } },
   });
   return { outcome, ownerRaw, guardRaw, paths, probeCalls, prompts };
@@ -461,17 +466,18 @@ test("live lock owner stops a duplicate Supervisor before ORCA or agent actions"
   await assert.rejects(readFile(paths.heartbeat), { code: "ENOENT" });
 });
 
-test("dead lock owner is replaced and the current process becomes sole owner", async (t) => {
+test("dead lock owner fails closed when guard cleanup cannot be identity-bound", async (t) => {
   const { paths } = await tempRuntime(t);
   await mkdir(path.dirname(paths.lock), { recursive: true });
-  await writeFile(paths.lock, JSON.stringify({ pid: 111, at: "old" }));
+  const ownerRaw = JSON.stringify({ pid: 111, at: "old" });
+  await writeFile(paths.lock, ownerRaw);
   const result = await acquireOrConfirmLock(paths, {
     pid: 222,
     isAlive: async () => false,
     isoNow: "2026-08-01T09:00:00+08:00",
   });
-  assert.deepEqual(result, { owned: true, holder: 222, fence: 1 });
-  assert.equal((await readJson(paths.lock)).pid, 222);
+  assert.deepEqual(result, { owned: false, holder: 111, reason: "CONTROL_REQUIRED_TAKEOVER_GUARD_CLEANUP_UNPROVEN" });
+  assert.equal(await readFile(paths.lock, "utf8"), ownerRaw);
 });
 
 test("same-host concurrency is single-owner and a second host needs explicit authorization", async (t) => {
@@ -682,6 +688,46 @@ test("same-host takeover-guard probe errors are typed fail-closed with unchanged
   assert.equal(result.prompts, 0);
   assert.equal(await readFile(result.paths.lock, "utf8"), result.ownerRaw);
   assert.equal(await readFile(`${result.paths.lock}.takeover`, "utf8"), result.guardRaw);
+});
+
+test("default tasklist probe failure is unknown and preserves both locks without prompting", async (t) => {
+  let execCalls = 0;
+  const result = await runTakeoverGuardLoop(t, {
+    guard: { pid: 333, host_id: "host-b", at: "2026-08-01T09:00:01+08:00", fence: 7 },
+    livenessExec: async (command, args) => {
+      execCalls += 1;
+      assert.equal(command, "tasklist");
+      assert.deepEqual(args, ["/FI", "PID eq 333"]);
+      throw new Error("tasklist unavailable");
+    },
+  });
+
+  assert.equal(result.outcome.stop, true);
+  assert.equal(result.outcome.reason, "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN");
+  assert.equal(execCalls, 1);
+  assert.equal(result.prompts, 0);
+  assert.equal(await readFile(result.paths.lock, "utf8"), result.ownerRaw);
+  assert.equal(await readFile(`${result.paths.lock}.takeover`, "utf8"), result.guardRaw);
+});
+
+test("takeover-guard cleanup fails closed when validated G0 is replaced by G1 before removal", async (t) => {
+  const guard1 = { pid: 444, host_id: "host-a", at: "2026-08-01T09:00:02+08:00", fence: 8 };
+  const guard1Raw = JSON.stringify(guard1);
+  const result = await runTakeoverGuardLoop(t, {
+    guard: { pid: 333, host_id: "host-b", at: "2026-08-01T09:00:01+08:00", fence: 7 },
+    isAlive: async (pid, guardPath) => {
+      assert.equal(pid, 333);
+      await writeFile(guardPath, guard1Raw);
+      return false;
+    },
+  });
+
+  assert.equal(result.outcome.stop, true);
+  assert.equal(result.outcome.reason, "CONTROL_REQUIRED_TAKEOVER_GUARD_CLEANUP_UNPROVEN");
+  assert.equal(result.probeCalls, 1);
+  assert.equal(result.prompts, 0);
+  assert.equal(await readFile(result.paths.lock, "utf8"), result.ownerRaw);
+  assert.equal(await readFile(`${result.paths.lock}.takeover`, "utf8"), guard1Raw);
 });
 
 test("a self-authored fencing handoff never permits a bounded second-host takeover while the owner is live", async (t) => {

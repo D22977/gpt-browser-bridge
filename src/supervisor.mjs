@@ -19,7 +19,7 @@
 // Agent-task rework counting (§15 "Agent 任務失敗") stays the Control
 // Tower's call per §6.2; Supervisor only forwards the events it needs to see.
 
-import { readFile, appendFile, mkdir, stat, readdir, open, unlink } from "node:fs/promises";
+import { readFile, appendFile, mkdir, stat, readdir, open } from "node:fs/promises";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -193,13 +193,16 @@ export function buildResumePrompt(role, state, { runId } = {}) {
 // Lock (§15 step 2: confirm lock owner; also the initial acquire)
 // ---------------------------------------------------------------------------
 
-async function defaultIsAlive(pid) {
+async function defaultIsAlive(pid, livenessExec = execFileAsync) {
   try {
-    const { stdout } = await execFileAsync("tasklist", ["/FI", `PID eq ${pid}`], { windowsHide: true });
-    // tasklist always exits 0; a non-match prints "INFO: No tasks...".
-    return !/no tasks/i.test(stdout) && stdout.includes(String(pid));
+    const { stdout } = await livenessExec("tasklist", ["/FI", `PID eq ${pid}`], { windowsHide: true });
+    if (typeof stdout !== "string") return null;
+    // Only tasklist's explicit no-task result proves that this PID is dead.
+    if (/no tasks/i.test(stdout)) return false;
+    if (stdout.includes(String(pid))) return true;
+    return null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -223,10 +226,6 @@ function currentLeaseIsValid(record, isoNow) {
   const expiresAt = Date.parse(record.lease_expires_at);
   const currentAt = Date.parse(isoNow);
   return Number.isFinite(expiresAt) && Number.isFinite(currentAt) && expiresAt > currentAt;
-}
-
-function lockRecordKey(record) {
-  return JSON.stringify({ pid: record.pid, at: record.at, host_id: record.host_id ?? null, fence: lockFence(record) });
 }
 
 async function readLockRecord(lockPath) {
@@ -260,24 +259,14 @@ async function createExclusiveJson(filePath, value) {
   }
 }
 
-async function releaseTakeoverGuard(guardPath) {
-  try {
-    await unlink(guardPath);
-    return { ok: true };
-  } catch (error) {
-    if (error?.code === "ENOENT") return { ok: true };
-    return { ok: false, error };
-  }
-}
-
 // Re-run every tick (not just at startup): if a live process other than us
 // owns the lock, we stop rather than fight it (duplicate scheduler
-// invocation). If nobody alive owns it (Supervisor was killed), we take it
-// over. Absent-lock acquisition uses an OS-level exclusive create. Stale
-// takeover is serialized by an exclusive sidecar guard and a second owner
-// reread, so two independent processes cannot both win. A live owner is never
-// replaced by a second host; the monotonic fence plus the per-event physical
-// send lease closes the prompt race without trusting self-authored handoffs.
+// invocation). If nobody alive owns it (Supervisor was killed), stale
+// takeover would require an identity-bound cleanup primitive that is not
+// available here. Absent-lock acquisition uses an OS-level exclusive create.
+// A live owner is never replaced by a second host; the monotonic fence plus
+// the per-event physical send lease closes the prompt race without trusting
+// self-authored handoffs.
 export async function acquireOrConfirmLock(paths, { pid, hostId = null, authorizedHostIds = [], handoffToken = null, isAlive, isoNow }) {
   const guardPath = `${path.resolve(paths.lock)}.takeover`;
   if (!Number.isInteger(pid) || pid <= 0 || typeof isoNow !== "string" || !isoNow) {
@@ -312,9 +301,7 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
           reason: guardLive === true ? "LOCK_ACQUIRE_IN_FLIGHT" : "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN",
         };
       }
-      const released = await releaseTakeoverGuard(guardPath);
-      if (!released.ok) return { owned: false, holder: guard.pid, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
-      continue;
+      return { owned: false, holder: guard.pid, reason: "CONTROL_REQUIRED_TAKEOVER_GUARD_CLEANUP_UNPROVEN" };
     }
 
     const state = await readLockRecord(paths.lock);
@@ -362,40 +349,19 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
       await writeFileAtomic(paths.lock, JSON.stringify(refreshed));
       return { owned: true, holder: pid, fence: refreshed.fence };
     }
-    const liveOwner = await isAlive(current.pid);
-    if (authorizedSecondHost && liveOwner) {
-      return { owned: false, holder: current.pid, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" };
+    let liveOwner;
+    try {
+      liveOwner = typeof isAlive === "function" ? await isAlive(current.pid) : null;
+    } catch {
+      return { owned: false, holder: current.pid, reason: "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN" };
     }
-    if (!authorizedSecondHost && liveOwner) {
+    if (liveOwner === null) {
+      return { owned: false, holder: current.pid, reason: "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN" };
+    }
+    if (liveOwner) {
       return { owned: false, holder: current.pid };
     }
-
-    const guard = await createExclusiveJson(guardPath, newRecord);
-    if (guard.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
-    if (!guard.created) continue;
-    let guardReleased = false;
-    try {
-      const reread = await readLockRecord(paths.lock);
-      if (reread.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
-      if (reread.present && lockRecordKey(reread.record) !== lockRecordKey(current)) continue;
-      if (reread.present && authorizedSecondHost && await isAlive(reread.record.pid)) {
-        return { owned: false, holder: reread.record.pid, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" };
-      }
-      const replacement = { ...newRecord, fence: reread.present && Number.isInteger(reread.record.fence) ? reread.record.fence + 1 : 1 };
-      if (!reread.present) {
-        const created = await createExclusiveJson(paths.lock, replacement);
-        if (created.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
-        if (!created.created) continue;
-      } else {
-        await writeFileAtomic(paths.lock, JSON.stringify(replacement));
-      }
-      const released = await releaseTakeoverGuard(guardPath);
-      guardReleased = true;
-      if (!released.ok) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
-      return { owned: true, holder: pid, fence: replacement.fence };
-    } finally {
-      if (!guardReleased) await releaseTakeoverGuard(guardPath);
-    }
+    return { owned: false, holder: current.pid, reason: "CONTROL_REQUIRED_TAKEOVER_GUARD_CLEANUP_UNPROVEN" };
   }
   return { owned: false, holder: null, reason: "LOCK_ACQUIRE_RACE_UNRESOLVED" };
 }
@@ -1118,6 +1084,7 @@ async function maybeWriteMorningSummary(ctx, paths, { state, orcaStatus, recover
 
 function normalizeCtx(ctxIn) {
   const runtimeRoot = ctxIn.runtimeRoot;
+  const livenessExec = ctxIn.livenessExec ?? execFileAsync;
   return {
     runtimeRoot,
     paths: ctxIn.paths ?? resolveRuntimePaths(runtimeRoot),
@@ -1127,7 +1094,7 @@ function normalizeCtx(ctxIn) {
     authorizedHostIds: ctxIn.authorizedHostIds ?? [],
     handoffToken: ctxIn.handoffToken ?? null,
     now: ctxIn.now ?? (() => Date.now()),
-    isAlive: ctxIn.isAlive ?? defaultIsAlive,
+    isAlive: ctxIn.isAlive ?? ((pid) => defaultIsAlive(pid, livenessExec)),
     gitExec: ctxIn.gitExec ?? defaultGitExec,
     sleep: ctxIn.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     maxIterations: ctxIn.maxIterations ?? Infinity,
