@@ -856,6 +856,28 @@ test("resident consumer rereads authority before send and persists delivery stat
   assert.deepEqual(states, ["SEND_PENDING", "DELIVERED"]);
 });
 
+test("a physical-send gate runs after pending persistence and can reject a replaced fence", async () => {
+  const tuple = waitTuple();
+  let physicalGateCalls = 0;
+  let prompts = 0;
+  const result = await deliverResumeOnce({
+    waitTuple: tuple,
+    decisionBody: decisionBody(),
+    comments: [],
+    herdr: { prompt: async () => { prompts += 1; return {}; } },
+    publishReceipt: async () => ({ id: "never" }),
+    beforeSend: async () => ({ allow: true }),
+    beforePhysicalSend: async () => {
+      physicalGateCalls += 1;
+      return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_FENCE_CHANGED" };
+    },
+  });
+  assert.equal(physicalGateCalls, 1);
+  assert.equal(result.decision, "CONTROL_REQUIRED");
+  assert.equal(result.reason, "CONTROL_REQUIRED_FENCE_CHANGED");
+  assert.equal(prompts, 0);
+});
+
 test("current ACTIVE Control binding is required for return routing", () => {
   const current = `CONTROL_GENERATION_SWITCH_V1
 

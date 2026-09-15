@@ -43,8 +43,6 @@ import {
 import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary.mjs";
 
 const execFileAsync = promisify(execFile);
-const FENCING_HANDOFF_PROTOCOL = "GBB_SUPERVISOR_FENCING_HANDOFF_V1";
-
 // ---------------------------------------------------------------------------
 // Constants (§15 retry policy)
 // ---------------------------------------------------------------------------
@@ -76,6 +74,7 @@ export function resolveRuntimePaths(runtimeRoot) {
     recoveryState: path.join(root, "state", "recovery_state.json"),
     reportCursor: path.join(root, "state", "report_cursor.json"),
     lock: path.join(root, "locks", "supervisor.lock"),
+    sendLease: path.join(root, "locks", "supervisor.send"),
     events: path.join(root, "events", "events.ndjson"),
     runsDir: path.join(root, "runs"),
     jobsDir: path.join(root, "jobs"),
@@ -209,50 +208,25 @@ function validLockRecord(record) {
     && Number.isInteger(record.pid) && record.pid > 0
     && typeof record.at === "string" && record.at.length > 0
     && (record.host_id === undefined || (typeof record.host_id === "string" && record.host_id.length > 0))
-    && (record.fencing_handoff === undefined || validFencingHandoff(record.fencing_handoff)));
+    && record.fencing_handoff === undefined
+    && (record.fence === undefined || (Number.isInteger(record.fence) && record.fence > 0))
+    && (record.lease_expires_at === undefined
+      || (typeof record.lease_expires_at === "string" && Number.isFinite(Date.parse(record.lease_expires_at)))));
 }
 
-function validFencingHandoff(handoff) {
-  return Boolean(handoff && typeof handoff === "object" && !Array.isArray(handoff)
-    && handoff.protocol === FENCING_HANDOFF_PROTOCOL
-    && typeof handoff.token === "string" && handoff.token.length > 0
-    && handoff.status === "FENCED"
-    && Number.isInteger(handoff.from_pid) && handoff.from_pid > 0
-    && typeof handoff.from_host_id === "string" && handoff.from_host_id.length > 0
-    && typeof handoff.to_host_id === "string" && handoff.to_host_id.length > 0
-    && typeof handoff.issued_at === "string" && Number.isFinite(Date.parse(handoff.issued_at))
-    && typeof handoff.expires_at === "string" && Number.isFinite(Date.parse(handoff.expires_at))
-    && Date.parse(handoff.expires_at) > Date.parse(handoff.issued_at));
+function lockFence(record) {
+  return Number.isInteger(record?.fence) && record.fence > 0 ? record.fence : 1;
 }
 
-function allowsLiveOwnerTakeover(current, hostId, handoffToken, isoNow) {
-  const handoff = current?.fencing_handoff;
-  return Boolean(
-    hostId
-    && typeof handoffToken === "string"
-    && validFencingHandoff(handoff)
-    && handoff.token === handoffToken
-    && handoff.from_pid === current.pid
-    && handoff.from_host_id === current.host_id
-    && handoff.to_host_id === hostId
-    && Date.parse(handoff.expires_at) > Date.parse(isoNow),
-  );
-}
-
-function confirmsFencingForOwner(current, hostId, handoffToken, isoNow) {
-  const handoff = current?.fencing_handoff;
-  return Boolean(
-    hostId
-    && typeof handoffToken === "string"
-    && validFencingHandoff(handoff)
-    && handoff.token === handoffToken
-    && handoff.to_host_id === hostId
-    && Date.parse(handoff.expires_at) > Date.parse(isoNow),
-  );
+function currentLeaseIsValid(record, isoNow) {
+  if (record?.lease_expires_at === undefined) return true;
+  const expiresAt = Date.parse(record.lease_expires_at);
+  const currentAt = Date.parse(isoNow);
+  return Number.isFinite(expiresAt) && Number.isFinite(currentAt) && expiresAt > currentAt;
 }
 
 function lockRecordKey(record) {
-  return JSON.stringify({ pid: record.pid, at: record.at, host_id: record.host_id ?? null });
+  return JSON.stringify({ pid: record.pid, at: record.at, host_id: record.host_id ?? null, fence: lockFence(record) });
 }
 
 async function readLockRecord(lockPath) {
@@ -299,15 +273,17 @@ async function releaseTakeoverGuard(guardPath) {
 // Re-run every tick (not just at startup): if a live process other than us
 // owns the lock, we stop rather than fight it (duplicate scheduler
 // invocation). If nobody alive owns it (Supervisor was killed), we take it
-// over. Absent-lock acquisition uses an OS-level exclusive create. Stale or
-// explicitly authorized takeover is serialized by an exclusive sidecar guard
-// and a second owner reread, so two independent processes cannot both win.
+// over. Absent-lock acquisition uses an OS-level exclusive create. Stale
+// takeover is serialized by an exclusive sidecar guard and a second owner
+// reread, so two independent processes cannot both win. A live owner is never
+// replaced by a second host; the monotonic fence plus the per-event physical
+// send lease closes the prompt race without trusting self-authored handoffs.
 export async function acquireOrConfirmLock(paths, { pid, hostId = null, authorizedHostIds = [], handoffToken = null, isAlive, isoNow }) {
   const guardPath = `${path.resolve(paths.lock)}.takeover`;
   if (!Number.isInteger(pid) || pid <= 0 || typeof isoNow !== "string" || !isoNow) {
     return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
   }
-  const newRecord = { pid, at: isoNow, ...(hostId ? { host_id: hostId } : {}) };
+  const newRecord = { pid, at: isoNow, fence: 1, ...(hostId ? { host_id: hostId } : {}) };
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const guardState = await readLockRecord(guardPath);
@@ -327,7 +303,7 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
     if (!state.present) {
       const created = await createExclusiveJson(paths.lock, newRecord);
       if (created.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
-      if (created.created) return { owned: true, holder: pid };
+      if (created.created) return { owned: true, holder: pid, fence: newRecord.fence };
       continue;
     }
 
@@ -337,11 +313,19 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
       return { owned: false, holder: current.pid, reason: "HOST_IDENTITY_REJECTED" };
     }
     if (current.pid === pid) {
-      await writeFileAtomic(paths.lock, JSON.stringify(current.fencing_handoff ? { ...newRecord, fencing_handoff: current.fencing_handoff } : newRecord));
-      return { owned: true, holder: pid };
+      if (!currentLeaseIsValid(current, isoNow)) {
+        return { owned: false, holder: pid, reason: "CONTROL_REQUIRED_FENCING_REVALIDATION_FAILED" };
+      }
+      const refreshed = {
+        ...newRecord,
+        fence: lockFence(current),
+        ...(current.lease_expires_at ? { lease_expires_at: current.lease_expires_at } : {}),
+      };
+      await writeFileAtomic(paths.lock, JSON.stringify(refreshed));
+      return { owned: true, holder: pid, fence: refreshed.fence };
     }
     const liveOwner = await isAlive(current.pid);
-    if (authorizedSecondHost && liveOwner && !allowsLiveOwnerTakeover(current, hostId, handoffToken, isoNow)) {
+    if (authorizedSecondHost && liveOwner) {
       return { owned: false, holder: current.pid, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" };
     }
     if (!authorizedSecondHost && liveOwner) {
@@ -356,23 +340,21 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
       const reread = await readLockRecord(paths.lock);
       if (reread.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
       if (reread.present && lockRecordKey(reread.record) !== lockRecordKey(current)) continue;
-      if (reread.present && authorizedSecondHost && await isAlive(reread.record.pid) && !allowsLiveOwnerTakeover(reread.record, hostId, handoffToken, isoNow)) {
+      if (reread.present && authorizedSecondHost && await isAlive(reread.record.pid)) {
         return { owned: false, holder: reread.record.pid, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" };
       }
-      if (authorizedSecondHost && allowsLiveOwnerTakeover(current, hostId, handoffToken, isoNow)) {
-        newRecord.fencing_handoff = current.fencing_handoff;
-      }
+      const replacement = { ...newRecord, fence: reread.present && Number.isInteger(reread.record.fence) ? reread.record.fence + 1 : 1 };
       if (!reread.present) {
-        const created = await createExclusiveJson(paths.lock, newRecord);
+        const created = await createExclusiveJson(paths.lock, replacement);
         if (created.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
         if (!created.created) continue;
       } else {
-        await writeFileAtomic(paths.lock, JSON.stringify(newRecord));
+        await writeFileAtomic(paths.lock, JSON.stringify(replacement));
       }
       const released = await releaseTakeoverGuard(guardPath);
       guardReleased = true;
       if (!released.ok) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
-      return { owned: true, holder: pid };
+      return { owned: true, holder: pid, fence: replacement.fence };
     } finally {
       if (!guardReleased) await releaseTakeoverGuard(guardPath);
     }
@@ -380,17 +362,63 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
   return { owned: false, holder: null, reason: "LOCK_ACQUIRE_RACE_UNRESOLVED" };
 }
 
-export async function confirmLockOwnership(paths, { pid, hostId = null, handoffToken = null, isoNow }) {
+export async function confirmLockOwnership(paths, { pid, hostId = null, handoffToken = null, fence = null, isoNow }) {
+  if (typeof isoNow !== "string" || !isoNow || !Number.isFinite(Date.parse(isoNow))) {
+    return { owned: false, holder: pid, reason: "CONTROL_REQUIRED_FENCING_REVALIDATION_FAILED" };
+  }
   const state = await readLockRecord(paths.lock);
   if (state.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
   if (!state.present) return { owned: false, holder: null, reason: "LOCK_NOT_OWNED" };
   if (state.record.pid !== pid || (state.record.host_id ?? null) !== (hostId ?? null)) {
     return { owned: false, holder: state.record.pid, reason: "LOCK_NOT_OWNED" };
   }
-  if (state.record.fencing_handoff && !confirmsFencingForOwner(state.record, hostId, handoffToken, isoNow)) {
+  if (fence !== null && (!Number.isInteger(fence) || fence !== lockFence(state.record))) {
+    return { owned: false, holder: pid, reason: "CONTROL_REQUIRED_FENCE_CHANGED" };
+  }
+  if (!currentLeaseIsValid(state.record, isoNow)) {
     return { owned: false, holder: pid, reason: "CONTROL_REQUIRED_FENCING_REVALIDATION_FAILED" };
   }
-  return { owned: true, holder: pid };
+  return { owned: true, holder: pid, fence: lockFence(state.record) };
+}
+
+async function releasePhysicalSendLease(leasePath, record) {
+  try {
+    const raw = await readFile(leasePath, "utf8");
+    if (raw === JSON.stringify(record)) await unlink(leasePath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+export async function claimPhysicalSendLease(paths, { pid, hostId = null, fence, logicalKey, nowMs }) {
+  if (!Number.isInteger(fence) || fence <= 0 || typeof logicalKey !== "string" || !logicalKey || !Number.isFinite(nowMs)) {
+    return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_FENCE_CHANGED" };
+  }
+  const isoNow = formatIso(nowMs);
+  const state = await readLockRecord(paths.lock);
+  if (state.error) return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
+  if (!state.present || state.record.pid !== pid || (state.record.host_id ?? null) !== (hostId ?? null)) {
+    return { allow: false, decision: "CONTROL_REQUIRED", reason: "LOCK_NOT_OWNED" };
+  }
+  if (lockFence(state.record) !== fence) {
+    return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_FENCE_CHANGED" };
+  }
+  if (!currentLeaseIsValid(state.record, isoNow)) {
+    return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_FENCING_REVALIDATION_FAILED" };
+  }
+  const leaseKey = Buffer.from(logicalKey).toString("base64url");
+  const leasePath = `${paths.sendLease ?? `${paths.lock}.send`}.${leaseKey}`;
+  const lease = { pid, host_id: hostId, fence, logical_event_key: logicalKey, at: isoNow };
+  const created = await createExclusiveJson(leasePath, lease);
+  if (created.error) return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_PHYSICAL_SEND_LEASE_UNREADABLE" };
+  if (!created.created) return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_PHYSICAL_SEND_LEASE_HELD" };
+
+  const reread = await readLockRecord(paths.lock);
+  if (reread.error || !reread.present || reread.record.pid !== pid || (reread.record.host_id ?? null) !== (hostId ?? null) || lockFence(reread.record) !== fence || !currentLeaseIsValid(reread.record, formatIso(nowMs))) {
+    await releasePhysicalSendLease(leasePath, lease);
+    return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_FENCE_CHANGED" };
+  }
+  return { allow: true, release: async () => releasePhysicalSendLease(leasePath, lease) };
 }
 
 // ---------------------------------------------------------------------------
@@ -835,6 +863,7 @@ export async function runResumeDeliveryCheck(ctx, {
   deliveryState = null,
   persistDeliveryState = null,
   revalidateOwnership = null,
+  claimPhysicalSend = null,
 } = {}) {
   const cfg = ctx?.resumeDelivery;
   if (!cfg) return { events: [], delivered: false, duplicate: false };
@@ -942,6 +971,17 @@ export async function runResumeDeliveryCheck(ctx, {
     }
     return { allow: true };
   };
+  const beforePhysicalSend = async (details) => {
+    const gate = await beforeSend(details);
+    if (!gate.allow || typeof claimPhysicalSend !== "function") return gate;
+    try {
+      const claim = await claimPhysicalSend(details);
+      if (claim?.allow === false) return claim;
+      return { allow: true, release: claim?.release };
+    } catch (error) {
+      return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_PHYSICAL_SEND_LEASE_UNREADABLE", error: String(error?.message ?? error) };
+    }
+  };
 
   try {
     const result = await deliverResumeOnce({
@@ -959,6 +999,7 @@ export async function runResumeDeliveryCheck(ctx, {
       authorizedHostIds: cfg.authorizedHostIds,
       persistDeliveryState: persist,
       beforeSend,
+      beforePhysicalSend,
     });
     if (result.decision === "DELIVERED") {
       events.push({
@@ -1149,7 +1190,15 @@ export async function runLoopOnce(ctxIn) {
         pid: ctx.pid,
         hostId: ctx.hostId,
         handoffToken: ctx.handoffToken,
-        isoNow,
+        fence: lock.fence,
+        isoNow: formatIso(ctx.now()),
+      }),
+      claimPhysicalSend: async (details) => claimPhysicalSendLease(paths, {
+        pid: ctx.pid,
+        hostId: ctx.hostId,
+        fence: lock.fence,
+        logicalKey: details.logicalKey,
+        nowMs: ctx.now(),
       }),
     });
     tickEvents.push(...resume.events);

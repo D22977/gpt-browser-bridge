@@ -618,6 +618,7 @@ export async function deliverResumeOnce({
   authorizedHostIds = [],
   persistDeliveryState = null,
   beforeSend = null,
+  beforePhysicalSend = null,
 }) {
   const tupleCheck = validateWaitTuple(waitTuple);
   if (!tupleCheck.ok) return { decision: "REJECTED", reason: "INVALID_WAIT_TUPLE", errors: tupleCheck.errors };
@@ -689,6 +690,20 @@ export async function deliverResumeOnce({
     }
   }
 
+  let releasePhysicalSend = null;
+  if (beforePhysicalSend) {
+    let physicalGate;
+    try {
+      physicalGate = normalizeGateResult(await beforePhysicalSend({ logicalKey, waitTuple: tuple, decision: parsed.decision }));
+    } catch (error) {
+      return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: "CONTROL_REQUIRED_PHYSICAL_SEND_GATE_FAILED", error: String(error?.message ?? error) };
+    }
+    if (!physicalGate.allow) {
+      return { decision: physicalGate.decision ?? CONTROL_REQUIRED, logical_key: logicalKey, reason: physicalGate.reason ?? CONTROL_REQUIRED };
+    }
+    releasePhysicalSend = typeof physicalGate.release === "function" ? physicalGate.release : null;
+  }
+
   let evidence;
   try {
     evidence = await herdr.prompt(tuple.target, matched.pointer, {
@@ -697,6 +712,9 @@ export async function deliverResumeOnce({
   } catch (error) {
     const quotaFailure = error?.code === "PROVIDER_QUOTA" || error?.quota === true;
     if (activeTimedQuotaState && quotaFailure && error?.prompt_submitted === false) {
+      try { await releasePhysicalSend?.(); } catch (releaseError) {
+        return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: "CONTROL_REQUIRED_PHYSICAL_SEND_LEASE_UNREADABLE", error: String(releaseError?.message ?? releaseError) };
+      }
       const rawNow = now();
       const observedAtMs = typeof rawNow === "number" ? rawNow : Date.parse(rawNow);
       const quotaEvidence = parseAuthoritativeQuotaEvidence(error.quota_evidence, { routePolicy: activeQuotaRoutePolicy, observedAtMs });

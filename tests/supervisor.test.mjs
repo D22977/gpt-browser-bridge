@@ -12,6 +12,8 @@ import {
   PROCESS_CRASH_BACKOFF_MS,
   acquireOrConfirmLock,
   buildResumePrompt,
+  claimPhysicalSendLease,
+  confirmLockOwnership,
   defaultRecoveryEntry,
   defaultRecoveryState,
   escalateToNeedsHuman,
@@ -442,7 +444,7 @@ test("dead lock owner is replaced and the current process becomes sole owner", a
     isAlive: async () => false,
     isoNow: "2026-08-01T09:00:00+08:00",
   });
-  assert.deepEqual(result, { owned: true, holder: 222 });
+  assert.deepEqual(result, { owned: true, holder: 222, fence: 1 });
   assert.equal((await readJson(paths.lock)).pid, 222);
 });
 
@@ -488,7 +490,7 @@ test("an authorized second host cannot replace a live owner without a completed 
   assert.deepEqual(result, { owned: false, holder: 111, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" });
 });
 
-test("a completed fencing handoff permits one bounded second-host takeover", async (t) => {
+test("a self-authored fencing handoff never permits a bounded second-host takeover while the owner is live", async (t) => {
   const { paths } = await tempRuntime(t);
   await mkdir(path.dirname(paths.lock), { recursive: true });
   const handoff = {
@@ -510,9 +512,9 @@ test("a completed fencing handoff permits one bounded second-host takeover", asy
     isAlive: async () => true,
     isoNow: "2026-08-01T09:00:00+08:00",
   });
-  assert.deepEqual(result, { owned: true, holder: 222 });
+  assert.deepEqual(result, { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" });
   const owner = await readJson(paths.lock);
-  assert.equal(owner.pid, 222);
+  assert.equal(owner.pid, 111);
   assert.equal(owner.fencing_handoff.token, "handoff-1");
 });
 
@@ -543,8 +545,98 @@ test("an expired or mismatched fencing handoff blocks a live-owner takeover", as
       isAlive: async () => true,
       isoNow: "2026-08-01T09:00:00+08:00",
     });
-    assert.deepEqual(result, { owned: false, holder: 111, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" });
+    assert.deepEqual(result, { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" });
   }
+});
+
+test("a self-authored fencing handoff cannot replace a live owner on an authorized second host", async (t) => {
+  const { paths } = await tempRuntime(t);
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({
+    pid: 111,
+    host_id: "host-a",
+    at: "2026-08-01T09:00:00+08:00",
+    fence: 7,
+    fencing_handoff: {
+      protocol: "GBB_SUPERVISOR_FENCING_HANDOFF_V1",
+      token: "self-authored-proof",
+      status: "FENCED",
+      from_pid: 111,
+      from_host_id: "host-a",
+      to_host_id: "host-b",
+      issued_at: "2026-08-01T08:59:00+08:00",
+      expires_at: "2026-08-01T09:05:00+08:00",
+    },
+  }));
+  const result = await acquireOrConfirmLock(paths, {
+    pid: 222,
+    hostId: "host-b",
+    authorizedHostIds: ["host-b"],
+    handoffToken: "self-authored-proof",
+    isAlive: async () => true,
+    isoNow: "2026-08-01T09:00:00+08:00",
+  });
+  assert.deepEqual(result, { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" });
+  assert.equal((await readJson(paths.lock)).pid, 111);
+});
+
+test("physical ownership confirmation rejects a stale or mismatched fence", async (t) => {
+  const { paths } = await tempRuntime(t);
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({ pid: 111, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 7 }));
+  const result = await confirmLockOwnership(paths, {
+    pid: 111,
+    hostId: "host-a",
+    fence: 8,
+    isoNow: "2026-08-01T09:00:01+08:00",
+  });
+  assert.deepEqual(result, { owned: false, holder: 111, reason: "CONTROL_REQUIRED_FENCE_CHANGED" });
+});
+
+test("live old-owner takeover interleaving permits at most one physical prompt", async (t) => {
+  const { paths } = await tempRuntime(t);
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({ pid: 111, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 3 }));
+  const oldGate = await confirmLockOwnership(paths, {
+    pid: 111,
+    hostId: "host-a",
+    fence: 3,
+    isoNow: "2026-08-01T09:00:01+08:00",
+  });
+  assert.equal(oldGate.owned, true);
+
+  const takeover = await acquireOrConfirmLock(paths, {
+    pid: 222,
+    hostId: "host-b",
+    authorizedHostIds: ["host-b"],
+    handoffToken: "forged-live-owner-handoff",
+    isAlive: async () => true,
+    isoNow: "2026-08-01T09:00:02+08:00",
+  });
+  let physicalPrompts = 0;
+  if (takeover.owned) {
+    const oldClaim = await claimPhysicalSendLease(paths, { pid: 111, hostId: "host-a", fence: 3, logicalKey: "event-1", nowMs: BASE_MS + 3_000 });
+    if (oldClaim.allow) physicalPrompts += 1;
+    const newClaim = await claimPhysicalSendLease(paths, { pid: 222, hostId: "host-b", fence: takeover.fence, logicalKey: "event-1", nowMs: BASE_MS + 3_000 });
+    if (newClaim.allow) physicalPrompts += 1;
+  } else {
+    const oldClaim = await claimPhysicalSendLease(paths, { pid: 111, hostId: "host-a", fence: 3, logicalKey: "event-1", nowMs: BASE_MS + 3_000 });
+    assert.equal(oldClaim.allow, true);
+    physicalPrompts += 1;
+  }
+  assert.equal(takeover.owned, false);
+  assert.ok(physicalPrompts <= 1);
+  assert.equal((await readJson(paths.lock)).pid, 111);
+});
+
+test("durable physical-send leases are isolated by logical event", async (t) => {
+  const { paths } = await tempRuntime(t);
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({ pid: 111, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 3 }));
+  const first = await claimPhysicalSendLease(paths, { pid: 111, hostId: "host-a", fence: 3, logicalKey: "event-1", nowMs: BASE_MS });
+  const second = await claimPhysicalSendLease(paths, { pid: 111, hostId: "host-a", fence: 3, logicalKey: "event-2", nowMs: BASE_MS });
+  assert.equal(first.allow, true);
+  assert.equal(second.allow, true);
 });
 
 test("concurrent authorized takeover attempts yield at most one owner", async (t) => {
@@ -573,8 +665,8 @@ test("concurrent authorized takeover attempts yield at most one owner", async (t
     isAlive: async () => true,
     isoNow: "2026-08-01T09:00:00+08:00",
   })));
-  assert.equal(results.filter((result) => result.owned).length, 1);
-  assert.equal(results.filter((result) => !result.owned).length, 1);
+  assert.equal(results.filter((result) => result.owned).length, 0);
+  assert.equal(results.filter((result) => !result.owned).length, 2);
 });
 
 test("Supervisor revalidates lock ownership immediately before a physical prompt", async (t) => {
@@ -627,6 +719,69 @@ minimal_wake: Read GitHub directly.
   });
   assert.equal(prompts, 0);
   assert.equal(outcome.events.find((event) => event.type === "resume_delivery_control_required").reason, "LOCK_NOT_OWNED");
+});
+
+test("Supervisor rereads current time at the physical gate and rejects an expired lease", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const waitTuple = {
+    source_terminal_receipt: 1629000001,
+    control_generation: 13,
+    card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01",
+    allowed_action_class: "ISSUE162_RESIDENT_CONSUMER",
+    executor_role: "WORKER",
+    target: { agent_name: "R49-EXECUTOR", executor_instance_id: "r49-executor-instance", surface: "HERDR", herdr_agent: "codex", herdr_workspace_id: "wR49", herdr_agent_kind: "codex" },
+  };
+  const decisionBody = `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 13
+decision_topic: ISSUE162_RESIDENT_CONSUMER
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt 1629000001
+source_control_generation: 13
+resume_card_id: GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01
+
+EXACT_TARGET
+executor_role: WORKER
+agent_name: R49-EXECUTOR
+executor_instance_id: r49-executor-instance
+surface: HERDR
+minimal_wake: Read GitHub directly.
+`;
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({
+    pid: 41010,
+    host_id: "host-a",
+    at: "2026-08-01T09:00:00+08:00",
+    fence: 4,
+    lease_expires_at: "2026-08-01T09:00:30+08:00",
+  }));
+  let nowMs = BASE_MS;
+  let prompts = 0;
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41010,
+    hostId: "host-a",
+    now: () => nowMs,
+    handoffToken: null,
+    isAlive: async () => true,
+    resumeDelivery: {
+      futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] },
+      waitTuple,
+      readAuthority: async ({ phase }) => {
+        if (phase === "before_send") nowMs = BASE_MS + 60_000;
+        return { binding: residentAuthorityBinding() };
+      },
+      decisionBody,
+      readComments: async () => completeComments(),
+      herdr: { prompt: async () => { prompts += 1; return {}; } },
+      publishReceipt: async () => ({ id: "never" }),
+    },
+  });
+  assert.equal(prompts, 0);
+  assert.equal(outcome.events.find((event) => event.type === "resume_delivery_control_required").reason, "CONTROL_REQUIRED_FENCING_REVALIDATION_FAILED");
 });
 
 test("resident delivery without fresh authority or paginated comment readers is CONTROL_REQUIRED", async (t) => {
