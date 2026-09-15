@@ -84,6 +84,32 @@ function quietOrca(overrides = {}) {
   };
 }
 
+async function runTakeoverGuardLoop(t, { guard, isAlive }) {
+  const { root, paths } = await tempRuntime(t);
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  const owner = { pid: 111, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 6 };
+  const ownerRaw = JSON.stringify(owner);
+  const guardRaw = JSON.stringify(guard);
+  await writeFile(paths.lock, ownerRaw);
+  await writeFile(`${paths.lock}.takeover`, guardRaw);
+  let prompts = 0;
+  let probeCalls = 0;
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 222,
+    hostId: "host-b",
+    authorizedHostIds: ["host-b"],
+    now: () => BASE_MS,
+    isAlive: async (...args) => {
+      probeCalls += 1;
+      return isAlive(...args);
+    },
+    resumeDelivery: { herdr: { prompt: async () => { prompts += 1; } } },
+  });
+  return { outcome, ownerRaw, guardRaw, paths, probeCalls, prompts };
+}
+
 function residentAuthorityBinding(overrides = {}) {
   return {
     card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01",
@@ -600,6 +626,62 @@ minimal_wake: Read GitHub directly.
   assert.equal(outcome.reason, "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN");
   assert.equal(prompts, 0);
   assert.deepEqual(await readJson(paths.lock), owner);
+});
+
+test("remote takeover guards reject a locally invisible PID before probing or mutation", async (t) => {
+  const result = await runTakeoverGuardLoop(t, {
+    guard: { pid: 333, host_id: "host-a", at: "2026-08-01T09:00:01+08:00", fence: 7 },
+    isAlive: async () => false,
+  });
+
+  assert.equal(result.outcome.stop, true);
+  assert.equal(result.outcome.reason, "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN");
+  assert.equal(result.probeCalls, 0);
+  assert.equal(result.prompts, 0);
+  assert.equal(await readFile(result.paths.lock, "utf8"), result.ownerRaw);
+  assert.equal(await readFile(`${result.paths.lock}.takeover`, "utf8"), result.guardRaw);
+});
+
+test("remote takeover guards fail closed when a local liveness probe would throw", async (t) => {
+  const result = await runTakeoverGuardLoop(t, {
+    guard: { pid: 333, host_id: "host-a", at: "2026-08-01T09:00:01+08:00", fence: 7 },
+    isAlive: async () => { throw new Error("tasklist unavailable"); },
+  });
+
+  assert.equal(result.outcome.stop, true);
+  assert.equal(result.outcome.reason, "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN");
+  assert.equal(result.probeCalls, 0);
+  assert.equal(result.prompts, 0);
+  assert.equal(await readFile(result.paths.lock, "utf8"), result.ownerRaw);
+  assert.equal(await readFile(`${result.paths.lock}.takeover`, "utf8"), result.guardRaw);
+});
+
+test("missing takeover-guard host identity never permits local PID absence to replace it", async (t) => {
+  const result = await runTakeoverGuardLoop(t, {
+    guard: { pid: 333, at: "2026-08-01T09:00:01+08:00", fence: 7 },
+    isAlive: async () => false,
+  });
+
+  assert.equal(result.outcome.stop, true);
+  assert.equal(result.outcome.reason, "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN");
+  assert.equal(result.probeCalls, 0);
+  assert.equal(result.prompts, 0);
+  assert.equal(await readFile(result.paths.lock, "utf8"), result.ownerRaw);
+  assert.equal(await readFile(`${result.paths.lock}.takeover`, "utf8"), result.guardRaw);
+});
+
+test("same-host takeover-guard probe errors are typed fail-closed with unchanged locks", async (t) => {
+  const result = await runTakeoverGuardLoop(t, {
+    guard: { pid: 333, host_id: "host-b", at: "2026-08-01T09:00:01+08:00", fence: 7 },
+    isAlive: async () => { throw new Error("tasklist unavailable"); },
+  });
+
+  assert.equal(result.outcome.stop, true);
+  assert.equal(result.outcome.reason, "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN");
+  assert.equal(result.probeCalls, 1);
+  assert.equal(result.prompts, 0);
+  assert.equal(await readFile(result.paths.lock, "utf8"), result.ownerRaw);
+  assert.equal(await readFile(`${result.paths.lock}.takeover`, "utf8"), result.guardRaw);
 });
 
 test("a self-authored fencing handoff never permits a bounded second-host takeover while the owner is live", async (t) => {

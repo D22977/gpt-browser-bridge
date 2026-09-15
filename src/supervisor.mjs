@@ -290,8 +290,27 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
     if (guardState.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
     if (guardState.present) {
       const guard = guardState.record;
-      if (guard.pid === pid || await isAlive(guard.pid)) {
+      const sameHostGuard = typeof guard.host_id === "string" && guard.host_id.length > 0
+        && typeof hostId === "string" && hostId.length > 0
+        && guard.host_id === hostId;
+      if (!sameHostGuard) {
+        return { owned: false, holder: guard.pid, reason: "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN" };
+      }
+      if (guard.pid === pid) {
         return { owned: false, holder: guard.pid, reason: "LOCK_ACQUIRE_IN_FLIGHT" };
+      }
+      let guardLive;
+      try {
+        guardLive = typeof isAlive === "function" ? await isAlive(guard.pid) : null;
+      } catch {
+        return { owned: false, holder: guard.pid, reason: "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN" };
+      }
+      if (guardLive !== false) {
+        return {
+          owned: false,
+          holder: guard.pid,
+          reason: guardLive === true ? "LOCK_ACQUIRE_IN_FLIGHT" : "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN",
+        };
       }
       const released = await releaseTakeoverGuard(guardPath);
       if (!released.ok) return { owned: false, holder: guard.pid, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
