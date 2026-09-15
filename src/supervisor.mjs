@@ -19,7 +19,7 @@
 // Agent-task rework counting (§15 "Agent 任務失敗") stays the Control
 // Tower's call per §6.2; Supervisor only forwards the events it needs to see.
 
-import { readFile, appendFile, mkdir, stat, readdir } from "node:fs/promises";
+import { readFile, appendFile, mkdir, stat, readdir, open, unlink } from "node:fs/promises";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -42,7 +42,6 @@ import {
 import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary.mjs";
 
 const execFileAsync = promisify(execFile);
-const lockAcquisitionsInFlight = new Set();
 
 // ---------------------------------------------------------------------------
 // Constants (§15 retry policy)
@@ -203,38 +202,130 @@ async function defaultIsAlive(pid) {
   }
 }
 
+function validLockRecord(record) {
+  return Boolean(record && typeof record === "object" && !Array.isArray(record)
+    && Number.isInteger(record.pid) && record.pid > 0
+    && typeof record.at === "string" && record.at.length > 0
+    && (record.host_id === undefined || (typeof record.host_id === "string" && record.host_id.length > 0)));
+}
+
+function lockRecordKey(record) {
+  return JSON.stringify({ pid: record.pid, at: record.at, host_id: record.host_id ?? null });
+}
+
+async function readLockRecord(lockPath) {
+  let raw;
+  try {
+    raw = await readFile(lockPath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return { present: false };
+    return { present: true, error: new Error("LOCK_STATE_UNREADABLE") };
+  }
+  try {
+    const record = JSON.parse(raw);
+    if (!validLockRecord(record)) throw new Error("LOCK_RECORD_INVALID");
+    return { present: true, record };
+  } catch {
+    return { present: true, error: new Error("LOCK_STATE_UNREADABLE") };
+  }
+}
+
+async function createExclusiveJson(filePath, value) {
+  let handle;
+  try {
+    handle = await open(filePath, "wx");
+    await handle.writeFile(JSON.stringify(value));
+    await handle.close();
+    return { created: true };
+  } catch (error) {
+    try { await handle?.close(); } catch { /* preserve the original result */ }
+    if (error?.code === "EEXIST") return { created: false };
+    return { created: false, error };
+  }
+}
+
+async function releaseTakeoverGuard(guardPath) {
+  try {
+    await unlink(guardPath);
+    return { ok: true };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { ok: true };
+    return { ok: false, error };
+  }
+}
+
 // Re-run every tick (not just at startup): if a live process other than us
 // owns the lock, we stop rather than fight it (duplicate scheduler
 // invocation). If nobody alive owns it (Supervisor was killed), we take it
-// over. Owning it also renews the timestamp.
+// over. Absent-lock acquisition uses an OS-level exclusive create. Stale or
+// explicitly authorized takeover is serialized by an exclusive sidecar guard
+// and a second owner reread, so two independent processes cannot both win.
 export async function acquireOrConfirmLock(paths, { pid, hostId = null, authorizedHostIds = [], isAlive, isoNow }) {
-  const lockKey = path.resolve(paths.lock);
-  if (lockAcquisitionsInFlight.has(lockKey)) return { owned: false, holder: null, reason: "LOCK_ACQUIRE_IN_FLIGHT" };
-  lockAcquisitionsInFlight.add(lockKey);
-  let current = null;
-  try {
-    try {
-      current = JSON.parse(await readFile(paths.lock, "utf8"));
-    } catch {
-      current = null;
-    }
-    if (current && current.pid !== pid) {
-      const authorized = Boolean(current.host_id && hostId && current.host_id !== hostId && authorizedHostIds.includes(hostId));
-      if (current.host_id && hostId && current.host_id !== hostId && !authorized) {
-        return { owned: false, holder: current.pid, reason: "HOST_IDENTITY_REJECTED" };
-      }
-      if (!authorized) {
-        const alive = await isAlive(current.pid);
-        if (alive) return { owned: false, holder: current.pid };
-      }
-    }
-    const record = { pid, at: isoNow };
-    if (hostId) record.host_id = hostId;
-    await writeFileAtomic(paths.lock, JSON.stringify(record));
-    return { owned: true, holder: pid };
-  } finally {
-    lockAcquisitionsInFlight.delete(lockKey);
+  const guardPath = `${path.resolve(paths.lock)}.takeover`;
+  if (!Number.isInteger(pid) || pid <= 0 || typeof isoNow !== "string" || !isoNow) {
+    return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
   }
+  const newRecord = { pid, at: isoNow, ...(hostId ? { host_id: hostId } : {}) };
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const guardState = await readLockRecord(guardPath);
+    if (guardState.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
+    if (guardState.present) {
+      const guard = guardState.record;
+      if (guard.pid === pid || await isAlive(guard.pid)) {
+        return { owned: false, holder: guard.pid, reason: "LOCK_ACQUIRE_IN_FLIGHT" };
+      }
+      const released = await releaseTakeoverGuard(guardPath);
+      if (!released.ok) return { owned: false, holder: guard.pid, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
+      continue;
+    }
+
+    const state = await readLockRecord(paths.lock);
+    if (state.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
+    if (!state.present) {
+      const created = await createExclusiveJson(paths.lock, newRecord);
+      if (created.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
+      if (created.created) return { owned: true, holder: pid };
+      continue;
+    }
+
+    const current = state.record;
+    const authorizedSecondHost = Boolean(current.host_id && hostId && current.host_id !== hostId && authorizedHostIds.includes(hostId));
+    if (current.host_id && hostId && current.host_id !== hostId && !authorizedSecondHost) {
+      return { owned: false, holder: current.pid, reason: "HOST_IDENTITY_REJECTED" };
+    }
+    if (current.pid === pid) {
+      await writeFileAtomic(paths.lock, JSON.stringify(newRecord));
+      return { owned: true, holder: pid };
+    }
+    if (!authorizedSecondHost && await isAlive(current.pid)) {
+      return { owned: false, holder: current.pid };
+    }
+
+    const guard = await createExclusiveJson(guardPath, newRecord);
+    if (guard.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
+    if (!guard.created) continue;
+    let guardReleased = false;
+    try {
+      const reread = await readLockRecord(paths.lock);
+      if (reread.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
+      if (reread.present && lockRecordKey(reread.record) !== lockRecordKey(current)) continue;
+      if (!reread.present) {
+        const created = await createExclusiveJson(paths.lock, newRecord);
+        if (created.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
+        if (!created.created) continue;
+      } else {
+        await writeFileAtomic(paths.lock, JSON.stringify(newRecord));
+      }
+      const released = await releaseTakeoverGuard(guardPath);
+      guardReleased = true;
+      if (!released.ok) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
+      return { owned: true, holder: pid };
+    } finally {
+      if (!guardReleased) await releaseTakeoverGuard(guardPath);
+    }
+  }
+  return { owned: false, holder: null, reason: "LOCK_ACQUIRE_RACE_UNRESOLVED" };
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +761,12 @@ function authorityFingerprint(value) {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
+function normalizeCurrentComments(value) {
+  const comments = Array.isArray(value) ? value : value?.comments;
+  if (!Array.isArray(comments)) throw new Error("GITHUB_COMMENTS_READBACK_AMBIGUOUS");
+  return comments;
+}
+
 // The Supervisor is only a resident transport loop. It rereads the durable
 // GitHub decision and delivery comments, delegates exact physical admission to
 // the adapter, and records transport outcomes. It never interprets the
@@ -688,22 +785,37 @@ export async function runResumeDeliveryCheck(ctx, {
     return { events, delivered: false, duplicate: false, reason: consumer.state };
   }
 
+  if (typeof cfg.readAuthority !== "function") {
+    const reason = "CONTROL_REQUIRED_AUTHORITY_READER_MISSING";
+    events.push({ type: "resume_delivery_authority_reader_missing", reason });
+    return { events, delivered: false, duplicate: false, reason };
+  }
+  if (typeof cfg.readComments !== "function") {
+    const reason = "CONTROL_REQUIRED_COMMENTS_READER_MISSING";
+    events.push({ type: "resume_delivery_comments_reader_missing", reason });
+    return { events, delivered: false, duplicate: false, reason };
+  }
+
   let initialAuthority = null;
-  if (cfg.readAuthority) {
-    try {
-      initialAuthority = await cfg.readAuthority({ phase: "start" });
-    } catch (error) {
-      const reason = "CONTROL_REQUIRED_AUTHORITY_READ_FAILED";
-      events.push({ type: "resume_delivery_authority_read_failed", reason, error: String(error?.message ?? error) });
-      return { events, delivered: false, duplicate: false, reason };
-    }
-    if (initialAuthority?.ok === false) {
-      const reason = initialAuthority.reason ?? "CONTROL_REQUIRED_AUTHORITY_READ_FAILED";
-      events.push({ type: "resume_delivery_authority_rejected", reason });
-      return { events, delivered: false, duplicate: false, reason };
-    }
+  try {
+    initialAuthority = await cfg.readAuthority({ phase: "start" });
+  } catch (error) {
+    const reason = "CONTROL_REQUIRED_AUTHORITY_READ_FAILED";
+    events.push({ type: "resume_delivery_authority_read_failed", reason, error: String(error?.message ?? error) });
+    return { events, delivered: false, duplicate: false, reason };
+  }
+  if (initialAuthority?.ok === false) {
+    const reason = initialAuthority.reason ?? "CONTROL_REQUIRED_AUTHORITY_READ_FAILED";
+    events.push({ type: "resume_delivery_authority_rejected", reason });
+    return { events, delivered: false, duplicate: false, reason };
   }
   const authority = initialAuthority?.value ?? initialAuthority ?? {};
+  const initialBindingCheck = validatePreSendAuthorityBinding(authority.binding, authority.binding);
+  if (!initialBindingCheck.ok) {
+    const reason = `CONTROL_REQUIRED_${initialBindingCheck.reason}`;
+    events.push({ type: "resume_delivery_authority_binding_invalid", reason });
+    return { events, delivered: false, duplicate: false, reason };
+  }
   const waitTuple = authority.waitTuple ?? cfg.waitTuple;
   const tupleCheck = validateWaitTuple(waitTuple);
   if (!tupleCheck.ok) {
@@ -730,9 +842,7 @@ export async function runResumeDeliveryCheck(ctx, {
 
   let comments;
   try {
-    comments = authority.comments ?? (cfg.readComments
-      ? await cfg.readComments({ waitTuple: tupleCheck.waitTuple, decision: parsed.decision })
-      : cfg.comments ?? []);
+    comments = normalizeCurrentComments(await cfg.readComments({ waitTuple: tupleCheck.waitTuple, decision: parsed.decision, phase: "initial" }));
   } catch (error) {
     const reason = "CONTROL_REQUIRED_COMMENTS_READ_FAILED";
     events.push({ type: "resume_delivery_comments_read_failed", reason, error: String(error?.message ?? error) });
@@ -749,25 +859,21 @@ export async function runResumeDeliveryCheck(ctx, {
   const timedQuotaState = cfg.timedQuotaState ?? (deliveryState?.wake_at ? deliveryState : null);
   const startingFingerprint = authorityFingerprint(authority.fingerprint ?? authority.binding ?? null);
   const beforeSend = async (details) => {
-    if (cfg.requireExactAuthorityBinding && !cfg.readAuthority) return { allow: false, reason: "AUTHORITY_REVALIDATION_MISSING" };
-    if (cfg.readAuthority) {
+    try {
       const latestRaw = await cfg.readAuthority({ phase: "before_send", logicalKey: details.logicalKey });
-      if (latestRaw?.ok === false) return { allow: false, reason: latestRaw.reason ?? "CONTROL_REQUIRED_AUTHORITY_REVALIDATION_FAILED" };
+      if (latestRaw?.ok === false) return { allow: false, decision: "CONTROL_REQUIRED", reason: latestRaw.reason ?? "CONTROL_REQUIRED_AUTHORITY_REVALIDATION_FAILED" };
       const latest = latestRaw?.value ?? latestRaw ?? {};
       const initialBinding = authority.binding;
       const latestBinding = latest.binding;
-      if (cfg.requireExactAuthorityBinding && (!initialBinding || !latestBinding)) return { allow: false, reason: "AUTHORITY_BINDING_MISSING" };
-      if (initialBinding && latestBinding) {
-        const bindingCheck = validatePreSendAuthorityBinding(initialBinding, latestBinding);
-        if (!bindingCheck.ok) return { allow: false, reason: bindingCheck.reason };
-      }
+      const bindingCheck = validatePreSendAuthorityBinding(initialBinding, latestBinding);
+      if (!bindingCheck.ok) return { allow: false, decision: "CONTROL_REQUIRED", reason: bindingCheck.reason };
       const latestFingerprint = authorityFingerprint(latest.fingerprint ?? latest.binding ?? null);
-      if (startingFingerprint !== null && latestFingerprint !== startingFingerprint) return { allow: false, reason: "AUTHORITY_CHANGED" };
-    }
-    if (cfg.readComments) {
-      const latestComments = await cfg.readComments({ waitTuple: tupleCheck.waitTuple, decision: parsed.decision, logicalKey: details.logicalKey });
+      if (startingFingerprint !== null && latestFingerprint !== startingFingerprint) return { allow: false, decision: "CONTROL_REQUIRED", reason: "AUTHORITY_CHANGED" };
+      const latestComments = normalizeCurrentComments(await cfg.readComments({ waitTuple: tupleCheck.waitTuple, decision: parsed.decision, logicalKey: details.logicalKey, phase: "before_send" }));
       const duplicate = findExistingDelivery(latestComments, details.logicalKey, cfg.protocol);
       if (duplicate) return { allow: false, decision: "NO_OP_DUPLICATE", reason: "NO_OP_DUPLICATE" };
+    } catch (error) {
+      return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_AUTHORITY_REVALIDATION_FAILED", error: String(error?.message ?? error) };
     }
     return { allow: true };
   };

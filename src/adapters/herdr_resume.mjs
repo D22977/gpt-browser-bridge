@@ -62,24 +62,43 @@ export function advanceTimedQuotaState(state, options = {}) {
   return { ...evaluated, state: nextState };
 }
 
-export function validateFreeRoute(route, policy) {
-  if (!route || typeof route !== "object") return { ok: false, reason: "MISSING_ROUTE" };
-  if (route.fallback !== undefined || route.fallbacks !== undefined) {
+function hasFallbackRoute(value) {
+  return Object.keys(value).some((key) => /fallback/i.test(key));
+}
+
+export function validateFreeRoutePolicy(policy) {
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) return { ok: false, reason: "MISSING_ROUTE" };
+  if (hasFallbackRoute(policy)) {
     return { ok: false, reason: "PAID_FALLBACK_FORBIDDEN" };
   }
-  if (route.provider !== policy?.provider) return { ok: false, reason: "WRONG_PROVIDER" };
-  if (route.model !== policy?.model) return { ok: false, reason: "WRONG_MODEL" };
+  if (typeof policy.provider !== "string" || !policy.provider || typeof policy.model !== "string" || !policy.model) {
+    return { ok: false, reason: "MISSING_ROUTE" };
+  }
+  if (policy.billing_class !== "FREE") return { ok: false, reason: "NON_FREE_ROUTE" };
+  if (policy.max_cost !== 0) return { ok: false, reason: "NONZERO_COST_ROUTE" };
+  return { ok: true, policy };
+}
+
+export function validateFreeRoute(route, policy) {
+  if (!route || typeof route !== "object" || Array.isArray(route)) return { ok: false, reason: "MISSING_ROUTE" };
+  const policyCheck = validateFreeRoutePolicy(policy);
+  if (!policyCheck.ok) return policyCheck;
+  if (hasFallbackRoute(route)) {
+    return { ok: false, reason: "PAID_FALLBACK_FORBIDDEN" };
+  }
+  if (route.provider !== policy.provider) return { ok: false, reason: "WRONG_PROVIDER" };
+  if (route.model !== policy.model) return { ok: false, reason: "WRONG_MODEL" };
   if (route.billing_class !== "FREE") return { ok: false, reason: "NON_FREE_ROUTE" };
   if (route.max_cost !== 0) return { ok: false, reason: "NONZERO_COST_ROUTE" };
   return { ok: true, route };
 }
 
-export function parseAuthoritativeQuotaEvidence(evidence, { observedAtMs = Date.now() } = {}) {
+export function parseAuthoritativeQuotaEvidence(evidence, { routePolicy = null, observedAtMs = Date.now() } = {}) {
   if (!evidence || typeof evidence !== "object" || evidence.authoritative !== true) {
     return { ok: false, reason: "QUOTA_EVIDENCE_NOT_AUTHORITATIVE" };
   }
   if (!Number.isFinite(observedAtMs)) return { ok: false, reason: "QUOTA_OBSERVED_TIME_INVALID" };
-  const route = validateFreeRoute(evidence, evidence);
+  const route = validateFreeRoute(evidence, routePolicy);
   if (!route.ok) return route;
   if (!evidence.provenance || typeof evidence.provenance !== "object" || typeof evidence.provenance.source !== "string" || !evidence.provenance.source) {
     return { ok: false, reason: "QUOTA_PROVENANCE_MISSING" };
@@ -114,9 +133,10 @@ export function scheduleQuotaRetry(state, evidence, { observedAtMs = Date.now(),
   if ([SEND_PENDING, UNCERTAIN_SEND].includes(state?.state) || state?.prompt_submitted === true || state?.physical_send_started === true) {
     return { ok: false, reason: "NO_BLIND_RETRY" };
   }
-  if (routePolicy) {
-    const route = validateFreeRoute(evidence, routePolicy);
-    if (!route.ok) return route;
+  const route = validateFreeRoute(evidence, routePolicy);
+  if (!route.ok) return route;
+  if (typeof evidence.wake_at !== "string" || !Number.isFinite(evidence.wake_at_ms) || !evidence.provenance || typeof evidence.provenance !== "object" || typeof evidence.provenance.source !== "string" || !evidence.provenance.source) {
+    return { ok: false, reason: "QUOTA_EVIDENCE_INVALID" };
   }
   if (!Number.isInteger(state?.retry_count) || state.retry_count < 0) return { ok: false, reason: "RETRY_STATE_INVALID" };
   if (state.retry_count >= 1) return { ok: false, reason: "RETRY_BUDGET_EXHAUSTED" };
@@ -540,6 +560,12 @@ function normalizeGateResult(result) {
   return { allow: true };
 }
 
+function normalizeCurrentComments(value) {
+  const comments = Array.isArray(value) ? value : value?.comments;
+  if (!Array.isArray(comments)) throw new ResumeDeliveryError("GITHUB_COMMENTS_READBACK_AMBIGUOUS");
+  return comments;
+}
+
 export async function deliverResumeOnce({
   waitTuple,
   decisionBody,
@@ -569,17 +595,28 @@ export async function deliverResumeOnce({
   const activeTimedQuotaState = timedStateBase && consumerHostId && !timedStateBase.consumer_host_id
     ? { ...timedStateBase, consumer_host_id: consumerHostId }
     : timedStateBase;
-  const activeQuotaRoutePolicy = quotaRoutePolicy ?? parsed.decision.quota_route;
+  const activeQuotaRoutePolicy = quotaRoutePolicy;
+  const localState = stateForLogicalKey(deliveryState, logicalKey);
+  if (localState?.state === DELIVERED) return { decision: "NO_OP_DUPLICATE", logical_key: logicalKey, existing_state: DELIVERED };
+  if (localState?.state === SEND_PENDING || localState?.state === UNCERTAIN_SEND) {
+    return { decision: "NO_BLIND_RETRY", logical_key: logicalKey, reason: localState.state };
+  }
   if (activeTimedQuotaState) {
     const rawNow = now();
     const nowMs = typeof rawNow === "number" ? rawNow : Date.parse(rawNow);
     const timed = evaluateTimedQuotaState(activeTimedQuotaState, { nowMs, hostId: consumerHostId, authorizedHostIds });
     if (timed.decision !== "SEND_ALLOWED") return { ...timed, logical_key: logicalKey };
-  }
-  const localState = stateForLogicalKey(deliveryState, logicalKey);
-  if (localState?.state === DELIVERED) return { decision: "NO_OP_DUPLICATE", logical_key: logicalKey, existing_state: DELIVERED };
-  if (localState?.state === SEND_PENDING || localState?.state === UNCERTAIN_SEND) {
-    return { decision: "NO_BLIND_RETRY", logical_key: logicalKey, reason: localState.state };
+    const policyCheck = validateFreeRoutePolicy(activeQuotaRoutePolicy);
+    if (!policyCheck.ok) return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: policyCheck.reason };
+    if (parsed.decision.quota_route) {
+      const decisionRouteCheck = validateFreeRoute(parsed.decision.quota_route, activeQuotaRoutePolicy);
+      if (!decisionRouteCheck.ok) return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: decisionRouteCheck.reason };
+    }
+  } else if (parsed.decision.quota_route) {
+    const policyCheck = validateFreeRoutePolicy(activeQuotaRoutePolicy);
+    if (!policyCheck.ok) return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: policyCheck.reason };
+    const decisionRouteCheck = validateFreeRoute(parsed.decision.quota_route, activeQuotaRoutePolicy);
+    if (!decisionRouteCheck.ok) return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: decisionRouteCheck.reason };
   }
   const existing = findExistingDelivery(comments, logicalKey, protocol);
   if (existing) return { decision: "NO_OP_DUPLICATE", logical_key: logicalKey, existing_receipt_id: existing.receipt_id, existing_state: existing.state };
@@ -619,7 +656,7 @@ export async function deliverResumeOnce({
     if (activeTimedQuotaState && quotaFailure && error?.prompt_submitted === false) {
       const rawNow = now();
       const observedAtMs = typeof rawNow === "number" ? rawNow : Date.parse(rawNow);
-      const quotaEvidence = parseAuthoritativeQuotaEvidence(error.quota_evidence, { observedAtMs });
+      const quotaEvidence = parseAuthoritativeQuotaEvidence(error.quota_evidence, { routePolicy: activeQuotaRoutePolicy, observedAtMs });
       const scheduled = scheduleQuotaRetry(activeTimedQuotaState, quotaEvidence, { observedAtMs, routePolicy: activeQuotaRoutePolicy });
       if (!scheduled.ok) {
         const controlState = { ...activeTimedQuotaState, logical_event_key: logicalKey, state: CONTROL_REQUIRED, reason: scheduled.reason };
@@ -707,9 +744,13 @@ export function validatePreSendAuthorityBinding(initial, latest) {
   if (!initial || !latest) return { ok: false, reason: "AUTHORITY_BINDING_MISSING" };
   const initialHead = initial.HEAD ?? initial.head;
   const latestHead = latest.HEAD ?? latest.head;
+  const initialTree = initial.tree ?? initial.tree_sha ?? initial.TREE;
+  const latestTree = latest.tree ?? latest.tree_sha ?? latest.TREE;
   const initialTarget = initial.target ?? {};
   const latestTarget = latest.target ?? {};
-  if (!initial.card_id || !latest.card_id || !Number.isInteger(initial.control_generation) || initial.control_generation <= 0 || !Number.isInteger(latest.control_generation) || latest.control_generation <= 0 || !Number.isInteger(initial.source_control_generation) || initial.source_control_generation <= 0 || !Number.isInteger(latest.source_control_generation) || latest.source_control_generation <= 0 || !initialHead || !latestHead || !initialTarget.agent_name || !latestTarget.agent_name || !initialTarget.executor_instance_id || !latestTarget.executor_instance_id || !initialTarget.surface || !latestTarget.surface) {
+  const requiredTargetFields = ["agent_name", "executor_instance_id", "surface", "pane_id", "agent_session", "workspace_id", "cwd", "branch", "HEAD"];
+  const hasText = (value) => typeof value === "string" && value.length > 0;
+  if (!hasText(initial.card_id) || !hasText(latest.card_id) || !Number.isInteger(initial.control_generation) || initial.control_generation <= 0 || !Number.isInteger(latest.control_generation) || latest.control_generation <= 0 || !Number.isInteger(initial.source_control_generation) || initial.source_control_generation <= 0 || !Number.isInteger(latest.source_control_generation) || latest.source_control_generation <= 0 || !hasText(initialHead) || !hasText(latestHead) || !hasText(initialTree) || !hasText(latestTree) || requiredTargetFields.some((key) => !hasText(initialTarget[key]) || !hasText(latestTarget[key]))) {
     return { ok: false, reason: "AUTHORITY_BINDING_MISSING" };
   }
   if (initial.card_id !== latest.card_id) return { ok: false, reason: "AUTHORITY_CARD_CHANGED" };
@@ -717,6 +758,7 @@ export function validatePreSendAuthorityBinding(initial, latest) {
     return { ok: false, reason: "AUTHORITY_GENERATION_CHANGED" };
   }
   if (initialHead !== latestHead) return { ok: false, reason: "AUTHORITY_HEAD_CHANGED" };
+  if (initialTree !== latestTree) return { ok: false, reason: "AUTHORITY_TREE_CHANGED" };
   if ((initial.branch ?? null) !== (latest.branch ?? null) || (initial.ref ?? null) !== (latest.ref ?? null)) {
     return { ok: false, reason: "AUTHORITY_REF_CHANGED" };
   }
@@ -732,17 +774,36 @@ export function createResidentHerdrConsumer(config = {}) {
       const consumer = classifyFutureConsumerBinding(config.futureConsumerBinding);
       if (!consumer.bound) return { decision: consumer.state, reason: consumer.state, delivered: false, duplicate: false };
 
+      if (typeof config.readAuthority !== "function") return { decision: CONTROL_REQUIRED, reason: "CONTROL_REQUIRED_AUTHORITY_READER_MISSING", delivered: false, duplicate: false };
+      if (typeof config.readComments !== "function") return { decision: CONTROL_REQUIRED, reason: "CONTROL_REQUIRED_COMMENTS_READER_MISSING", delivered: false, duplicate: false };
       let initialAuthority = null;
+      let authority;
+      let waitTuple;
+      let decisionBody;
+      let comments;
       try {
-        initialAuthority = config.readAuthority ? await config.readAuthority({ phase: "start" }) : null;
+        initialAuthority = await config.readAuthority({ phase: "start" });
       } catch (error) {
-        return { decision: "REJECTED", reason: "AUTHORITY_READ_FAILED", error: String(error?.message ?? error) };
+        return { decision: CONTROL_REQUIRED, reason: "CONTROL_REQUIRED_AUTHORITY_READ_FAILED", error: String(error?.message ?? error), delivered: false, duplicate: false };
       }
-      if (initialAuthority?.ok === false) return { decision: "REJECTED", reason: initialAuthority.reason ?? "AUTHORITY_READ_FAILED" };
-      const authority = initialAuthority?.value ?? initialAuthority ?? {};
-      const waitTuple = authority.waitTuple ?? config.waitTuple;
-      const decisionBody = authority.decisionBody ?? (config.readDecisionBody ? await config.readDecisionBody({ waitTuple }) : config.decisionBody);
-      const comments = authority.comments ?? (config.readComments ? await config.readComments({ waitTuple }) : config.comments ?? []);
+      if (initialAuthority?.ok === false) return { decision: CONTROL_REQUIRED, reason: initialAuthority.reason ?? "CONTROL_REQUIRED_AUTHORITY_READ_FAILED", delivered: false, duplicate: false };
+      authority = initialAuthority?.value ?? initialAuthority ?? {};
+      waitTuple = authority.waitTuple ?? config.waitTuple;
+      const initialBindingCheck = validatePreSendAuthorityBinding(authority.binding, authority.binding);
+      if (!initialBindingCheck.ok) return { decision: CONTROL_REQUIRED, reason: initialBindingCheck.reason, delivered: false, duplicate: false };
+      try {
+        decisionBody = authority.decisionBody ?? (config.readDecisionBody ? await config.readDecisionBody({ waitTuple }) : config.decisionBody);
+      } catch (error) {
+        return { decision: CONTROL_REQUIRED, reason: "CONTROL_REQUIRED_DECISION_READ_FAILED", error: String(error?.message ?? error), delivered: false, duplicate: false };
+      }
+      try {
+        comments = normalizeCurrentComments(await config.readComments({ waitTuple, phase: "initial" }));
+      } catch (error) {
+        const reason = error?.code === "GITHUB_COMMENTS_READBACK_AMBIGUOUS"
+          ? "CONTROL_REQUIRED_COMMENTS_READBACK_AMBIGUOUS"
+          : "CONTROL_REQUIRED_COMMENTS_READ_FAILED";
+        return { decision: CONTROL_REQUIRED, reason, error: String(error?.message ?? error), delivered: false, duplicate: false };
+      }
       const startingFingerprint = authorityFingerprint(authority.fingerprint ?? authority.binding ?? null);
       const deliveryState = config.readState ? await config.readState() : config.deliveryState ?? null;
       const timedQuotaState = config.timedQuotaState ?? (deliveryState?.wake_at ? deliveryState : null);
@@ -762,29 +823,26 @@ export function createResidentHerdrConsumer(config = {}) {
         consumerHostId: config.consumerHostId,
         authorizedHostIds: config.authorizedHostIds,
         beforeSend: async (details) => {
-          if (config.requireExactAuthorityBinding && !config.readAuthority) return { allow: false, reason: "AUTHORITY_REVALIDATION_MISSING" };
-          if (config.readAuthority) {
+          try {
             const latestRaw = await config.readAuthority({ phase: "before_send", logicalKey: details.logicalKey });
-            if (latestRaw?.ok === false) return { allow: false, reason: latestRaw.reason ?? "AUTHORITY_REVALIDATION_FAILED" };
+            if (latestRaw?.ok === false) return { allow: false, decision: CONTROL_REQUIRED, reason: latestRaw.reason ?? "CONTROL_REQUIRED_AUTHORITY_REVALIDATION_FAILED" };
             const latest = latestRaw?.value ?? latestRaw ?? {};
-            const initialBinding = authority.binding;
-            const latestBinding = latest.binding;
-            if (config.requireExactAuthorityBinding && (!initialBinding || !latestBinding)) return { allow: false, reason: "AUTHORITY_BINDING_MISSING" };
-            if (initialBinding && latestBinding) {
-              const bindingCheck = validatePreSendAuthorityBinding(initialBinding, latestBinding);
-              if (!bindingCheck.ok) return { allow: false, reason: bindingCheck.reason };
-            }
+            const bindingCheck = validatePreSendAuthorityBinding(authority.binding, latest.binding);
+            if (!bindingCheck.ok) return { allow: false, decision: CONTROL_REQUIRED, reason: bindingCheck.reason };
             const latestFingerprint = authorityFingerprint(latest.fingerprint ?? latest.binding ?? null);
             if (startingFingerprint !== null && latestFingerprint !== startingFingerprint) {
-              return { allow: false, reason: "AUTHORITY_CHANGED" };
+              return { allow: false, decision: CONTROL_REQUIRED, reason: "AUTHORITY_CHANGED" };
             }
-          }
-          if (config.readComments) {
-            const latestComments = await config.readComments({ waitTuple: details.waitTuple, logicalKey: details.logicalKey });
+            const latestComments = normalizeCurrentComments(await config.readComments({ waitTuple: details.waitTuple, logicalKey: details.logicalKey, phase: "before_send" }));
             const duplicate = findExistingDelivery(latestComments, details.logicalKey, config.protocol);
             if (duplicate) return { allow: false, decision: "NO_OP_DUPLICATE", reason: "NO_OP_DUPLICATE" };
+            return { allow: true };
+          } catch (error) {
+            const reason = error?.code === "GITHUB_COMMENTS_READBACK_AMBIGUOUS"
+              ? "CONTROL_REQUIRED_COMMENTS_READBACK_AMBIGUOUS"
+              : "CONTROL_REQUIRED_AUTHORITY_REVALIDATION_FAILED";
+            return { allow: false, decision: CONTROL_REQUIRED, reason };
           }
-          return { allow: true };
         },
       });
       return { ...result, delivered: result.decision === "DELIVERED", duplicate: result.decision === "NO_OP_DUPLICATE" };
