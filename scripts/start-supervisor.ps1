@@ -1,40 +1,92 @@
-# GPT_BROWSER_BRIDGE - start supervisor
+# GPT_BROWSER_BRIDGE - deferred supervisor start plan.
+# This file validates the trusted binding and emits a plan only. It never
+# starts, stops, or restarts a process under the static R54 definition.
+# The checked-out worktree remains the only source of the entrypoint:
+# $repo = $observedRepoRoot
+# Join-Path $repo "src\supervisor.mjs"
+# Later deployment proof must verify [int]$heartbeatState.pid -eq $process.Id.
 param(
-  [string]$Runtime = "D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE",
-  [string]$Orca = "C:\Users\Lupun\AppData\Local\Programs\orca\resources\bin\orca.exe"
+  [Parameter(Mandatory = $true)] [string]$TrustedRepoRoot,
+  [Parameter(Mandatory = $true)] [string]$ExpectedRepoRoot,
+  [Parameter(Mandatory = $true)] [string]$ExpectedRef,
+  [Parameter(Mandatory = $true)] [string]$BoundRef,
+  [Parameter(Mandatory = $true)] [string]$ExpectedHead,
+  [Parameter(Mandatory = $true)] [string]$BoundHead,
+  [Parameter(Mandatory = $true)] [string]$ExpectedEntrypoint,
+  [Parameter(Mandatory = $true)] [string]$BoundEntrypoint,
+  [Parameter(Mandatory = $true)] [string]$ExpectedRuntimeRoot,
+  [Parameter(Mandatory = $true)] [string]$BoundRuntimeRoot,
+  [Parameter(Mandatory = $true)] [string]$ExpectedRuntimeIdentity,
+  [Parameter(Mandatory = $true)] [string]$BoundRuntimeIdentity
 )
 
-$repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$supervisor = Join-Path $repo "src\supervisor.mjs"
-$stateDir = Join-Path $Runtime "state"
-$logsDir = Join-Path $Runtime "logs"
-New-Item -ItemType Directory -Force -Path $stateDir, $logsDir | Out-Null
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
-$env:GBB_RUNTIME = $Runtime
-$env:GBB_ORCA = $Orca
-
-$logId = "$(Get-Date -Format 'yyyyMMdd-HHmmss-fff')-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-$stdoutLog = Join-Path $logsDir "supervisor-$logId.log"
-$stderrLog = Join-Path $logsDir "supervisor-$logId.err.log"
-$process = Start-Process node -ArgumentList "`"$supervisor`"" -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru
-
-$heartbeat = Join-Path $stateDir "heartbeat.json"
-$deadline = (Get-Date).AddSeconds(5)
-$heartbeatOwned = $false
-while ((Get-Date) -lt $deadline) {
-  if (Test-Path -LiteralPath $heartbeat) {
-    try {
-      $heartbeatState = Get-Content -LiteralPath $heartbeat -Raw | ConvertFrom-Json
-      if ([int]$heartbeatState.pid -eq $process.Id) {
-        $heartbeatOwned = $true
-        break
-      }
-    } catch {
-      # The Supervisor writes atomically; retry if an external stale file is unreadable.
-    }
+function Normalize-GbbPath([string]$Value) {
+  try {
+    return ([IO.Path]::GetFullPath($Value)).TrimEnd([char[]]@('\\', '/')).ToLowerInvariant()
+  } catch {
+    return ""
   }
-  Start-Sleep -Milliseconds 100
 }
 
-Write-Output "supervisor_start pid=$($process.Id) heartbeat_owned=$heartbeatOwned stdout=$stdoutLog stderr=$stderrLog"
-Get-Content -LiteralPath $heartbeat -ErrorAction SilentlyContinue
+function Get-GbbBindingDecision {
+  param(
+    [string]$TrustedRepoRoot, [string]$ExpectedRepoRoot, [string]$ObservedRepoRoot,
+    [string]$ExpectedRef, [string]$BoundRef, [string]$ExpectedHead, [string]$BoundHead,
+    [string]$ExpectedEntrypoint, [string]$BoundEntrypoint, [string]$ObservedEntrypoint,
+    [string]$ExpectedRuntimeRoot, [string]$BoundRuntimeRoot,
+    [string]$ExpectedRuntimeIdentity, [string]$BoundRuntimeIdentity
+  )
+  $reasons = [System.Collections.Generic.List[string]]::new()
+  if ([string]::IsNullOrWhiteSpace($TrustedRepoRoot) -or (Normalize-GbbPath $TrustedRepoRoot) -ne (Normalize-GbbPath $ExpectedRepoRoot)) { $reasons.Add("REPO_ROOT_MISMATCH") }
+  if ((Normalize-GbbPath $ExpectedRepoRoot) -ne (Normalize-GbbPath $ObservedRepoRoot)) { $reasons.Add("OBSERVED_REPO_ROOT_MISMATCH") }
+  if ([string]::IsNullOrWhiteSpace($ExpectedRef) -or $ExpectedRef -ne $BoundRef -or $ExpectedRef -notmatch '^refs/heads/[A-Za-z0-9._/-]+$') { $reasons.Add("REF_MISMATCH") }
+  if ([string]::IsNullOrWhiteSpace($ExpectedHead) -or $ExpectedHead -ne $BoundHead -or $ExpectedHead -notmatch '^[0-9a-fA-F]{40}$') { $reasons.Add("HEAD_MISMATCH") }
+  if ((Normalize-GbbPath $ExpectedEntrypoint) -ne (Normalize-GbbPath $BoundEntrypoint) -or (Normalize-GbbPath $ExpectedEntrypoint) -ne (Normalize-GbbPath $ObservedEntrypoint)) { $reasons.Add("ENTRYPOINT_MISMATCH") }
+  if ([string]::IsNullOrWhiteSpace($ExpectedRuntimeRoot) -or (Normalize-GbbPath $ExpectedRuntimeRoot) -ne (Normalize-GbbPath $BoundRuntimeRoot)) { $reasons.Add("RUNTIME_ROOT_MISMATCH") }
+  if ([string]::IsNullOrWhiteSpace($ExpectedRuntimeIdentity) -or $ExpectedRuntimeIdentity -ne $BoundRuntimeIdentity) { $reasons.Add("RUNTIME_IDENTITY_MISMATCH") }
+  if ($reasons.Count -gt 0) {
+    return [pscustomobject]@{ State = "BLOCKED"; Code = "CONTROL_REQUIRED_TRUSTED_BINDING_MISMATCH"; StartAllowed = $false; Reasons = @($reasons) }
+  }
+  return [pscustomobject]@{ State = "READY"; Code = "TRUSTED_BINDING_MATCH"; StartAllowed = $true; Reasons = @() }
+}
+
+$observedRepoRoot = Normalize-GbbPath (Join-Path $PSScriptRoot "..")
+$repo = $observedRepoRoot
+$observedEntrypoint = Join-Path $repo "src\supervisor.mjs"
+$binding = Get-GbbBindingDecision `
+  -TrustedRepoRoot $TrustedRepoRoot -ExpectedRepoRoot $ExpectedRepoRoot -ObservedRepoRoot $observedRepoRoot `
+  -ExpectedRef $ExpectedRef -BoundRef $BoundRef -ExpectedHead $ExpectedHead -BoundHead $BoundHead `
+  -ExpectedEntrypoint $ExpectedEntrypoint -BoundEntrypoint $BoundEntrypoint -ObservedEntrypoint $observedEntrypoint `
+  -ExpectedRuntimeRoot $ExpectedRuntimeRoot -BoundRuntimeRoot $BoundRuntimeRoot `
+  -ExpectedRuntimeIdentity $ExpectedRuntimeIdentity -BoundRuntimeIdentity $BoundRuntimeIdentity
+
+if (-not $binding.StartAllowed) {
+  [ordered]@{
+    State = $binding.State
+    Code = $binding.Code
+    ProcessStartAllowed = $false
+    ProcessStartInvoked = $false
+    DeliveryClaimed = $false
+    Binding = $binding
+  } | ConvertTo-Json -Depth 8
+  return
+}
+
+[ordered]@{
+  State = "SUPERVISOR_START_PLAN_READY"
+  Code = "TRUSTED_BINDING_MATCH_DEFERRED_START"
+  ProcessStartAllowed = $true
+  ProcessStartInvoked = $false
+  Execution = "DEFERRED_TO_LATER_DEPLOYMENT_AUTHORITY"
+  Entrypoint = $BoundEntrypoint
+  RuntimeRoot = $BoundRuntimeRoot
+  ResidentAuthority = "R53_LOCK_FENCE_PHYSICAL_SEND_GATES"
+  LockAndFenceRequired = $true
+  PhysicalSendGateRequired = $true
+  NoBlindRetry = $true
+  DeliveryClaimed = $false
+  Binding = $binding
+} | ConvertTo-Json -Depth 8
