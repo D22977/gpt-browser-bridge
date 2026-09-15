@@ -69,6 +69,134 @@ function validProjectState(overrides = {}) {
   };
 }
 
+function extractPowerShellBlock(source, condition) {
+  const conditionStart = source.indexOf(`if (${condition})`);
+  assert.notEqual(conditionStart, -1, `missing PowerShell decision branch for ${condition}`);
+  const openBrace = source.indexOf("{", conditionStart);
+  assert.notEqual(openBrace, -1, `missing PowerShell block for ${condition}`);
+
+  let depth = 0;
+  let quote = null;
+  for (let index = openBrace; index < source.length; index += 1) {
+    const character = source[index];
+    if (quote) {
+      if (character === quote) {
+        if (source[index + 1] === quote) {
+          index += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+    } else if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(openBrace + 1, index);
+      }
+    }
+  }
+  assert.fail(`unterminated PowerShell block for ${condition}`);
+}
+
+function topLevelPowerShellKeywords(block) {
+  let depth = 0;
+  let quote = null;
+  let blockCommentDepth = 0;
+  const keywords = [];
+  for (let index = 0; index < block.length; index += 1) {
+    const character = block[index];
+    if (blockCommentDepth > 0) {
+      if (character === "<" && block[index + 1] === "#") {
+        blockCommentDepth += 1;
+        index += 1;
+      } else if (character === "#" && block[index + 1] === ">") {
+        blockCommentDepth -= 1;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (character === "`" && quote === '"') {
+        index += 1;
+        continue;
+      }
+      if (character === quote) {
+        if (block[index + 1] === quote) {
+          index += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "<" && block[index + 1] === "#") {
+      blockCommentDepth = 1;
+      index += 1;
+      continue;
+    }
+    if (character === "#") {
+      while (index < block.length && block[index] !== "\n") {
+        index += 1;
+      }
+      continue;
+    }
+    if (character === "{") {
+      depth += 1;
+      continue;
+    }
+    if (character === "}") {
+      depth -= 1;
+      continue;
+    }
+    if (depth === 0 && /[A-Za-z_]/.test(character)) {
+      const token = block.slice(index).match(/^[A-Za-z_][A-Za-z0-9_-]*/)[0];
+      keywords.push(token.toLowerCase());
+      index += token.length - 1;
+    }
+  }
+  return keywords;
+}
+
+function hasTopLevelPowerShellThrow(block) {
+  const keywords = topLevelPowerShellKeywords(block);
+  const throwIndex = keywords.indexOf("throw");
+  const exitIndex = keywords.findIndex((keyword) =>
+    ["return", "exit", "break", "continue"].includes(keyword)
+  );
+  return throwIndex !== -1 && (exitIndex === -1 || exitIndex > throwIndex);
+}
+
+function assertDirectPowerShellThrow(source, condition) {
+  const block = extractPowerShellBlock(source, condition);
+  assert.ok(
+    hasTopLevelPowerShellThrow(block),
+    `${condition} must contain a direct terminating throw`
+  );
+}
+
+function assertWorkerServicePattern(patternSource, positiveIdentities, negativeIdentity) {
+  const caseInsensitive = patternSource.startsWith("(?i)");
+  const expression = caseInsensitive ? patternSource.slice(4) : patternSource;
+  const pattern = new RegExp(expression, caseInsensitive ? "i" : undefined);
+  for (const identity of positiveIdentities) {
+    assert.ok(pattern.test(identity), `pattern must match canonical Worker identity ${identity}`);
+  }
+  assert.equal(
+    pattern.test(negativeIdentity),
+    false,
+    "pattern must reject a non-Worker control service identity"
+  );
+}
+
 test("job.json schema accepts a valid job", () => {
   const parsed = jobSchema.parse(validJob());
   assert.equal(parsed.job_id, uuid);
@@ -346,4 +474,206 @@ test("Reviewer canary workflow is a static, read-only, fail-closed runner contra
   assert.doesNotMatch(source, /(^|[\s`])(?:git|gh)\s+(?:add|commit|push|fetch|checkout|api)\b/i);
   assert.doesNotMatch(source, /(?:Start-Process|&\s*)(?:opencode|chrome|msedge|node)\b/i);
   assert.doesNotMatch(source, /secrets\.|GITHUB_TOKEN/);
+});
+
+test("Reviewer canary proves ancestry by walking parents upward with a distinct ancestor set", async () => {
+  const source = await readFile(
+    new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
+    "utf8"
+  );
+
+  const ancestorStart = source.indexOf("$ancestorIds");
+  const forbiddenStart = source.indexOf("$forbiddenAncestorProcesses");
+  assert.notEqual(ancestorStart, -1, "workflow must define an explicit ancestor set");
+  assert.notEqual(forbiddenStart, -1, "workflow must name forbidden ancestor evidence");
+  assert.ok(ancestorStart < forbiddenStart, "ancestor evidence must be built before it is evaluated");
+
+  const ancestorBlock = source.slice(ancestorStart, forbiddenStart);
+  assert.match(ancestorBlock, /HashSet\[int\]/, "cycle guard must be independent state");
+  assert.match(ancestorBlock, /\$parentId\s*=\s*\[int\]\$currentProcess\.ParentProcessId/);
+  assert.match(ancestorBlock, /while\s*\(\$parentId\s*-ne\s*0\)/);
+  assert.match(ancestorBlock, /\$parentProcess\s*=\s*\$processById\[\$parentId\]/);
+  assert.match(
+    ancestorBlock,
+    /if\s*\(-not\s*\$parentProcess\)\s*\{\s*throw\b/s,
+    "an unresolved parent must fail closed"
+  );
+  assert.match(
+    ancestorBlock,
+    /if\s*\(-not\s*\$cycleGuard\.Add\(\$parentId\)\)\s*\{\s*throw\b/s,
+    "an ancestry cycle must fail closed"
+  );
+  assert.match(
+    ancestorBlock,
+    /if\s*\(-not\s*\$ancestorIds\.Add\(\$parentId\)\)\s*\{\s*throw\b/s,
+    "duplicate ancestry state must fail closed"
+  );
+  assert.doesNotMatch(
+    ancestorBlock,
+    /if\s*\([^\n]+\)\s*\{\s*break\s*\}/s,
+    "only reaching PID 0 may terminate ancestry traversal successfully"
+  );
+  assert.match(ancestorBlock, /\$parentId\s*=\s*\[int\]\$parentProcess\.ParentProcessId/);
+  assert.match(
+    ancestorBlock,
+    /\$ancestorProcesses\s*=\s*@\(\$processes\s*\|\s*Where-Object\s*\{\s*\$ancestorIds\.Contains\(\[int\]\$_.ProcessId\)/
+  );
+  assert.doesNotMatch(ancestorBlock, /Where-Object\s+ParentProcessId\s+-eq/);
+  assert.doesNotMatch(source, /Where-Object\s+ParentProcessId\s+-eq\s+\$parentId/);
+  assert.doesNotMatch(source, /\$relatedIds|\$relatedProcesses|\$pending/);
+});
+
+test("Reviewer canary applies Worker services and forbidden process checks to ancestors and emits separate evidence", async () => {
+  const source = await readFile(
+    new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(
+    source,
+    /\$ancestorServices\s*=\s*@\(Get-CimInstance\s+Win32_Service\s*\|\s*Where-Object\s*\{\s*\$_.ProcessId\s+-in\s+@\(\$ancestorProcesses\.ProcessId\)/
+  );
+  const workerServiceStart = source.indexOf("$workerAncestorServices");
+  const evidenceStart = source.indexOf("Write-Output \"reviewer_canary_ancestry:");
+  assert.notEqual(workerServiceStart, -1, "workflow must classify ancestor services");
+  assert.ok(workerServiceStart < evidenceStart, "service classification must precede evidence");
+  const workerServiceBlock = source.slice(workerServiceStart, evidenceStart);
+  const workerIdentityPattern = /gbb-worker|gbbworker/i;
+  for (const field of ["Name", "DisplayName", "StartName", "PathName"]) {
+    const fieldPredicate = workerServiceBlock.match(
+      new RegExp(`\\$_\\.${field}\\s+-match\\s+'([^']+)'`, "i")
+    );
+    assert.ok(fieldPredicate, `Worker service classification must inspect ${field}`);
+    assert.match(
+      fieldPredicate[1],
+      workerIdentityPattern,
+      `${field} must match the Worker identity pattern`
+    );
+  }
+  const forbiddenStart = source.indexOf("$forbiddenAncestorProcesses");
+  const servicesStart = source.indexOf("$ancestorServices");
+  const forbiddenBlock = source.slice(forbiddenStart, servicesStart);
+  assert.match(
+    forbiddenBlock,
+    /@\(\$ancestorProcesses\s*\|\s*Where-Object/,
+    "forbidden process checks must remain ancestor-only"
+  );
+  const namePredicate = forbiddenBlock.match(/\$_.Name\s+-match\s+'([^']+)'/i);
+  assert.ok(namePredicate, "forbidden process identity must inspect Name");
+  assert.match(namePredicate[1], /orca/i, "ORCA must be rejected by Name independently");
+  assert.match(forbiddenBlock, /\$_.CommandLine\s+-match/i, "CommandLine remains an additional signal");
+  const forbiddenDecisionStart = source.indexOf("if ($forbiddenAncestorProcesses.Count -gt 0)");
+  assert.notEqual(forbiddenDecisionStart, -1, "forbidden ancestor detection must have a decision branch");
+  const forbiddenDecisionBlock = source.slice(forbiddenDecisionStart, servicesStart);
+  assert.match(
+    forbiddenDecisionBlock,
+    /\bthrow\b/,
+    "forbidden ancestor detection must terminate with throw"
+  );
+  const workerDecisionStart = source.indexOf("if ($workerAncestorServices.Count -gt 0)");
+  assert.notEqual(workerDecisionStart, -1, "Worker ancestor service detection must have a decision branch");
+  const workerDecisionBlock = source.slice(workerDecisionStart, evidenceStart);
+  assert.match(
+    workerDecisionBlock,
+    /\bthrow\b/,
+    "Worker ancestor service detection must terminate with throw"
+  );
+  assert.match(source, /ancestor_count=\$\(\$ancestorProcesses\.Count\)/);
+  assert.match(source, /worker_ancestor_service_count=\$\(\$workerAncestorServices\.Count\)/);
+  assert.match(source, /forbidden_ancestor_count=\$\(\$forbiddenAncestorProcesses\.Count\)/);
+  assert.doesNotMatch(source, /reviewer_canary_process_tree:.*ancestor/);
+});
+
+test("Reviewer canary contract binds each positive ancestor count to a direct terminating throw", async () => {
+  const source = await readFile(
+    new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
+    "utf8"
+  );
+
+  for (const condition of [
+    "$forbiddenAncestorProcesses.Count -gt 0",
+    "$workerAncestorServices.Count -gt 0",
+  ]) {
+    assertDirectPowerShellThrow(source, condition);
+  }
+
+  const unreachableThrow = `if ($forbiddenAncestorProcesses.Count -gt 0) {
+  $details = @()
+  if ($false) {
+    throw "unreachable"
+  }
+}`;
+  assert.throws(
+    () => assertDirectPowerShellThrow(unreachableThrow, "$forbiddenAncestorProcesses.Count -gt 0"),
+    /direct terminating throw/
+  );
+
+  const unrelatedThrow = `if ($workerAncestorServices.Count -gt 0) {
+  $details = @()
+}
+throw "unrelated"`;
+  assert.throws(
+    () => assertDirectPowerShellThrow(unrelatedThrow, "$workerAncestorServices.Count -gt 0"),
+    /direct terminating throw/
+  );
+
+  for (const condition of [
+    "$forbiddenAncestorProcesses.Count -gt 0",
+    "$workerAncestorServices.Count -gt 0",
+  ]) {
+    const returnBeforeThrow = `if (${condition}) {
+  return
+  throw "unreachable"
+}`;
+    assert.throws(
+      () => assertDirectPowerShellThrow(returnBeforeThrow, condition),
+      /direct terminating throw/
+    );
+
+    const commentOnlyThrow = `if (${condition}) {
+  # throw "comment-only"
+}`;
+    assert.throws(
+      () => assertDirectPowerShellThrow(commentOnlyThrow, condition),
+      /direct terminating throw/
+    );
+
+    const blockCommentOnlyThrow = `if (${condition}) {
+  <#
+    throw "comment-only"
+  #>
+}`;
+    assert.throws(
+      () => assertDirectPowerShellThrow(blockCommentOnlyThrow, condition),
+      /direct terminating throw/
+    );
+  }
+});
+
+test("Reviewer canary contract validates Worker service predicates by behavior", async () => {
+  const source = await readFile(
+    new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),
+    "utf8"
+  );
+  const serviceStart = source.indexOf("$workerAncestorServices");
+  const evidenceStart = source.indexOf("Write-Output \"reviewer_canary_ancestry:");
+  const serviceBlock = source.slice(serviceStart, evidenceStart);
+  const expectedIdentities = {
+    Name: ["GBBWorker", "gbb-worker"],
+    DisplayName: ["GBBWorker", "gbb-worker"],
+    StartName: ["GBBWorker"],
+    PathName: ["GBBWorker", "gbb-worker"],
+  };
+
+  for (const [field, identities] of Object.entries(expectedIdentities)) {
+    const predicate = serviceBlock.match(
+      new RegExp(`\\$_\\.${field}\\s+-match\\s+'([^']+)'`, "i")
+    );
+    assert.ok(predicate, `Worker service classification must inspect ${field}`);
+    assertWorkerServicePattern(predicate[1], identities, "ControlService");
+    assert.throws(
+      () => assertWorkerServicePattern("(?i)GBBWorkerX", identities, "ControlService"),
+      /canonical Worker identity/
+    );
+  }
 });
