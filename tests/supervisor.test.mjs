@@ -30,7 +30,7 @@ import {
   writeProjectState,
 } from "../src/supervisor.mjs";
 import { OrcaAdapter, resolveActiveTerminal } from "../src/adapters/orca_adapter.mjs";
-import { CURRENT_COMMENT_READBACK_PROTOCOL } from "../src/adapters/herdr_resume.mjs";
+import { CURRENT_COMMENT_READBACK_PROTOCOL, createHerdrPrompter } from "../src/adapters/herdr_resume.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE_ROOT = path.join(REPO_ROOT, "fixtures", "orca");
@@ -490,6 +490,118 @@ test("an authorized second host cannot replace a live owner without a completed 
   assert.deepEqual(result, { owned: false, holder: 111, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" });
 });
 
+test("cross-host takeover rejects an invisible remote owner and never reaches a prompt", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const owner = { pid: 111, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 6 };
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify(owner));
+  const waitTuple = {
+    source_terminal_receipt: 1629000001,
+    control_generation: 13,
+    card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01",
+    allowed_action_class: "ISSUE162_RESIDENT_CONSUMER",
+    executor_role: "WORKER",
+    target: { agent_name: "R49-EXECUTOR", executor_instance_id: "r49-executor-instance", surface: "HERDR", herdr_agent: "codex", herdr_workspace_id: "wR49", herdr_agent_kind: "codex" },
+  };
+  const decisionBody = `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 13
+decision_topic: ISSUE162_RESIDENT_CONSUMER
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt 1629000001
+source_control_generation: 13
+resume_card_id: GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01
+
+EXACT_TARGET
+executor_role: WORKER
+agent_name: R49-EXECUTOR
+executor_instance_id: r49-executor-instance
+surface: HERDR
+minimal_wake: Read GitHub directly.
+`;
+  let prompts = 0;
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 222,
+    hostId: "host-b",
+    authorizedHostIds: ["host-b"],
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    resumeDelivery: {
+      futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] },
+      waitTuple,
+      readAuthority: async () => ({ binding: residentAuthorityBinding() }),
+      decisionBody,
+      readComments: async () => completeComments(),
+      herdr: { prompt: async () => { prompts += 1; return {}; } },
+      publishReceipt: async () => ({ id: "never" }),
+    },
+  });
+  assert.equal(outcome.stop, true);
+  assert.equal(outcome.reason, "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN");
+  assert.equal(prompts, 0);
+  assert.deepEqual(await readJson(paths.lock), owner);
+});
+
+test("cross-host takeover rejects a liveness probe error and never reaches a prompt", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const owner = { pid: 111, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 6 };
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify(owner));
+  const waitTuple = {
+    source_terminal_receipt: 1629000001,
+    control_generation: 13,
+    card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01",
+    allowed_action_class: "ISSUE162_RESIDENT_CONSUMER",
+    executor_role: "WORKER",
+    target: { agent_name: "R49-EXECUTOR", executor_instance_id: "r49-executor-instance", surface: "HERDR", herdr_agent: "codex", herdr_workspace_id: "wR49", herdr_agent_kind: "codex" },
+  };
+  const decisionBody = `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 13
+decision_topic: ISSUE162_RESIDENT_CONSUMER
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt 1629000001
+source_control_generation: 13
+resume_card_id: GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01
+
+EXACT_TARGET
+executor_role: WORKER
+agent_name: R49-EXECUTOR
+executor_instance_id: r49-executor-instance
+surface: HERDR
+minimal_wake: Read GitHub directly.
+`;
+  let prompts = 0;
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 222,
+    hostId: "host-b",
+    authorizedHostIds: ["host-b"],
+    now: () => BASE_MS,
+    isAlive: async () => { throw new Error("tasklist unavailable"); },
+    resumeDelivery: {
+      futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] },
+      waitTuple,
+      readAuthority: async () => ({ binding: residentAuthorityBinding() }),
+      decisionBody,
+      readComments: async () => completeComments(),
+      herdr: { prompt: async () => { prompts += 1; return {}; } },
+      publishReceipt: async () => ({ id: "never" }),
+    },
+  });
+  assert.equal(outcome.stop, true);
+  assert.equal(outcome.reason, "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN");
+  assert.equal(prompts, 0);
+  assert.deepEqual(await readJson(paths.lock), owner);
+});
+
 test("a self-authored fencing handoff never permits a bounded second-host takeover while the owner is live", async (t) => {
   const { paths } = await tempRuntime(t);
   await mkdir(path.dirname(paths.lock), { recursive: true });
@@ -782,6 +894,204 @@ minimal_wake: Read GitHub directly.
   });
   assert.equal(prompts, 0);
   assert.equal(outcome.events.find((event) => event.type === "resume_delivery_control_required").reason, "CONTROL_REQUIRED_FENCING_REVALIDATION_FAILED");
+});
+
+test("Supervisor rejects a lease that expires during final target resolution before the real prompt", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const target = {
+    agent_name: "R49-EXECUTOR",
+    executor_instance_id: "r49-executor-instance",
+    surface: "HERDR",
+    herdr_agent: "codex",
+    herdr_workspace_id: "wR49",
+    herdr_pane_id: "wR49:p1",
+    herdr_agent_session: "r49",
+    herdr_agent_kind: "codex",
+    herdr_agent_provider: "herdr:codex",
+    herdr_model: "gpt-5.6-luna",
+    cwd: "D:\\fixtures\\r49",
+    branch: "worker/r49-fixture",
+    HEAD: "0123456789abcdef0123456789abcdef01234567",
+    require_visible: true,
+  };
+  const waitTuple = {
+    source_terminal_receipt: 1629000001,
+    control_generation: 13,
+    card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01",
+    allowed_action_class: "ISSUE162_RESIDENT_CONSUMER",
+    executor_role: "WORKER",
+    target,
+  };
+  const decisionBody = `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 13
+decision_topic: ISSUE162_RESIDENT_CONSUMER
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt 1629000001
+source_control_generation: 13
+resume_card_id: GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01
+
+EXACT_TARGET
+executor_role: WORKER
+agent_name: R49-EXECUTOR
+executor_instance_id: r49-executor-instance
+surface: HERDR
+minimal_wake: Read GitHub directly.
+`;
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({
+    pid: 41010,
+    host_id: "host-a",
+    at: "2026-08-01T01:00:00.000Z",
+    fence: 4,
+    lease_expires_at: "2026-08-01T01:00:30.000Z",
+  }));
+  const agent = {
+    agent: "R49-EXECUTOR",
+    name: "R49-EXECUTOR",
+    agent_session: { agent: "codex", value: "r49" },
+    agent_status: "idle",
+    agent_provider: "herdr:codex",
+    model: "gpt-5.6-luna",
+    cwd: "D:\\fixtures\\r49",
+    branch: "worker/r49-fixture",
+    HEAD: "0123456789abcdef0123456789abcdef01234567",
+    pane_id: "wR49:p1",
+    terminal_id: "term-r49",
+    workspace_id: "wR49",
+    visible: true,
+  };
+  const agentList = () => JSON.stringify({ id: "cli:agent:list", result: { agents: [agent] } });
+  let nowMs = BASE_MS;
+  let listCount = 0;
+  let promptCount = 0;
+  const prompter = createHerdrPrompter({
+    herdrExe: "herdr.exe",
+    exec: async (_exe, args) => {
+      if (args[1] === "list") {
+        listCount += 1;
+        if (listCount === 2) nowMs = BASE_MS + 60_000;
+        return { stdout: agentList() };
+      }
+      promptCount += 1;
+      return { stdout: "{}" };
+    },
+  });
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41010,
+    hostId: "host-a",
+    now: () => nowMs,
+    isAlive: async () => true,
+    resumeDelivery: {
+      futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] },
+      waitTuple,
+      readAuthority: async () => ({ binding: residentAuthorityBinding() }),
+      decisionBody,
+      readComments: async () => completeComments(),
+      herdr: prompter,
+      publishReceipt: async () => ({ id: "never" }),
+      quotaRoutePolicy: { provider: "herdr:codex", model: "gpt-5.6-luna", billing_class: "FREE", max_cost: 0 },
+      timedQuotaState: { state: "WAITING_FOR_WAKE", wake_at: "1970-01-01T00:00:00.000Z", retry_count: 0 },
+    },
+  });
+  assert.equal(outcome.events.find((event) => event.type === "resume_delivery_control_required").reason, "CONTROL_REQUIRED_FENCING_REVALIDATION_FAILED");
+  assert.equal(listCount, 2);
+  assert.equal(promptCount, 0);
+});
+
+test("old and new contenders reach the real prompt boundary but only the current fence can prompt", async (t) => {
+  const { paths } = await tempRuntime(t);
+  const target = {
+    agent_name: "R49-EXECUTOR",
+    executor_instance_id: "r49-executor-instance",
+    surface: "HERDR",
+    herdr_agent: "codex",
+    herdr_workspace_id: "wR49",
+    herdr_pane_id: "wR49:p1",
+    herdr_agent_session: "r49",
+    herdr_agent_kind: "codex",
+    herdr_agent_provider: "herdr:codex",
+    herdr_model: "gpt-5.6-luna",
+    cwd: "D:\\fixtures\\r49",
+    branch: "worker/r49-fixture",
+    HEAD: "0123456789abcdef0123456789abcdef01234567",
+    require_visible: true,
+  };
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({ pid: 111, host_id: "host-a", at: "2026-08-01T01:00:00.000Z", fence: 1 }));
+  const agent = {
+    agent: "R49-EXECUTOR",
+    name: "R49-EXECUTOR",
+    agent_session: { agent: "codex", value: "r49" },
+    agent_status: "idle",
+    agent_provider: "herdr:codex",
+    model: "gpt-5.6-luna",
+    cwd: "D:\\fixtures\\r49",
+    branch: "worker/r49-fixture",
+    HEAD: "0123456789abcdef0123456789abcdef01234567",
+    pane_id: "wR49:p1",
+    terminal_id: "term-r49",
+    workspace_id: "wR49",
+    visible: true,
+  };
+  const list = () => ({ stdout: JSON.stringify({ id: "cli:agent:list", result: { agents: [agent] } }) });
+  const logicalKey = "event-physical-boundary";
+  let promptCount = 0;
+  let oldLists = 0;
+  let newResult;
+  let newPrompter;
+  const newGate = () => claimPhysicalSendLease(paths, {
+    pid: 222,
+    hostId: "host-b",
+    fence: 2,
+    logicalKey,
+    nowMs: BASE_MS + 1_000,
+  });
+  newPrompter = createHerdrPrompter({
+    herdrExe: "herdr.exe",
+    exec: async (_exe, args) => {
+      if (args[1] === "list") return list();
+      promptCount += 1;
+      return { stdout: "{}" };
+    },
+  });
+  const oldPrompter = createHerdrPrompter({
+    herdrExe: "herdr.exe",
+    exec: async (_exe, args) => {
+      if (args[1] === "list") {
+        oldLists += 1;
+        if (oldLists === 2) {
+          // The test fixture models a separately authorized, durable fence transition.
+          await writeFile(paths.lock, JSON.stringify({ pid: 222, host_id: "host-b", at: "2026-08-01T01:00:02.000Z", fence: 2 }));
+          newResult = await newPrompter.prompt(target, "new contender", { beforePhysicalPrompt: newGate });
+        }
+        return list();
+      }
+      promptCount += 1;
+      return { stdout: "{}" };
+    },
+  });
+  const earlierGate = await confirmLockOwnership(paths, { pid: 111, hostId: "host-a", fence: 1, isoNow: "2026-08-01T01:00:01.000Z" });
+  assert.equal(earlierGate.owned, true);
+  await assert.rejects(
+    oldPrompter.prompt(target, "old contender", {
+      beforePhysicalPrompt: () => claimPhysicalSendLease(paths, {
+        pid: 111,
+        hostId: "host-a",
+        fence: 1,
+        logicalKey,
+        nowMs: BASE_MS + 1_000,
+      }),
+    }),
+    (error) => ["LOCK_NOT_OWNED", "CONTROL_REQUIRED_FENCE_CHANGED"].includes(error.code),
+  );
+  assert.equal(newResult.accepted, true);
+  assert.equal(promptCount, 1);
+  assert.equal(oldLists, 2);
 });
 
 test("resident delivery without fresh authority or paginated comment readers is CONTROL_REQUIRED", async (t) => {

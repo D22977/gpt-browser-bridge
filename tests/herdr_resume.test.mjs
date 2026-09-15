@@ -756,6 +756,71 @@ test("stable exact target receives one pointer prompt", async () => {
   assert.deepEqual(calls.find((args) => args[1] === "prompt"), ["agent", "prompt", "wR49:p1", "Read GitHub directly."]);
 });
 
+test("physical prompt boundary runs a fresh gate after final target resolution", async () => {
+  const events = [];
+  const prompter = createHerdrPrompter({
+    herdrExe: "herdr.exe",
+    exec: async (_exe, args) => {
+      if (args[1] === "list") {
+        events.push("list");
+        return { stdout: agentList([agent()]) };
+      }
+      events.push("prompt");
+      return { stdout: "{}" };
+    },
+  });
+
+  await assert.rejects(
+    prompter.prompt(waitTuple().target, "Read GitHub directly.", {
+      beforePhysicalPrompt: async () => {
+        events.push("final_gate");
+        return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_FENCING_REVALIDATION_FAILED" };
+      },
+    }),
+    (error) => error.code === "CONTROL_REQUIRED_FENCING_REVALIDATION_FAILED",
+  );
+  assert.deepEqual(events, ["list", "list", "final_gate"]);
+  assert.equal(events.filter((event) => event === "prompt").length, 0);
+});
+
+test("resident consumer applies its final authority gate at the physical prompt boundary", async () => {
+  const events = [];
+  const prompter = createHerdrPrompter({
+    herdrExe: "herdr.exe",
+    exec: async (_exe, args) => {
+      if (args[1] === "list") {
+        events.push("list");
+        return { stdout: agentList([agent()]) };
+      }
+      events.push("prompt");
+      return { stdout: "{}" };
+    },
+  });
+  const result = await createResidentHerdrConsumer({
+    futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: [CONTROL_DECISION_PROTOCOL] },
+    waitTuple: waitTuple(),
+    decisionBody: decisionBody(),
+    readAuthority: async ({ phase }) => {
+      events.push(`authority:${phase}`);
+      return { fingerprint: phase === "before_physical_send" ? "authority-replaced" : "authority-v1", binding: authorityBinding() };
+    },
+    readComments: async ({ phase }) => {
+      events.push(`comments:${phase}`);
+      return completeComments();
+    },
+    timedQuotaState: { state: "WAITING_FOR_WAKE", wake_at: "1970-01-01T00:00:00.000Z", retry_count: 0 },
+    quotaRoutePolicy: FREE_ROUTE_POLICY,
+    herdr: prompter,
+    publishReceipt: async () => ({ id: "never" }),
+    now: () => "2026-09-14T00:00:00.000Z",
+  }).consumeOnce();
+
+  assert.equal(result.decision, "CONTROL_REQUIRED");
+  assert.equal(result.reason, "AUTHORITY_CHANGED");
+  assert.equal(events.filter((event) => event === "prompt").length, 0);
+  assert.ok(events.indexOf("authority:before_physical_send") > events.lastIndexOf("list"));
+});
+
 test("duplicate durable delivery is NO_OP_DUPLICATE", async () => {
   const tuple = waitTuple();
   const body = decisionBody();
@@ -842,7 +907,7 @@ test("resident consumer rereads authority before send and persists delivery stat
     waitTuple: tuple,
     readAuthority: async ({ phase }) => { authorityPhases.push(phase); return { fingerprint: "authority-v1", binding: authorityBinding() }; },
     readDecisionBody: async () => decisionBody(),
-    readComments: async ({ logicalKey }) => { commentsPhases.push(logicalKey ? "before_send" : "initial"); return completeComments(); },
+    readComments: async ({ phase }) => { commentsPhases.push(phase); return completeComments(); },
     readState: async () => null,
     writeState: async (state) => { states.push(state.state); },
     herdr: { prompt: async () => ({ accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: SESSION, cwd: CWD, branch: BRANCH, HEAD, visible: true }) },
@@ -851,8 +916,8 @@ test("resident consumer rereads authority before send and persists delivery stat
   });
   const result = await consumer.consumeOnce();
   assert.equal(result.decision, "DELIVERED");
-  assert.deepEqual(authorityPhases, ["start", "before_send"]);
-  assert.deepEqual(commentsPhases, ["initial", "before_send"]);
+  assert.deepEqual(authorityPhases, ["start", "before_send", "before_physical_send"]);
+  assert.deepEqual(commentsPhases, ["initial", "before_send", "before_physical_send"]);
   assert.deepEqual(states, ["SEND_PENDING", "DELIVERED"]);
 });
 

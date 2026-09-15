@@ -308,9 +308,28 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
     }
 
     const current = state.record;
-    const authorizedSecondHost = Boolean(current.host_id && hostId && current.host_id !== hostId && authorizedHostIds.includes(hostId));
-    if (current.host_id && hostId && current.host_id !== hostId && !authorizedSecondHost) {
-      return { owned: false, holder: current.pid, reason: "HOST_IDENTITY_REJECTED" };
+    const currentHostId = current.host_id ?? null;
+    const requestedHostId = hostId ?? null;
+    const hostMismatch = currentHostId !== requestedHostId;
+    const authorizedSecondHost = Boolean(currentHostId && requestedHostId && hostMismatch && authorizedHostIds.includes(requestedHostId));
+    if (hostMismatch && !authorizedSecondHost) {
+      return {
+        owned: false,
+        holder: current.pid,
+        reason: currentHostId && requestedHostId ? "HOST_IDENTITY_REJECTED" : "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN",
+      };
+    }
+    if (authorizedSecondHost) {
+      let liveOwner;
+      try {
+        liveOwner = typeof isAlive === "function" ? await isAlive(current.pid) : null;
+      } catch {
+        return { owned: false, holder: current.pid, reason: "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN" };
+      }
+      if (!liveOwner) {
+        return { owned: false, holder: current.pid, reason: "CONTROL_REQUIRED_CROSS_HOST_LIVENESS_UNPROVEN" };
+      }
+      return { owned: false, holder: current.pid, reason: "CONTROL_REQUIRED_LIVE_OWNER_UNFENCED" };
     }
     if (current.pid === pid) {
       if (!currentLeaseIsValid(current, isoNow)) {
@@ -391,10 +410,13 @@ async function releasePhysicalSendLease(leasePath, record) {
 }
 
 export async function claimPhysicalSendLease(paths, { pid, hostId = null, fence, logicalKey, nowMs }) {
-  if (!Number.isInteger(fence) || fence <= 0 || typeof logicalKey !== "string" || !logicalKey || !Number.isFinite(nowMs)) {
+  const readNowMs = typeof nowMs === "function" ? nowMs : () => nowMs;
+  let firstNowMs;
+  try { firstNowMs = readNowMs(); } catch { firstNowMs = Number.NaN; }
+  if (!Number.isInteger(fence) || fence <= 0 || typeof logicalKey !== "string" || !logicalKey || !Number.isFinite(firstNowMs)) {
     return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_FENCE_CHANGED" };
   }
-  const isoNow = formatIso(nowMs);
+  const isoNow = formatIso(firstNowMs);
   const state = await readLockRecord(paths.lock);
   if (state.error) return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
   if (!state.present || state.record.pid !== pid || (state.record.host_id ?? null) !== (hostId ?? null)) {
@@ -413,8 +435,10 @@ export async function claimPhysicalSendLease(paths, { pid, hostId = null, fence,
   if (created.error) return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_PHYSICAL_SEND_LEASE_UNREADABLE" };
   if (!created.created) return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_PHYSICAL_SEND_LEASE_HELD" };
 
+  let finalNowMs;
+  try { finalNowMs = readNowMs(); } catch { finalNowMs = Number.NaN; }
   const reread = await readLockRecord(paths.lock);
-  if (reread.error || !reread.present || reread.record.pid !== pid || (reread.record.host_id ?? null) !== (hostId ?? null) || lockFence(reread.record) !== fence || !currentLeaseIsValid(reread.record, formatIso(nowMs))) {
+  if (!Number.isFinite(finalNowMs) || reread.error || !reread.present || reread.record.pid !== pid || (reread.record.host_id ?? null) !== (hostId ?? null) || lockFence(reread.record) !== fence || !currentLeaseIsValid(reread.record, formatIso(finalNowMs))) {
     await releasePhysicalSendLease(leasePath, lease);
     return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_FENCE_CHANGED" };
   }
@@ -973,7 +997,11 @@ export async function runResumeDeliveryCheck(ctx, {
   };
   const beforePhysicalSend = async (details) => {
     const gate = await beforeSend(details);
-    if (!gate.allow || typeof claimPhysicalSend !== "function") return gate;
+    if (!gate.allow) return gate;
+    if (cfg.herdr?.physicalPromptBoundary === true && typeof claimPhysicalSend !== "function") {
+      return { allow: false, decision: "CONTROL_REQUIRED", reason: "CONTROL_REQUIRED_PHYSICAL_SEND_LEASE_BINDING_MISSING" };
+    }
+    if (typeof claimPhysicalSend !== "function") return gate;
     try {
       const claim = await claimPhysicalSend(details);
       if (claim?.allow === false) return claim;
@@ -1198,7 +1226,7 @@ export async function runLoopOnce(ctxIn) {
         hostId: ctx.hostId,
         fence: lock.fence,
         logicalKey: details.logicalKey,
-        nowMs: ctx.now(),
+        nowMs: () => ctx.now(),
       }),
     });
     tickEvents.push(...resume.events);

@@ -514,8 +514,9 @@ export function createHerdrPrompter({ herdrExe = DEFAULT_HERDR_EXE, exec = defau
     return parseHerdrAgentList(stdout);
   };
   return {
+    physicalPromptBoundary: true,
     listAgents,
-    prompt: async (target, text, { quotaRoutePolicy = null } = {}) => {
+    prompt: async (target, text, { quotaRoutePolicy = null, beforePhysicalPrompt = null } = {}) => {
       const first = resolveExactHerdrTarget(target, await listAgents());
       if (!first.ok) throw new ResumeDeliveryError(first.reason);
       const second = resolveExactHerdrTarget(target, await listAgents());
@@ -524,6 +525,20 @@ export function createHerdrPrompter({ herdrExe = DEFAULT_HERDR_EXE, exec = defau
       if (quotaRoutePolicy) {
         const routeCheck = validateFreeRouteAgainstPhysicalTarget(quotaRoutePolicy, second.target);
         if (!routeCheck.ok) throw new ResumeDeliveryError(routeCheck.reason);
+      }
+      if (typeof beforePhysicalPrompt === "function") {
+        let gate;
+        try {
+          gate = normalizeGateResult(await beforePhysicalPrompt({ target: second.target, text }));
+        } catch (error) {
+          throw Object.assign(new ResumeDeliveryError("CONTROL_REQUIRED_PHYSICAL_PROMPT_GATE_FAILED", { cause: error }), { physical_prompt_gate: true });
+        }
+        if (!gate.allow) {
+          throw Object.assign(new ResumeDeliveryError(gate.reason ?? "CONTROL_REQUIRED_PHYSICAL_PROMPT_GATE_FAILED"), {
+            physical_prompt_gate: true,
+            physical_prompt_decision: gate.decision ?? CONTROL_REQUIRED,
+          });
+        }
       }
       try {
         await exec(herdrExe, ["agent", "prompt", second.target.pane_id, text]);
@@ -691,7 +706,20 @@ export async function deliverResumeOnce({
   }
 
   let releasePhysicalSend = null;
-  if (beforePhysicalSend) {
+  const physicalPromptBoundary = herdr?.physicalPromptBoundary === true;
+  const beforePhysicalPrompt = beforePhysicalSend && physicalPromptBoundary
+    ? async ({ target }) => {
+        const physicalGate = normalizeGateResult(await beforePhysicalSend({
+          logicalKey,
+          waitTuple: tuple,
+          decision: parsed.decision,
+          target,
+        }));
+        if (physicalGate.allow) releasePhysicalSend = typeof physicalGate.release === "function" ? physicalGate.release : null;
+        return physicalGate;
+      }
+    : null;
+  if (beforePhysicalSend && !physicalPromptBoundary) {
     let physicalGate;
     try {
       physicalGate = normalizeGateResult(await beforePhysicalSend({ logicalKey, waitTuple: tuple, decision: parsed.decision }));
@@ -706,10 +734,22 @@ export async function deliverResumeOnce({
 
   let evidence;
   try {
-    evidence = await herdr.prompt(tuple.target, matched.pointer, {
+    const promptOptions = {
       quotaRoutePolicy: activeTimedQuotaState || parsed.decision.quota_route ? activeQuotaRoutePolicy : null,
-    });
+    };
+    if (beforePhysicalPrompt) promptOptions.beforePhysicalPrompt = beforePhysicalPrompt;
+    evidence = await herdr.prompt(tuple.target, matched.pointer, promptOptions);
   } catch (error) {
+    if (error?.physical_prompt_gate === true) {
+      try { await releasePhysicalSend?.(); } catch (releaseError) {
+        return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: "CONTROL_REQUIRED_PHYSICAL_SEND_LEASE_UNREADABLE", error: String(releaseError?.message ?? releaseError) };
+      }
+      return {
+        decision: error?.physical_prompt_decision ?? CONTROL_REQUIRED,
+        logical_key: logicalKey,
+        reason: error?.code ?? "CONTROL_REQUIRED_PHYSICAL_PROMPT_GATE_FAILED",
+      };
+    }
     const quotaFailure = error?.code === "PROVIDER_QUOTA" || error?.quota === true;
     if (activeTimedQuotaState && quotaFailure && error?.prompt_submitted === false) {
       try { await releasePhysicalSend?.(); } catch (releaseError) {
@@ -903,6 +943,43 @@ export function createResidentHerdrConsumer(config = {}) {
               ? "CONTROL_REQUIRED_COMMENTS_READBACK_AMBIGUOUS"
               : "CONTROL_REQUIRED_AUTHORITY_REVALIDATION_FAILED";
             return { allow: false, decision: CONTROL_REQUIRED, reason };
+          }
+        },
+        beforePhysicalSend: async (details) => {
+          try {
+            const latestRaw = await config.readAuthority({ phase: "before_physical_send", logicalKey: details.logicalKey, target: details.target });
+            if (latestRaw?.ok === false) return { allow: false, decision: CONTROL_REQUIRED, reason: latestRaw.reason ?? "CONTROL_REQUIRED_AUTHORITY_REVALIDATION_FAILED" };
+            const latest = latestRaw?.value ?? latestRaw ?? {};
+            const bindingCheck = validatePreSendAuthorityBinding(authority.binding, latest.binding);
+            if (!bindingCheck.ok) return { allow: false, decision: CONTROL_REQUIRED, reason: bindingCheck.reason };
+            const latestFingerprint = authorityFingerprint(latest.fingerprint ?? latest.binding ?? null);
+            if (startingFingerprint !== null && latestFingerprint !== startingFingerprint) {
+              return { allow: false, decision: CONTROL_REQUIRED, reason: "AUTHORITY_CHANGED" };
+            }
+            const latestComments = normalizeCurrentComments(await config.readComments({ waitTuple: details.waitTuple, logicalKey: details.logicalKey, phase: "before_physical_send" }));
+            const duplicate = findExistingDelivery(latestComments, details.logicalKey, config.protocol);
+            if (duplicate) return { allow: false, decision: "NO_OP_DUPLICATE", reason: "NO_OP_DUPLICATE" };
+            const rawNow = typeof config.now === "function" ? config.now() : Date.now();
+            const nowMs = typeof rawNow === "number" ? rawNow : Date.parse(rawNow);
+            if (!Number.isFinite(nowMs)) return { allow: false, decision: CONTROL_REQUIRED, reason: "CONTROL_REQUIRED_PHYSICAL_SEND_TIME_UNREADABLE" };
+            if (config.herdr?.physicalPromptBoundary === true && typeof config.claimPhysicalSend !== "function") {
+              return { allow: false, decision: CONTROL_REQUIRED, reason: "CONTROL_REQUIRED_PHYSICAL_SEND_LEASE_BINDING_MISSING" };
+            }
+            if (typeof config.revalidateOwnership === "function") {
+              const ownership = await config.revalidateOwnership({ ...details, nowMs });
+              if (!ownership?.owned) return { allow: false, decision: CONTROL_REQUIRED, reason: ownership?.reason ?? "CONTROL_REQUIRED_LOCK_NOT_OWNED" };
+            }
+            if (typeof config.claimPhysicalSend === "function") {
+              const claimRawNow = typeof config.now === "function" ? config.now() : Date.now();
+              const claimNowMs = typeof claimRawNow === "number" ? claimRawNow : Date.parse(claimRawNow);
+              if (!Number.isFinite(claimNowMs)) return { allow: false, decision: CONTROL_REQUIRED, reason: "CONTROL_REQUIRED_PHYSICAL_SEND_TIME_UNREADABLE" };
+              const claim = await config.claimPhysicalSend({ ...details, nowMs: claimNowMs });
+              if (claim?.allow === false) return claim;
+              return { allow: true, release: claim?.release };
+            }
+            return { allow: true };
+          } catch (error) {
+            return { allow: false, decision: CONTROL_REQUIRED, reason: "CONTROL_REQUIRED_PHYSICAL_PROMPT_GATE_FAILED", error: String(error?.message ?? error) };
           }
         },
       });
