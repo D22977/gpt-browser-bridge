@@ -367,11 +367,27 @@ export function findExistingDelivery(comments, logicalKey, protocol = HERDR_RESU
     const body = String(comment?.body ?? "");
     const firstLine = splitLines(body)[0]?.trim();
     if (firstLine !== protocol) continue;
-    const match = /(?:^|\n)logical_event_key:\s*(\S+)/.exec(body);
-    if (match?.[1] !== logicalKey) continue;
-    const state = /(?:^|\n)state:\s*(\S+)/.exec(body)?.[1] ?? null;
-    if (!["CONSUMED_STARTED", "UNCERTAIN_SEND"].includes(state)) continue;
-    return { receipt_id: comment?.id ?? null, created_at: comment?.created_at ?? null, state };
+    const readField = (name) => new RegExp(`(?:^|\\n)${name}:\\s*(\\S+)`).exec(body)?.[1] ?? null;
+    const fields = {
+      logical_event_key: readField("logical_event_key"),
+      state: readField("state"),
+      source_terminal_receipt: readField("source_terminal_receipt"),
+      control_generation: readField("control_generation"),
+      card_id: readField("card_id"),
+      allowed_action_class: readField("allowed_action_class"),
+      target_agent_name: readField("target_agent_name"),
+      target_executor_instance_id: readField("target_executor_instance_id"),
+      target_surface: readField("target_surface"),
+      target_herdr_agent: readField("target_herdr_agent"),
+      target_herdr_workspace_id: readField("target_herdr_workspace_id"),
+      target_herdr_pane_id: readField("target_herdr_pane_id"),
+      target_herdr_agent_session: readField("target_herdr_agent_session"),
+    };
+    if (fields.logical_event_key !== logicalKey) continue;
+    const state = fields.state;
+    // F006: Recognize SEND_PENDING as a durable no-resend boundary
+    if (!["CONSUMED_STARTED", "UNCERTAIN_SEND", "SEND_PENDING"].includes(state)) continue;
+    return { receipt_id: comment?.id ?? null, created_at: comment?.created_at ?? null, ...fields };
   }
   return null;
 }
@@ -590,6 +606,27 @@ function stateForLogicalKey(deliveryState, logicalKey) {
   return deliveryState;
 }
 
+export function enrichWaitTupleTarget(waitTuple, authorityBinding) {
+  const target = waitTuple?.target ?? {};
+  const boundTarget = authorityBinding?.target ?? {};
+  const choose = (current, bound) => current ?? bound;
+  return {
+    ...waitTuple,
+    target: {
+      ...target,
+      agent_name: choose(target.agent_name, boundTarget.agent_name),
+      executor_instance_id: choose(target.executor_instance_id, boundTarget.executor_instance_id),
+      surface: choose(target.surface, boundTarget.surface),
+      herdr_workspace_id: choose(target.herdr_workspace_id, boundTarget.workspace_id),
+      herdr_pane_id: choose(target.herdr_pane_id, boundTarget.pane_id),
+      herdr_agent_session: choose(target.herdr_agent_session, boundTarget.agent_session),
+      cwd: choose(target.cwd, boundTarget.cwd),
+      branch: choose(target.branch, boundTarget.branch),
+      HEAD: choose(target.HEAD, boundTarget.HEAD),
+    },
+  };
+}
+
 function normalizeGateResult(result) {
   if (result === false) return { allow: false, reason: "AUTHORITY_REVALIDATION_FAILED" };
   if (result && result.allow === false) return result;
@@ -634,6 +671,7 @@ export async function deliverResumeOnce({
   persistDeliveryState = null,
   beforeSend = null,
   beforePhysicalSend = null,
+  readComments = null,
 }) {
   const tupleCheck = validateWaitTuple(waitTuple);
   if (!tupleCheck.ok) return { decision: "REJECTED", reason: "INVALID_WAIT_TUPLE", errors: tupleCheck.errors };
@@ -653,6 +691,10 @@ export async function deliverResumeOnce({
   if (localState?.state === DELIVERED) return { decision: "NO_OP_DUPLICATE", logical_key: logicalKey, existing_state: DELIVERED };
   if (localState?.state === SEND_PENDING || localState?.state === UNCERTAIN_SEND) {
     return { decision: "NO_BLIND_RETRY", logical_key: logicalKey, reason: localState.state };
+  }
+  const physicalPromptBoundary = herdr?.physicalPromptBoundary === true;
+  if (physicalPromptBoundary && typeof readComments !== "function") {
+    return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: "SEND_PENDING_READBACK_REQUIRED" };
   }
   if (activeTimedQuotaState) {
     const rawNow = now();
@@ -705,8 +747,68 @@ export async function deliverResumeOnce({
     }
   }
 
+  // F006: Publish typed SEND_PENDING GitHub receipt before physical prompt.
+  // Read back the exact matching marker. If publication fails, return
+  // CONTROL_REQUIRED and never prompt. A fresh consumer that loses local
+  // state can still find this durable marker and return NO_BLIND_RETRY.
+  // Physical Herdr production paths must provide readComments; the guard above
+  // prevents a prompt when the durable readback transport is unavailable.
+  const sendPendingReceipt = {
+    schema: protocol,
+    protocol,
+    state: SEND_PENDING,
+    decision: "NO_BLIND_RETRY",
+    source_terminal_receipt: tuple.source_terminal_receipt,
+    control_generation: tuple.control_generation,
+    card_id: tuple.card_id,
+    allowed_action_class: tuple.allowed_action_class,
+    logical_event_key: logicalKey,
+    target_agent_name: tuple.target.agent_name,
+    target_executor_instance_id: tuple.target.executor_instance_id,
+    target_surface: tuple.target.surface,
+    target_herdr_agent: tuple.target.herdr_agent,
+    target_herdr_workspace_id: tuple.target.herdr_workspace_id,
+    target_herdr_pane_id: tuple.target.herdr_pane_id,
+    target_herdr_agent_session: tuple.target.herdr_agent_session,
+    delivery_count: 0,
+    delivery_status: SEND_PENDING,
+    created_at: now(),
+    user_relay_count: 0,
+  };
+  try {
+    await publishReceipt(sendPendingReceipt);
+  } catch (error) {
+    return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: "SEND_PENDING_PUBLISH_FAILED", error: String(error?.message ?? error) };
+  }
+  if (typeof readComments === "function") {
+    try {
+      const readbackComments = normalizeCurrentComments(
+        await readComments({ waitTuple: tuple, logicalKey, phase: "send_pending_readback" })
+      );
+      const readbackMatch = findExistingDelivery(readbackComments, logicalKey, protocol);
+      const expectedFields = {
+        state: SEND_PENDING,
+        source_terminal_receipt: String(sendPendingReceipt.source_terminal_receipt),
+        control_generation: String(sendPendingReceipt.control_generation),
+        card_id: sendPendingReceipt.card_id,
+        allowed_action_class: sendPendingReceipt.allowed_action_class,
+        target_agent_name: sendPendingReceipt.target_agent_name,
+        target_executor_instance_id: sendPendingReceipt.target_executor_instance_id,
+        target_surface: sendPendingReceipt.target_surface,
+        target_herdr_agent: sendPendingReceipt.target_herdr_agent,
+        target_herdr_workspace_id: sendPendingReceipt.target_herdr_workspace_id,
+        target_herdr_pane_id: sendPendingReceipt.target_herdr_pane_id,
+        target_herdr_agent_session: sendPendingReceipt.target_herdr_agent_session,
+      };
+      if (!readbackMatch || Object.entries(expectedFields).some(([field, expected]) => readbackMatch[field] !== expected)) {
+        return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: "SEND_PENDING_READBACK_MISMATCH" };
+      }
+    } catch {
+      return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: "SEND_PENDING_READBACK_FAILED" };
+    }
+  }
+
   let releasePhysicalSend = null;
-  const physicalPromptBoundary = herdr?.physicalPromptBoundary === true;
   const beforePhysicalPrompt = beforePhysicalSend && physicalPromptBoundary
     ? async ({ target }) => {
         const physicalGate = normalizeGateResult(await beforePhysicalSend({
@@ -889,7 +991,7 @@ export function createResidentHerdrConsumer(config = {}) {
       }
       if (initialAuthority?.ok === false) return { decision: CONTROL_REQUIRED, reason: initialAuthority.reason ?? "CONTROL_REQUIRED_AUTHORITY_READ_FAILED", delivered: false, duplicate: false };
       authority = initialAuthority?.value ?? initialAuthority ?? {};
-      waitTuple = authority.waitTuple ?? config.waitTuple;
+      waitTuple = enrichWaitTupleTarget(authority.waitTuple ?? config.waitTuple, authority.binding);
       const initialBindingCheck = validatePreSendAuthorityBinding(authority.binding, authority.binding);
       if (!initialBindingCheck.ok) return { decision: CONTROL_REQUIRED, reason: initialBindingCheck.reason, delivered: false, duplicate: false };
       try {
@@ -923,6 +1025,7 @@ export function createResidentHerdrConsumer(config = {}) {
         quotaRoutePolicy: config.quotaRoutePolicy,
         consumerHostId: config.consumerHostId,
         authorizedHostIds: config.authorizedHostIds,
+        readComments: config.readComments ? async (details) => config.readComments({ waitTuple: details.waitTuple, logicalKey: details.logicalKey, phase: details.phase }) : null,
         beforeSend: async (details) => {
           try {
             const latestRaw = await config.readAuthority({ phase: "before_send", logicalKey: details.logicalKey });

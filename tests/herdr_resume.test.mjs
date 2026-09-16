@@ -117,6 +117,15 @@ function deliveryReceipt(logicalKey, overrides = {}) {
   return `HERDR_RESUME_DELIVERY_V1
 state: ${overrides.state ?? "CONSUMED_STARTED"}
 logical_event_key: ${logicalKey}
+source_terminal_receipt: ${SOURCE_RECEIPT}
+control_generation: ${GENERATION}
+card_id: ${CARD_ID}
+allowed_action_class: ISSUE162_RESIDENT_CONSUMER
+target_agent_name: R49-EXECUTOR
+target_executor_instance_id: ${INSTANCE}
+target_surface: HERDR
+target_herdr_agent: codex
+target_herdr_workspace_id: wR49
 target_herdr_pane_id: wR49:p1
 target_herdr_agent_session: ${SESSION}
 `;
@@ -804,8 +813,11 @@ test("resident consumer applies its final authority gate at the physical prompt 
       events.push(`authority:${phase}`);
       return { fingerprint: phase === "before_physical_send" ? "authority-replaced" : "authority-v1", binding: authorityBinding() };
     },
-    readComments: async ({ phase }) => {
+    readComments: async ({ phase, logicalKey }) => {
       events.push(`comments:${phase}`);
+      if (phase === "send_pending_readback" && logicalKey) {
+        return completeComments([{ id: "send-pending-1", body: deliveryReceipt(logicalKey, { state: "SEND_PENDING" }) }]);
+      }
       return completeComments();
     },
     timedQuotaState: { state: "WAITING_FOR_WAKE", wake_at: "1970-01-01T00:00:00.000Z", retry_count: 0 },
@@ -875,7 +887,8 @@ test("uncertain prompt publishes NO_BLIND_RETRY and never prompts again", async 
     publishReceipt: async (receipt) => { published.push(receipt); return { id: "uncertain-1" }; },
   });
   assert.equal(first.decision, "NO_BLIND_RETRY");
-  assert.equal(published[0].state, "UNCERTAIN_SEND");
+  const uncertainReceipt = published.find((r) => r.state === "UNCERTAIN_SEND");
+  assert.ok(uncertainReceipt, "expected UNCERTAIN_SEND receipt in published receipts");
   const second = await deliverResumeOnce({
     waitTuple: tuple,
     decisionBody: body,
@@ -907,7 +920,7 @@ test("resident consumer rereads authority before send and persists delivery stat
     waitTuple: tuple,
     readAuthority: async ({ phase }) => { authorityPhases.push(phase); return { fingerprint: "authority-v1", binding: authorityBinding() }; },
     readDecisionBody: async () => decisionBody(),
-    readComments: async ({ phase }) => { commentsPhases.push(phase); return completeComments(); },
+    readComments: async ({ phase, logicalKey }) => { commentsPhases.push(phase); if (phase === "send_pending_readback" && logicalKey) { return completeComments([{ id: "send-pending-1", body: deliveryReceipt(logicalKey, { state: "SEND_PENDING" }) }]); } return completeComments(); },
     readState: async () => null,
     writeState: async (state) => { states.push(state.state); },
     herdr: { prompt: async () => ({ accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: SESSION, cwd: CWD, branch: BRANCH, HEAD, visible: true }) },
@@ -917,8 +930,43 @@ test("resident consumer rereads authority before send and persists delivery stat
   const result = await consumer.consumeOnce();
   assert.equal(result.decision, "DELIVERED");
   assert.deepEqual(authorityPhases, ["start", "before_send", "before_physical_send"]);
-  assert.deepEqual(commentsPhases, ["initial", "before_send", "before_physical_send"]);
+  assert.deepEqual(commentsPhases, ["initial", "before_send", "send_pending_readback", "before_physical_send"]);
   assert.deepEqual(states, ["SEND_PENDING", "DELIVERED"]);
+});
+
+test("physical delivery fails closed when SEND_PENDING cannot be read back", async () => {
+  let prompts = 0;
+  const result = await deliverResumeOnce({
+    waitTuple: waitTuple(),
+    decisionBody: decisionBody(),
+    comments: [],
+    herdr: { physicalPromptBoundary: true, prompt: async () => { prompts += 1; } },
+    publishReceipt: async () => ({ id: "pending-only" }),
+  });
+  assert.equal(result.decision, "CONTROL_REQUIRED");
+  assert.equal(result.reason, "SEND_PENDING_READBACK_REQUIRED");
+  assert.equal(prompts, 0);
+});
+
+test("physical delivery rejects a partial or forged SEND_PENDING marker", async () => {
+  let prompts = 0;
+  const tuple = waitTuple();
+  const body = decisionBody();
+  const logicalKey = buildLogicalEventKey(tuple, parseControlDecision(body));
+  const result = await deliverResumeOnce({
+    waitTuple: tuple,
+    decisionBody: body,
+    comments: [],
+    herdr: { physicalPromptBoundary: true, prompt: async () => { prompts += 1; } },
+    publishReceipt: async () => ({ id: "pending-only" }),
+    readComments: async () => completeComments([{
+      id: "forged-pending",
+      body: `HERDR_RESUME_DELIVERY_V1\nstate: SEND_PENDING\nlogical_event_key: ${logicalKey}\n`,
+    }]),
+  });
+  assert.equal(result.decision, "CONTROL_REQUIRED");
+  assert.equal(result.reason, "SEND_PENDING_READBACK_MISMATCH");
+  assert.equal(prompts, 0);
 });
 
 test("a physical-send gate runs after pending persistence and can reject a replaced fence", async () => {

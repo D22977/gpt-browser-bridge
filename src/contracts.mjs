@@ -274,6 +274,37 @@ export const registryEntrySchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// F005: Terminal / revocation evidence: typed, identity-bound release authority.
+// A bare boolean { terminal_authority: true } or { revocation_authority: true }
+// must fail. The evidence must embed the complete ownership tuple and exactly
+// match the entry being released.
+// ---------------------------------------------------------------------------
+
+const baseOwnershipFields = {
+  pid: z.number().int().positive(),
+  fence: z.number().int().positive(),
+  fence_id: z.string().min(1),
+  lease_id: z.string().min(1),
+  lease_expiry: z.string().datetime({ offset: true }),
+  generation: z.number().int().positive(),
+  ref: z.string().regex(CANONICAL_REF),
+  head: z.string().regex(EXACT_40_HEX),
+  tree: z.string().regex(EXACT_40_HEX),
+  worktree: z.string().min(1),
+  process: processIdentitySchema,
+  session: z.object({
+    workspace_id: z.string().min(1),
+    pane_id: z.string().min(1),
+    agent_session: z.string().min(1),
+  }),
+};
+
+export const terminalEvidenceSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("terminal_authority"), ...baseOwnershipFields }),
+  z.object({ type: z.literal("revocation_authority"), ...baseOwnershipFields }),
+]);
+
+// ---------------------------------------------------------------------------
 // Current authority tuple: exact identity binding for admission/heartbeat/state
 // mutation. Covers generation, ref, head, tree, worktree, process, session,
 // lease, and fence. Admission/heartbeat/state mutation must validate that the

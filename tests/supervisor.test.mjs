@@ -152,6 +152,24 @@ function completeComments(comments = []) {
   };
 }
 
+function pendingDeliveryReceipt(logicalKey) {
+  return `HERDR_RESUME_DELIVERY_V1
+state: SEND_PENDING
+logical_event_key: ${logicalKey}
+source_terminal_receipt: 1629000001
+control_generation: 13
+card_id: GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01
+allowed_action_class: ISSUE162_RESIDENT_CONSUMER
+target_agent_name: R49-EXECUTOR
+target_executor_instance_id: r49-executor-instance
+target_surface: HERDR
+target_herdr_agent: codex
+target_herdr_workspace_id: wR49
+target_herdr_pane_id: wR49:p1
+target_herdr_agent_session: r49
+`;
+}
+
 function spawnLockAttempt(root) {
   const supervisorModule = pathToFileURL(path.join(REPO_ROOT, "src", "supervisor.mjs")).href;
   const script = `import { resolveRuntimePaths, acquireOrConfirmLock } from ${JSON.stringify(supervisorModule)};
@@ -289,7 +307,9 @@ minimal_wake: Read GitHub directly.
     waitTuple,
     readAuthority: async () => ({ binding: residentAuthorityBinding() }),
     readDecisionBody: async () => decisionBody,
-    readComments: async () => completeComments(),
+    readComments: async ({ phase, logicalKey } = {}) => phase === "send_pending_readback"
+      ? completeComments([{ id: "send-pending-r49", body: pendingDeliveryReceipt(logicalKey) }])
+      : completeComments(),
     herdr: { prompt: async () => { prompts += 1; return { accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: "r49" }; } },
     publishReceipt: async () => ({ id: "r49-delivery" }),
   };
@@ -1119,7 +1139,9 @@ minimal_wake: Read GitHub directly.
       waitTuple,
       readAuthority: async () => ({ binding: residentAuthorityBinding() }),
       decisionBody,
-      readComments: async () => completeComments(),
+      readComments: async ({ phase, logicalKey } = {}) => phase === "send_pending_readback"
+        ? completeComments([{ id: "send-pending-expiry", body: pendingDeliveryReceipt(logicalKey) }])
+        : completeComments(),
       herdr: prompter,
       publishReceipt: async () => ({ id: "never" }),
       quotaRoutePolicy: { provider: "herdr:codex", model: "gpt-5.6-luna", billing_class: "FREE", max_cost: 0 },
@@ -1770,7 +1792,7 @@ test("heartbeatEntry rejects wrong pid ownership", () => {
   const reg = createRegistry();
   const entry = regEntry({ card_id: "W1" });
   admitEntry(reg, entry, REG_TS);
-  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", authority: { ...fullAuth(entry), pid: 9999 } });
+  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", authority: { ...fullAuth(entry), process: { pid: 9999, started_at: entry.process.started_at } } });
   assert.equal(ok, false);
 });
 
@@ -1987,8 +2009,8 @@ test("F4: reclassifyEntry allows REVALIDATING -> RELEASED (authorized terminal r
   reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: fullAuth(entry) });
   reclassifyEntry(reg, "W1", "MARK_STALE_CANDIDATE", { authority: fullAuth(entry) });
   reclassifyEntry(reg, "W1", "REVALIDATING", { authority: fullAuth(entry) });
-  // Lease must be expired for release to succeed; terminal authority required
-  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry), isoNow: "2026-08-01T11:00:00+08:00", releaseAuthority: { terminal_authority: true } });
+  // Lease must be expired for release to succeed; terminal authority required with all identity fields
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry), isoNow: "2026-08-01T11:00:00+08:00", releaseAuthority: { type: "terminal_authority", pid: entry.process.pid, fence: entry.fence, fence_id: entry.fence_id, lease_id: entry.lease_id, lease_expiry: entry.lease_expiry, generation: entry.generation, ref: entry.ref, head: entry.head, tree: entry.tree, worktree: entry.worktree, process: entry.process, session: entry.session } });
   assert.equal(result.ok, true);
   assert.equal(reg.entries["W1"].state, "RELEASED");
 });
@@ -1997,7 +2019,7 @@ test("F4: reclassifyEntry rejects state mutation without pid ownership", () => {
   const reg = createRegistry();
   const entry = regEntry({ card_id: "W1" });
   admitEntry(reg, entry, REG_TS);
-  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: { ...fullAuth(entry), pid: 9999 } });
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: { ...fullAuth(entry), process: { pid: 9999, started_at: entry.process.started_at } } });
   assert.equal(result.ok, false);
   assert.match(result.reason, /PID_MISMATCH/);
 });
@@ -2184,13 +2206,19 @@ test("F2: reconstructFromAuthorityAndObservations rejects overlapping paths", ()
 
 test("F2: reconstructFromAuthorityAndObservations does not refresh heartbeat", () => {
   const oldHeartbeat = "2026-08-01T08:50:00+08:00";
-  const receipts = [
-    regEntry({ card_id: "W1", state: "ACTIVE", heartbeat_at: oldHeartbeat, worktree: "D:\\worktrees\\w1" }),
-  ];
+  const entry = regEntry({ card_id: "W1", state: "ACTIVE", heartbeat_at: oldHeartbeat, worktree: "D:\\worktrees\\w1" });
+  const receipts = [entry];
   const live = [
     regEntry({ card_id: "W1", state: "ACTIVE", heartbeat_at: oldHeartbeat, worktree: "D:\\worktrees\\w1" }),
   ];
-  const result = reconstructFromAuthorityAndObservations(receipts, live);
+  const result = reconstructFromAuthorityAndObservations(receipts, live, {
+    currentAuthority: {
+      generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
+      worktree: "D:\\worktrees\\w1", process: { pid: entry.process.pid, started_at: entry.process.started_at },
+      session: { ...entry.session }, lease_id: entry.lease_id, lease_expiry: entry.lease_expiry,
+      fence: entry.fence, fence_id: entry.fence_id,
+    },
+  });
   assert.equal(result.ok, true);
   assert.equal(result.entries["W1"].heartbeat_at, oldHeartbeat);
 });
@@ -2357,13 +2385,13 @@ test("F1: admitEntryWithAuthority rejects third worker under authority", () => {
     session: { workspace_id: "w3", pane_id: "p3", agent_session: "s3" },
     lease_id: "lease-3", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "fence-reg-01",
   };
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", lease_id: "lease-1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" } }), REG_TS, {
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", lease_id: "lease-1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" }, process: { pid: 1001, started_at: REG_TS } }), REG_TS, {
     currentAuthority: auth1,
   });
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" } }), REG_TS, {
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" }, process: { pid: 1002, started_at: REG_TS } }), REG_TS, {
     currentAuthority: auth2,
   });
-  const result = admitEntryWithAuthority(reg, regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"], worktree: "D:\\worktrees\\w3", lease_id: "lease-3", session: { workspace_id: "w3", pane_id: "p3", agent_session: "s3" } }), REG_TS, {
+  const result = admitEntryWithAuthority(reg, regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"], worktree: "D:\\worktrees\\w3", lease_id: "lease-3", session: { workspace_id: "w3", pane_id: "p3", agent_session: "s3" }, process: { pid: 1003, started_at: REG_TS } }), REG_TS, {
     currentAuthority: auth3,
   });
   assert.equal(result.ok, false);
@@ -2384,10 +2412,10 @@ test("F1: admitEntryWithAuthority rejects second reviewer under authority", () =
     session: { workspace_id: "w-reg-01", pane_id: "p-reg-01", agent_session: "s-reg-01" },
     lease_id: "lease-r2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "fence-reg-01",
   };
-  admitEntryWithAuthority(reg, regEntry({ card_id: "R1", role: "reviewer", lease_id: "lease-r1" }), REG_TS, {
+  admitEntryWithAuthority(reg, regEntry({ card_id: "R1", role: "reviewer", lease_id: "lease-r1", process: { pid: 1001, started_at: REG_TS } }), REG_TS, {
     currentAuthority: authR1,
   });
-  const result = admitEntryWithAuthority(reg, regEntry({ card_id: "R2", role: "reviewer", lease_id: "lease-r2" }), REG_TS, {
+  const result = admitEntryWithAuthority(reg, regEntry({ card_id: "R2", role: "reviewer", lease_id: "lease-r2", process: { pid: 1002, started_at: REG_TS } }), REG_TS, {
     currentAuthority: authR2,
   });
   assert.equal(result.ok, false);
@@ -2401,7 +2429,7 @@ test("F1: admitEntryWithAuthority rejects second reviewer under authority", () =
 test("F1: Supervisor runLoopOnce exercises registry admission path under lock/fence", async (t) => {
   const { root, paths } = await tempRuntime(t);
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
-  const pendingEntry = regEntry({ card_id: "W-PROD-01", ref: "refs/heads/prod", allowlist_paths: ["src/prod.mjs"], worktree: "D:\\worktrees\\prod", fence_id: "1", lease_id: "lease-supervisor-01", session: { workspace_id: "w-prod", pane_id: "p-prod", agent_session: "s-prod" } });
+  const pendingEntry = regEntry({ card_id: "W-PROD-01", ref: "refs/heads/prod", allowlist_paths: ["src/prod.mjs"], worktree: "D:\\worktrees\\prod", fence_id: "1", lease_id: "lease-supervisor-01", session: { workspace_id: "w-prod", pane_id: "p-prod", agent_session: "s-prod" }, process: { pid: 41020, started_at: REG_TS } });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2449,14 +2477,14 @@ test("F6-F1: Supervisor runLoopOnce rejects third worker through real admission 
     session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
     lease_id: "lease-2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", fence_id: "1", lease_id: "lease-1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" } }), REG_TS, {
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", fence_id: "1", lease_id: "lease-1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" }, process: { pid: 1001, started_at: REG_TS } }), REG_TS, {
     currentAuthority: auth1,
   });
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" } }), REG_TS, {
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" }, process: { pid: 1002, started_at: REG_TS } }), REG_TS, {
     currentAuthority: auth2,
   });
   // Try to admit a third worker - should be rejected
-  const pendingEntry = regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"], worktree: "D:\\worktrees\\w3", fence_id: "1", lease_id: "lease-3", session: { workspace_id: "w3", pane_id: "p3", agent_session: "s3" } });
+  const pendingEntry = regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"], worktree: "D:\\worktrees\\w3", fence_id: "1", lease_id: "lease-3", session: { workspace_id: "w3", pane_id: "p3", agent_session: "s3" }, process: { pid: 41030, started_at: REG_TS } });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2490,10 +2518,10 @@ test("F6-F1: Supervisor runLoopOnce rejects second reviewer through real admissi
     session: { workspace_id: "w-reg-01", pane_id: "p-reg-01", agent_session: "s-reg-01" },
     lease_id: "lease-r1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  admitEntryWithAuthority(reg, regEntry({ card_id: "R1", role: "reviewer", fence_id: "1", lease_id: "lease-r1" }), REG_TS, {
+  admitEntryWithAuthority(reg, regEntry({ card_id: "R1", role: "reviewer", fence_id: "1", lease_id: "lease-r1", process: { pid: 1001, started_at: REG_TS } }), REG_TS, {
     currentAuthority: authR1,
   });
-  const pendingEntry = regEntry({ card_id: "R2", role: "reviewer", fence_id: "1", lease_id: "lease-r2" });
+  const pendingEntry = regEntry({ card_id: "R2", role: "reviewer", fence_id: "1", lease_id: "lease-r2", process: { pid: 41031, started_at: REG_TS } });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2524,10 +2552,10 @@ test("F6-F1: Supervisor runLoopOnce rejects same ref writer through real admissi
     session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
     lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/main", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", fence_id: "1", lease_id: "lease-1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" } }), REG_TS, {
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/main", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", fence_id: "1", lease_id: "lease-1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" }, process: { pid: 1001, started_at: REG_TS } }), REG_TS, {
     currentAuthority: auth1,
   });
-  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/main", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" } });
+  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/main", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" }, process: { pid: 41032, started_at: REG_TS } });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2558,10 +2586,10 @@ test("F6-F1: Supervisor runLoopOnce rejects overlapping paths through real admis
     session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
     lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/"], worktree: "D:\\worktrees\\w1", fence_id: "1", lease_id: "lease-1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" } }), REG_TS, {
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/"], worktree: "D:\\worktrees\\w1", fence_id: "1", lease_id: "lease-1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" }, process: { pid: 1001, started_at: REG_TS } }), REG_TS, {
     currentAuthority: auth1,
   });
-  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/contracts.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" } });
+  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/contracts.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" }, process: { pid: 41033, started_at: REG_TS } });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2592,11 +2620,11 @@ test("F6-F1: Supervisor runLoopOnce rejects same worktree alias through real adm
     session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
     lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\same", fence_id: "1", lease_id: "lease-1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" } }), REG_TS, {
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\same", fence_id: "1", lease_id: "lease-1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" }, process: { pid: 1001, started_at: REG_TS } }), REG_TS, {
     currentAuthority: auth1,
   });
   // Different case, same canonical path
-  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "d:\\Worktrees\\SAME", fence_id: "1", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" } });
+  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "d:\\Worktrees\\SAME", fence_id: "1", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" }, process: { pid: 41034, started_at: REG_TS } });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2627,11 +2655,11 @@ test("F6-F1: Supervisor runLoopOnce rejects stale generation through real admiss
     session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
     lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", generation: 2, fence_id: "1", lease_id: "lease-1", worktree: "D:\\worktrees\\w1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" } }), REG_TS, {
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", generation: 2, fence_id: "1", lease_id: "lease-1", worktree: "D:\\worktrees\\w1", session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" }, process: { pid: 1001, started_at: REG_TS } }), REG_TS, {
     currentAuthority: auth1,
   });
   // Try to admit same card_id with stale generation - uses same lease_id to pass lease check
-  const pendingEntry = regEntry({ card_id: "W1", generation: 1, ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-1", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" } });
+  const pendingEntry = regEntry({ card_id: "W1", generation: 1, ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-1", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" }, process: { pid: 41035, started_at: REG_TS } });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2723,7 +2751,7 @@ test("F6-F3: reclassifyEntry rejects state mutation with partial authority (miss
   const partial = { pid: 1001, fence: 1, fence_id: "fence-reg-01" };
   const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: partial });
   assert.equal(result.ok, false);
-  assert.match(result.reason, /LEASE_ID_MISMATCH|GENERATION_MISMATCH|REF_MISMATCH|HEAD_MISMATCH|TREE_MISMATCH|WORKTREE_MISMATCH|PROCESS_STARTED_AT_MISMATCH|SESSION_WORKSPACE_MISMATCH/);
+  assert.match(result.reason, /AUTHORITY_INVALID/);
 });
 
 // F4: ACTIVE -> RELEASED authorized release path
@@ -2732,7 +2760,7 @@ test("F6-F4: reclassifyEntry allows ACTIVE -> RELEASED with expired lease and te
   const entry = regEntry({ card_id: "W1", lease_expiry: "2026-08-01T08:00:00+08:00" });
   admitEntry(reg, entry, REG_TS);
   reclassifyEntry(reg, "W1", "ACTIVE", { authority: fullAuth(entry) });
-  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry), isoNow: REG_TS, releaseAuthority: { terminal_authority: true } });
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry), isoNow: REG_TS, releaseAuthority: { type: "terminal_authority", pid: entry.process.pid, fence: entry.fence, fence_id: entry.fence_id, lease_id: entry.lease_id, lease_expiry: entry.lease_expiry, generation: entry.generation, ref: entry.ref, head: entry.head, tree: entry.tree, worktree: entry.worktree, process: entry.process, session: entry.session } });
   assert.equal(result.ok, true);
   assert.equal(reg.entries["W1"].state, "RELEASED");
 });
@@ -2743,7 +2771,7 @@ test("F6-F4: reclassifyEntry rejects ACTIVE -> RELEASED when lease not expired",
   const entry = regEntry({ card_id: "W1", lease_expiry: "2099-01-01T00:00:00+08:00" });
   admitEntry(reg, entry, REG_TS);
   reclassifyEntry(reg, "W1", "ACTIVE", { authority: fullAuth(entry) });
-  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry), isoNow: REG_TS, releaseAuthority: { terminal_authority: true } });
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry), isoNow: REG_TS, releaseAuthority: { type: "terminal_authority", pid: entry.process.pid, fence: entry.fence, fence_id: entry.fence_id, lease_id: entry.lease_id, lease_expiry: entry.lease_expiry, generation: entry.generation, ref: entry.ref, head: entry.head, tree: entry.tree, worktree: entry.worktree, process: entry.process, session: entry.session } });
   assert.equal(result.ok, false);
   assert.match(result.reason, /LEASE_NOT_EXPIRED/);
 });
@@ -2793,7 +2821,15 @@ test("F6-F5: validateEntryAdmission detects same ref with different case", () =>
 test("F6-F2: reconstructFromAuthorityAndObservations joins durable receipt and live observation", () => {
   const receipt = regEntry({ card_id: "W1", state: "ADMITTED", fence_id: "fence-01" });
   const live = regEntry({ card_id: "W1", state: "ACTIVE", fence_id: "fence-01" });
-  const result = reconstructFromAuthorityAndObservations([receipt], [live], { currentFenceId: "fence-01" });
+  const result = reconstructFromAuthorityAndObservations([receipt], [live], {
+    currentFenceId: "fence-01",
+    currentAuthority: {
+      generation: receipt.generation, ref: receipt.ref, head: receipt.head, tree: receipt.tree,
+      worktree: receipt.worktree, process: { pid: receipt.process.pid, started_at: receipt.process.started_at },
+      session: { ...receipt.session }, lease_id: receipt.lease_id, lease_expiry: receipt.lease_expiry,
+      fence: receipt.fence, fence_id: receipt.fence_id,
+    },
+  });
   assert.equal(result.ok, true);
   assert.equal(result.entries["W1"].state, "ACTIVE");
   assert.equal(result.entries["W1"].admitted_at, receipt.admitted_at);
@@ -2937,10 +2973,16 @@ test("F001: runLoopOnce derives string fence_id from numeric lock fence for reco
     isAlive: async () => false,
     durableReceipts: [receipt],
     liveObservations: [live],
+    currentAuthority: {
+      generation: 1, ref: "refs/heads/recon", head: "a".repeat(40), tree: "b".repeat(40),
+      worktree: "D:\\worktrees\\recon", process: { pid: 41040, started_at: REG_TS },
+      session: { workspace_id: "w-recon", pane_id: "p-recon", agent_session: "s-recon" },
+      lease_id: "lease-recon", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+    },
   });
   // The reconstruction should succeed because fence_id is derived as String(lock.fence) = "1"
   assert.equal(outcome.stop, false);
-  assert.ok(!outcome.events.find((e) => e.type === "registry_reconstruction_rejected"),
+  assert.ok(!outcome.events?.find((e) => e.type === "registry_reconstruction_rejected"),
     "reconstruction must not reject valid entries with numeric lock fence");
 });
 
@@ -2958,7 +3000,7 @@ test("F006: runLoopOnce UNCERTAIN_SEND regression — physical send succeeds, re
 
   let promptCount = 0;
   let publishCount = 0;
-  let publishFails = true;
+  let sendReceiptFails = true;
 
   const waitTuple = {
     source_terminal_receipt: 1629000001,
@@ -3000,22 +3042,24 @@ minimal_wake: Read GitHub directly.
       waitTuple,
       readAuthority: async () => ({ binding: residentAuthorityBinding() }),
       decisionBody,
-      readComments: async () => completeComments(),
+      readComments: async ({ phase, logicalKey } = {}) => phase === "send_pending_readback"
+        ? completeComments([{ id: "send-pending-1", body: pendingDeliveryReceipt(logicalKey) }])
+        : completeComments(),
       herdr: { prompt: async () => { promptCount += 1; return { accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: "r49" }; } },
-      publishReceipt: async () => { publishCount += 1; if (publishFails) throw new Error("PUBLICATION_FAILED"); return { id: "receipt-1" }; },
+      publishReceipt: async (receipt) => { publishCount += 1; if (receipt?.state === "CONSUMED_STARTED" && sendReceiptFails) throw new Error("PUBLICATION_FAILED"); return { id: `receipt-${publishCount}` }; },
     },
   });
 
   // Physical prompt was sent
   assert.equal(promptCount, 1);
-  // Receipt publication failed
-  assert.equal(publishCount, 1);
+  // Receipt publication failed (SEND_PENDING succeeded, CONSUMED_STARTED failed)
+  assert.equal(publishCount, 2);
   // The delivery should have been attempted but receipt failed
   const uncertainEvent = firstOutcome.events.find((e) => e.type === "resume_delivery_no_blind_retry" || e.type === "resume_delivery_failed" || e.type === "resume_delivery_control_required");
   assert.ok(uncertainEvent, "expected delivery failure or no-blind-retry event from receipt publication failure");
 
   // Second tick: recovery should NOT re-prompt (NO_BLIND_RETRY / UNCERTAIN_SEND)
-  publishFails = false;
+  sendReceiptFails = false;
   const secondOutcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -3028,7 +3072,9 @@ minimal_wake: Read GitHub directly.
       waitTuple,
       readAuthority: async () => ({ binding: residentAuthorityBinding() }),
       decisionBody,
-      readComments: async () => completeComments(),
+      readComments: async ({ phase, logicalKey } = {}) => phase === "send_pending_readback"
+        ? completeComments([{ id: "send-pending-2", body: pendingDeliveryReceipt(logicalKey) }])
+        : completeComments(),
       herdr: { prompt: async () => { promptCount += 1; return { accepted: true }; } },
       publishReceipt: async () => ({ id: "receipt-2" }),
     },
@@ -3095,7 +3141,9 @@ minimal_wake: Read GitHub directly.
       waitTuple,
       readAuthority: async () => ({ binding: residentAuthorityBinding() }),
       decisionBody,
-      readComments: async () => completeComments(),
+      readComments: async ({ phase, logicalKey } = {}) => phase === "send_pending_readback"
+        ? completeComments([{ id: "send-pending-1", body: pendingDeliveryReceipt(logicalKey) }])
+        : completeComments(),
       herdr: { prompt: async () => { promptCount += 1; return { accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: "r49" }; } },
       publishReceipt: async () => ({ id: "receipt-1" }),
       persistDeliveryState: async (state) => { persistCount += 1; lastPersistedState = state; },
@@ -3182,8 +3230,8 @@ test("F001: admitEntryWithAuthority admits under valid currentAuthority", () => 
 // F004: canonicalizeWorktree rejects ambiguous Windows forms
 // ---------------------------------------------------------------------------
 
-test("F004: canonicalizeWorktree rejects UNC paths", () => {
-  assert.equal(canonicalizeWorktree("\\\\server\\share\\worktree"), null);
+test("F004: canonicalizeWorktree accepts canonical UNC and rejects ambiguous UNC", () => {
+  assert.equal(canonicalizeWorktree("\\\\server\\share\\worktree"), "//server/share/worktree");
   assert.equal(canonicalizeWorktree("//server/share/worktree"), null);
 });
 
@@ -3197,9 +3245,19 @@ test("F004: canonicalizeWorktree accepts drive letter paths and normalizes them"
   assert.equal(canonicalizeWorktree("d:\\worktrees\\reg-01"), "d:/worktrees/reg-01");
 });
 
-test("F004: canonicalizeWorktree accepts relative paths", () => {
-  assert.equal(canonicalizeWorktree("worktrees/reg-01"), "worktrees/reg-01");
-  assert.equal(canonicalizeWorktree("./worktrees/reg-01"), "worktrees/reg-01");
+test("F004: canonicalizeWorktree rejects relative paths", () => {
+  assert.equal(canonicalizeWorktree("worktrees/reg-01"), null);
+  assert.equal(canonicalizeWorktree("./worktrees/reg-01"), null);
+});
+
+test("F004: canonicalizeWorktree rejects aliases before normalization", () => {
+  assert.equal(canonicalizeWorktree("D:\\worktrees\\reg-01\\..\\reg-02"), null);
+  assert.equal(canonicalizeWorktree("D:\\worktrees\\reg-01\\\\alias"), null);
+  assert.equal(canonicalizeWorktree("D:\\worktrees\\reg-01//alias"), null);
+  assert.equal(canonicalizeWorktree("D:worktrees\\reg-01"), null);
+  assert.equal(canonicalizeWorktree("\\\\server\\share\\.\\worktree"), null);
+  assert.equal(canonicalizeWorktree("\\\\server\\share\\\\worktree"), null);
+  assert.equal(canonicalizeWorktree("\\\\server/share/worktree"), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -3214,7 +3272,7 @@ test("F005: reclassifyEntry rejects RELEASED with mismatched releaseAuthority pi
   const result = reclassifyEntry(reg, "W1", "RELEASED", {
     authority: fullAuth(entry),
     isoNow: "2026-08-01T11:00:00+08:00",
-    releaseAuthority: { terminal_authority: true, pid: 9999 },
+    releaseAuthority: { type: "terminal_authority", pid: 9999, fence: entry.fence, fence_id: entry.fence_id, lease_id: entry.lease_id, lease_expiry: entry.lease_expiry, generation: entry.generation, ref: entry.ref, head: entry.head, tree: entry.tree, worktree: entry.worktree, process: entry.process, session: entry.session },
   });
   assert.equal(result.ok, false);
   assert.match(result.reason, /RELEASE_AUTHORITY_PID_MISMATCH/);
@@ -3228,7 +3286,7 @@ test("F005: reclassifyEntry rejects RELEASED with mismatched releaseAuthority fe
   const result = reclassifyEntry(reg, "W1", "RELEASED", {
     authority: fullAuth(entry),
     isoNow: "2026-08-01T11:00:00+08:00",
-    releaseAuthority: { terminal_authority: true, fence: 99 },
+    releaseAuthority: { type: "terminal_authority", pid: entry.process.pid, fence: 99, fence_id: entry.fence_id, lease_id: entry.lease_id, lease_expiry: entry.lease_expiry, generation: entry.generation, ref: entry.ref, head: entry.head, tree: entry.tree, worktree: entry.worktree, process: entry.process, session: entry.session },
   });
   assert.equal(result.ok, false);
   assert.match(result.reason, /RELEASE_AUTHORITY_FENCE_MISMATCH/);

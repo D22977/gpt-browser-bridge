@@ -33,6 +33,7 @@ import {
   buildLogicalEventKey,
   classifyFutureConsumerBinding,
   deliverResumeOnce,
+  enrichWaitTupleTarget,
   findExistingDelivery,
   matchWaitToDecision,
   normalizeCurrentComments,
@@ -915,7 +916,7 @@ export async function runResumeDeliveryCheck(ctx, {
     events.push({ type: "resume_delivery_authority_binding_invalid", reason });
     return { events, delivered: false, duplicate: false, reason };
   }
-  const waitTuple = authority.waitTuple ?? cfg.waitTuple;
+  const waitTuple = enrichWaitTupleTarget(authority.waitTuple ?? cfg.waitTuple, authority.binding);
   const tupleCheck = validateWaitTuple(waitTuple);
   if (!tupleCheck.ok) {
     events.push({ type: "resume_delivery_wait_tuple_invalid", reason: "INVALID_WAIT_TUPLE", errors: tupleCheck.errors });
@@ -1013,6 +1014,7 @@ export async function runResumeDeliveryCheck(ctx, {
       persistDeliveryState: persist,
       beforeSend,
       beforePhysicalSend,
+      readComments: cfg.readComments ? async (details) => cfg.readComments({ waitTuple: details.waitTuple ?? tupleCheck.waitTuple, logicalKey: details.logicalKey, phase: details.phase }) : null,
     });
     if (result.decision === "DELIVERED") {
       events.push({
@@ -1089,6 +1091,7 @@ import {
   registryEntrySchema,
   ALLOWED_TRANSITIONS,
   currentAuthoritySchema,
+  terminalEvidenceSchema,
 } from "./contracts.mjs";
 
 export function createRegistry() {
@@ -1128,26 +1131,43 @@ export function canonicalizeRef(ref) {
   return null;
 }
 
-// F004: Canonical worktree: forward-slash normalized, lower-cased, no trailing
-// slash, no repeated separators, reject dot-segments and ambiguous forms.
-// F004: Reject ambiguous Windows forms that cannot be unambiguously
-// canonicalized: UNC paths (\\server\share, //server/share) and bare
-// leading slash (/). Drive letter paths (D:\...) are accepted and
-// normalized to lowercase forward-slash form for consistent comparison.
+// F004: Canonical worktree: accept only unambiguous absolute Windows identities.
+// Accepted: drive-absolute D:\foo\bar or D:/foo\bar (both normalize identically)
+// and canonical UNC \\server\share\foo\bar.
+// Rejected: relative, drive-relative, root-relative, ambiguous/partial UNC,
+// dot segments, repeated separators, and non-canonical spellings.
 export function canonicalizeWorktree(wt) {
-  if (typeof wt !== "string" || wt.length === 0) return null;
-  // F004: Reject ambiguous UNC paths: \\server\share, //server/share
-  if (/^\\\\/.test(wt) || /^\/\//.test(wt)) return null;
-  // F004: Reject bare leading slash (Unix absolute - ambiguous on Windows)
-  if (/^\//.test(wt)) return null;
-  let normalized = wt.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/+$/, "");
-  // Normalize leading ./ to empty
-  if (normalized.startsWith("./")) normalized = normalized.slice(2);
-  // Reject bare "." or ".." segments
-  if (normalized === "." || normalized === "..") return null;
-  // Reject parent traversal
-  if (normalized.includes("/../") || normalized.endsWith("/..")) return null;
-  return normalized.toLowerCase();
+  if (typeof wt !== "string" || wt.length === 0 || wt !== wt.trim() || /[\0\r\n]/.test(wt)) return null;
+
+  // Drive-absolute paths use a real drive root. Validate before normalizing;
+  // collapsing separators first would turn an alias into a false identity.
+  if (/^[A-Za-z]:[\\/]/.test(wt)) {
+    const root = wt.slice(0, 2).toLowerCase();
+    const suffix = wt.slice(2);
+    if (/[\\/]{2}/.test(suffix)) return null;
+    let body = suffix.slice(1);
+    if (body.endsWith("\\") || body.endsWith("/")) body = body.slice(0, -1);
+    if (body.length === 0) return `${root}/`;
+    const segments = body.split(/[\\/]/);
+    if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) return null;
+    return `${root}/${segments.join("/").toLowerCase()}`;
+  }
+
+  // UNC is accepted only in its unambiguous Windows spelling: two leading
+  // backslashes, backslash separators, and at least server + share. Keep the
+  // double slash in the canonical form so it cannot become root-relative.
+  if (wt.startsWith("\\\\")) {
+    const suffix = wt.slice(2);
+    if (suffix.includes("/") || suffix.includes("\\\\")) return null;
+    const parts = suffix.split("\\");
+    if (parts.at(-1) === "") parts.pop();
+    if (parts.length < 2 || parts.some((segment) => segment.length === 0 || segment === "." || segment === "..")) return null;
+    return `//${parts.join("/").toLowerCase()}`;
+  }
+
+  // Relative, drive-relative, root-relative, POSIX/ambiguous UNC, and all
+  // other spellings are not stable cross-process identities.
+  return null;
 }
 
 // Check if two allowlist path sets have any overlapping entry.
@@ -1181,6 +1201,9 @@ export function checkPathOverlap(pathsA, pathsB) {
 export function validateEntryAdmission(registry, entry, existingCardIds) {
   const { card_id, role, ref, generation, allowlist_paths, worktree, fence, fence_id, lease_id } = entry;
 
+  const canonWt = canonicalizeWorktree(worktree);
+  if (!canonWt) return { ok: false, reason: `INVALID_WORKTREE: ${worktree}` };
+
   if (registry.entries[card_id]) {
     if (registry.entries[card_id].generation !== generation) {
       return { ok: false, reason: `GENERATION_MISMATCH: ${card_id}` };
@@ -1212,10 +1235,6 @@ export function validateEntryAdmission(registry, entry, existingCardIds) {
       return { ok: false, reason: `MAX_WRITERS_PER_REF: ref ${ref} already has a writer` };
     }
     // Distinct canonical worktrees required for workers (F5)
-    const canonWt = canonicalizeWorktree(worktree);
-    if (!canonWt) {
-      return { ok: false, reason: `INVALID_WORKTREE: ${worktree}` };
-    }
     for (const other of activeWorkers) {
       if (canonicalizeRef(other.ref) === canonRef) continue;
       const otherWt = canonicalizeWorktree(other.worktree);
@@ -1284,31 +1303,35 @@ export function heartbeatEntry(registry, cardId, { isoNow, authority } = {}) {
   if (!registry.entries[cardId]) return false;
   const entry = registry.entries[cardId];
   if (!authority) return false;
-  // F003: Validate authority against currentAuthoritySchema when it looks like a full tuple
-  if (authority.generation !== undefined && authority.ref !== undefined && authority.head !== undefined) {
-    try {
-      currentAuthoritySchema.parse(authority);
-    } catch {
-      return false;
-    }
+  // F003: Unconditionally validate authority against currentAuthoritySchema.
+  // The schema defines process as { pid, started_at } (nested), not top-level pid.
+  let validatedAuthority;
+  try {
+    validatedAuthority = currentAuthoritySchema.parse(authority);
+  } catch {
+    return false;
   }
-  // Verify complete authority tuple components
-  if (authority.pid === undefined || entry.process.pid !== authority.pid) return false;
-  if (authority.fence === undefined || entry.fence !== authority.fence) return false;
-  if (authority.fence_id === undefined || entry.fence_id !== authority.fence_id) return false;
-  if (authority.lease_id === undefined || entry.lease_id !== authority.lease_id) return false;
-  if (authority.generation === undefined || entry.generation !== authority.generation) return false;
-  if (authority.ref === undefined || canonicalizeRef(entry.ref) !== canonicalizeRef(authority.ref)) return false;
-  if (authority.head === undefined || entry.head !== authority.head) return false;
-  if (authority.tree === undefined || entry.tree !== authority.tree) return false;
-  if (authority.worktree === undefined || canonicalizeWorktree(entry.worktree) !== canonicalizeWorktree(authority.worktree)) return false;
-  if (authority.process?.started_at === undefined || entry.process.started_at !== authority.process.started_at) return false;
-  // Session tuple must match fully (F002: all fields required)
-  const authSession = authority.session ?? {};
+  // F003: Verify complete authority tuple using parsed schema fields
+  if (validatedAuthority.process.pid !== entry.process.pid) return false;
+  if (validatedAuthority.fence !== entry.fence) return false;
+  if (validatedAuthority.fence_id !== entry.fence_id) return false;
+  if (validatedAuthority.lease_id !== entry.lease_id) return false;
+  if (validatedAuthority.generation !== entry.generation) return false;
+  if (canonicalizeRef(entry.ref) !== canonicalizeRef(validatedAuthority.ref)) return false;
+  if (entry.head !== validatedAuthority.head) return false;
+  if (entry.tree !== validatedAuthority.tree) return false;
+  const entryWorktree = canonicalizeWorktree(entry.worktree);
+  const authorityWorktree = canonicalizeWorktree(validatedAuthority.worktree);
+  if (!entryWorktree || !authorityWorktree || entryWorktree !== authorityWorktree) return false;
+  if (entry.process.started_at !== validatedAuthority.process.started_at) return false;
+  // F003: Full session identity must match
+  const authSession = validatedAuthority.session;
   const entrySession = entry.session ?? {};
-  if ((authSession.workspace_id ?? null) !== (entrySession.workspace_id ?? null)) return false;
-  if ((authSession.pane_id ?? null) !== (entrySession.pane_id ?? null)) return false;
-  if ((authSession.agent_session ?? null) !== (entrySession.agent_session ?? null)) return false;
+  if (authSession.workspace_id !== (entrySession.workspace_id ?? null)) return false;
+  if (authSession.pane_id !== (entrySession.pane_id ?? null)) return false;
+  if (authSession.agent_session !== (entrySession.agent_session ?? null)) return false;
+  // F003: Exact lease_expiry equality with authority
+  if (entry.lease_expiry !== validatedAuthority.lease_expiry) return false;
   // F3: Validate lease is still current
   if (entry.lease_expiry) {
     const expiryMs = Date.parse(entry.lease_expiry);
@@ -1337,105 +1360,125 @@ export function reclassifyEntry(registry, cardId, newState, { authority, isoNow,
   if (!allowed || !allowed.includes(newState)) {
     return { ok: false, reason: `INVALID_TRANSITION: ${entry.state} -> ${newState}` };
   }
-  // F3/F6: Verify complete authority tuple
+  // F3/F6/F003: Verify complete authority tuple using parsed schema
   if (!authority) return { ok: false, reason: "AUTHORITY_MISSING" };
-  // F003: Validate authority against currentAuthoritySchema when it looks like a full tuple
-  if (authority.generation !== undefined && authority.ref !== undefined && authority.head !== undefined) {
-    try {
-      currentAuthoritySchema.parse(authority);
-    } catch {
-      return { ok: false, reason: "AUTHORITY_INVALID" };
-    }
+  // F003: Unconditionally validate authority against currentAuthoritySchema
+  let validatedAuthority;
+  try {
+    validatedAuthority = currentAuthoritySchema.parse(authority);
+  } catch {
+    return { ok: false, reason: "AUTHORITY_INVALID" };
   }
-  if (authority.pid === undefined || entry.process.pid !== authority.pid) {
+  if (validatedAuthority.process.pid !== entry.process.pid) {
     return { ok: false, reason: "PID_MISMATCH" };
   }
-  if (authority.fence === undefined || entry.fence !== authority.fence) {
+  if (validatedAuthority.fence !== entry.fence) {
     return { ok: false, reason: "FENCE_MISMATCH" };
   }
-  if (authority.fence_id === undefined || entry.fence_id !== authority.fence_id) {
+  if (validatedAuthority.fence_id !== entry.fence_id) {
     return { ok: false, reason: "FENCE_ID_MISMATCH" };
   }
-  if (authority.lease_id === undefined || entry.lease_id !== authority.lease_id) {
+  if (validatedAuthority.lease_id !== entry.lease_id) {
     return { ok: false, reason: "LEASE_ID_MISMATCH" };
   }
-  if (authority.generation === undefined || entry.generation !== authority.generation) {
+  if (validatedAuthority.generation !== entry.generation) {
     return { ok: false, reason: "GENERATION_MISMATCH" };
   }
-  if (authority.ref === undefined || canonicalizeRef(entry.ref) !== canonicalizeRef(authority.ref)) {
+  if (canonicalizeRef(entry.ref) !== canonicalizeRef(validatedAuthority.ref)) {
     return { ok: false, reason: "REF_MISMATCH" };
   }
-  if (authority.head === undefined || entry.head !== authority.head) {
+  if (entry.head !== validatedAuthority.head) {
     return { ok: false, reason: "HEAD_MISMATCH" };
   }
-  if (authority.tree === undefined || entry.tree !== authority.tree) {
+  if (entry.tree !== validatedAuthority.tree) {
     return { ok: false, reason: "TREE_MISMATCH" };
   }
-  if (authority.worktree === undefined || canonicalizeWorktree(entry.worktree) !== canonicalizeWorktree(authority.worktree)) {
+  const entryWorktree = canonicalizeWorktree(entry.worktree);
+  const authorityWorktree = canonicalizeWorktree(validatedAuthority.worktree);
+  if (!entryWorktree || !authorityWorktree || entryWorktree !== authorityWorktree) {
     return { ok: false, reason: "WORKTREE_MISMATCH" };
   }
-  if (authority.process?.started_at === undefined || entry.process.started_at !== authority.process.started_at) {
+  if (entry.process.started_at !== validatedAuthority.process.started_at) {
     return { ok: false, reason: "PROCESS_STARTED_AT_MISMATCH" };
   }
-  const authSession = authority.session ?? {};
+  const authSession = validatedAuthority.session;
   const entrySession = entry.session ?? {};
-  if ((authSession.workspace_id ?? null) !== (entrySession.workspace_id ?? null)) {
+  if (authSession.workspace_id !== (entrySession.workspace_id ?? null)) {
     return { ok: false, reason: "SESSION_WORKSPACE_MISMATCH" };
   }
-  if ((authSession.pane_id ?? null) !== (entrySession.pane_id ?? null)) {
+  if (authSession.pane_id !== (entrySession.pane_id ?? null)) {
     return { ok: false, reason: "SESSION_PANE_MISMATCH" };
   }
-  if ((authSession.agent_session ?? null) !== (entrySession.agent_session ?? null)) {
+  if (authSession.agent_session !== (entrySession.agent_session ?? null)) {
     return { ok: false, reason: "SESSION_AGENT_MISMATCH" };
   }
-  // F5/F005: For RELEASED transition, require explicit terminal or revocation authority
-  // bound to the same full ownership tuple; lease expiry alone is insufficient.
-  // F005: releaseAuthority must be a typed object with identity-bound fields matching
-  // the entry's authority tuple (pid, fence, fence_id, lease_id, generation, ref, head,
-  // tree, worktree, process, session).
+  // F003: Exact lease_expiry equality with authority
+  if (entry.lease_expiry !== validatedAuthority.lease_expiry) {
+    return { ok: false, reason: "LEASE_EXPIRY_MISMATCH" };
+  }
+  // F5/F005: For RELEASED transition, require typed terminal or revocation authority
+  // with the complete ownership tuple; bare booleans must fail.
   if (newState === "RELEASED") {
     if (!releaseAuthority) {
       return { ok: false, reason: "RELEASE_AUTHORITY_MISSING: terminal or revocation authority required" };
     }
-    // F005: releaseAuthority must have a valid type marker
-    if (!releaseAuthority.terminal_authority && !releaseAuthority.revocation_authority) {
-      return { ok: false, reason: "RELEASE_AUTHORITY_MISSING: terminal or revocation authority required" };
+    let validatedReleaseAuthority;
+    try {
+      validatedReleaseAuthority = terminalEvidenceSchema.parse(releaseAuthority);
+    } catch {
+      return { ok: false, reason: "RELEASE_AUTHORITY_INVALID: typed terminal or revocation authority required" };
     }
+    releaseAuthority = validatedReleaseAuthority;
     // F005: Validate releaseAuthority identity matches entry identity
-    if (releaseAuthority.pid !== undefined && releaseAuthority.pid !== entry.process.pid) {
+    if (releaseAuthority.pid !== entry.process.pid) {
       return { ok: false, reason: "RELEASE_AUTHORITY_PID_MISMATCH" };
     }
-    if (releaseAuthority.fence !== undefined && releaseAuthority.fence !== entry.fence) {
+    if (releaseAuthority.fence !== entry.fence) {
       return { ok: false, reason: "RELEASE_AUTHORITY_FENCE_MISMATCH" };
     }
-    if (releaseAuthority.fence_id !== undefined && releaseAuthority.fence_id !== entry.fence_id) {
+    if (releaseAuthority.fence_id !== entry.fence_id) {
       return { ok: false, reason: "RELEASE_AUTHORITY_FENCE_ID_MISMATCH" };
     }
-    if (releaseAuthority.lease_id !== undefined && releaseAuthority.lease_id !== entry.lease_id) {
+    if (releaseAuthority.lease_id !== entry.lease_id) {
       return { ok: false, reason: "RELEASE_AUTHORITY_LEASE_MISMATCH" };
     }
-    if (releaseAuthority.generation !== undefined && releaseAuthority.generation !== entry.generation) {
+    if (releaseAuthority.lease_expiry !== entry.lease_expiry) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_LEASE_EXPIRY_MISMATCH" };
+    }
+    if (releaseAuthority.generation !== entry.generation) {
       return { ok: false, reason: "RELEASE_AUTHORITY_GENERATION_MISMATCH" };
     }
-    if (releaseAuthority.ref !== undefined) {
-      const entryCanonRef = canonicalizeRef(entry.ref);
-      const authCanonRef = canonicalizeRef(releaseAuthority.ref);
-      if (entryCanonRef !== authCanonRef) {
-        return { ok: false, reason: "RELEASE_AUTHORITY_REF_MISMATCH" };
-      }
+    const entryCanonRef = canonicalizeRef(entry.ref);
+    const authCanonRef = canonicalizeRef(releaseAuthority.ref);
+    if (entryCanonRef !== authCanonRef) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_REF_MISMATCH" };
     }
-    if (releaseAuthority.head !== undefined && releaseAuthority.head !== entry.head) {
+    if (releaseAuthority.head !== entry.head) {
       return { ok: false, reason: "RELEASE_AUTHORITY_HEAD_MISMATCH" };
     }
-    if (releaseAuthority.tree !== undefined && releaseAuthority.tree !== entry.tree) {
+    if (releaseAuthority.tree !== entry.tree) {
       return { ok: false, reason: "RELEASE_AUTHORITY_TREE_MISMATCH" };
     }
-    if (releaseAuthority.worktree !== undefined) {
-      const entryCanonWt = canonicalizeWorktree(entry.worktree);
-      const authCanonWt = canonicalizeWorktree(releaseAuthority.worktree);
-      if (entryCanonWt !== authCanonWt) {
-        return { ok: false, reason: "RELEASE_AUTHORITY_WORKTREE_MISMATCH" };
-      }
+    const entryCanonWt = canonicalizeWorktree(entry.worktree);
+    const authCanonWt = canonicalizeWorktree(releaseAuthority.worktree);
+    if (entryCanonWt !== authCanonWt) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_WORKTREE_MISMATCH" };
+    }
+    if (releaseAuthority.process.pid !== entry.process.pid) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_PROCESS_PID_MISMATCH" };
+    }
+    if (releaseAuthority.process.started_at !== entry.process.started_at) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_PROCESS_STARTED_AT_MISMATCH" };
+    }
+    const relSession = releaseAuthority.session ?? {};
+    if (relSession.workspace_id !== (entrySession.workspace_id ?? null)) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_SESSION_WORKSPACE_MISMATCH" };
+    }
+    if (relSession.pane_id !== (entrySession.pane_id ?? null)) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_SESSION_PANE_MISMATCH" };
+    }
+    if (relSession.agent_session !== (entrySession.agent_session ?? null)) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_SESSION_AGENT_MISMATCH" };
     }
     // F5: Lease must be expired for release to succeed
     if (entry.lease_expiry) {
@@ -1527,7 +1570,9 @@ export function reconstructFromAuthorityAndObservations(durableReceipts, liveObs
     if (receipt.tree !== live.tree) {
       return { ok: false, reason: `TREE_MISMATCH: ${cardId}`, entries: fresh.entries };
     }
-    if (canonicalizeWorktree(receipt.worktree) !== canonicalizeWorktree(live.worktree)) {
+    const receiptWorktree = canonicalizeWorktree(receipt.worktree);
+    const liveWorktree = canonicalizeWorktree(live.worktree);
+    if (!receiptWorktree || !liveWorktree || receiptWorktree !== liveWorktree) {
       return { ok: false, reason: `WORKTREE_MISMATCH: ${cardId}`, entries: fresh.entries };
     }
     if (receipt.process.pid !== live.process.pid) {
@@ -1584,9 +1629,14 @@ export function reconstructFromAuthorityAndObservations(durableReceipts, liveObs
   }
 
   // F002: Validate reconstructed entries against currentAuthority when provided.
+  // When durable receipts or live observations exist, currentAuthority is required
+  // to prevent stale/tuple-only reconstruction without canonical authority proof.
   // Each active entry must match the authority's generation, ref, head, tree,
-  // worktree, process, session, lease, and fence.
-  if (currentAuthority) {
+  // worktree, process (pid + started_at), session, lease_id, lease_expiry, and fence.
+  if (currentAuthority || (durableReceipts.length > 0 || liveObservations.length > 0)) {
+    if (!currentAuthority) {
+      return { ok: false, reason: "AUTHORITY_REQUIRED: reconstruction inputs exist but currentAuthority is missing", entries: fresh.entries };
+    }
     let validatedAuthority;
     try {
       validatedAuthority = currentAuthoritySchema.parse(currentAuthority);
@@ -1595,33 +1645,35 @@ export function reconstructFromAuthorityAndObservations(durableReceipts, liveObs
     }
     for (const [cardId, entry] of Object.entries(fresh.entries)) {
       if (entry.state === "RELEASED") continue;
-      if (validatedAuthority.generation !== undefined && entry.generation !== validatedAuthority.generation) {
+      if (entry.generation !== validatedAuthority.generation) {
         return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_GENERATION_MISMATCH: ${cardId}`, entries: fresh.entries };
       }
-      if (validatedAuthority.ref !== undefined) {
-        const entryCanonRef = canonicalizeRef(entry.ref);
-        const authCanonRef = canonicalizeRef(validatedAuthority.ref);
-        if (entryCanonRef !== authCanonRef) {
-          return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_REF_MISMATCH: ${cardId}`, entries: fresh.entries };
-        }
+      const entryCanonRef = canonicalizeRef(entry.ref);
+      const authCanonRef = canonicalizeRef(validatedAuthority.ref);
+      if (!entryCanonRef || !authCanonRef || entryCanonRef !== authCanonRef) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_REF_MISMATCH: ${cardId}`, entries: fresh.entries };
       }
-      if (validatedAuthority.head !== undefined && entry.head !== validatedAuthority.head) {
+      if (entry.head !== validatedAuthority.head) {
         return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_HEAD_MISMATCH: ${cardId}`, entries: fresh.entries };
       }
-      if (validatedAuthority.tree !== undefined && entry.tree !== validatedAuthority.tree) {
+      if (entry.tree !== validatedAuthority.tree) {
         return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_TREE_MISMATCH: ${cardId}`, entries: fresh.entries };
       }
-      if (validatedAuthority.worktree !== undefined) {
-        const entryCanonWt = canonicalizeWorktree(entry.worktree);
-        const authCanonWt = canonicalizeWorktree(validatedAuthority.worktree);
-        if (entryCanonWt !== authCanonWt) {
-          return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_WORKTREE_MISMATCH: ${cardId}`, entries: fresh.entries };
-        }
+      const entryCanonWt = canonicalizeWorktree(entry.worktree);
+      const authCanonWt = canonicalizeWorktree(validatedAuthority.worktree);
+      if (!entryCanonWt || !authCanonWt || entryCanonWt !== authCanonWt) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_WORKTREE_MISMATCH: ${cardId}`, entries: fresh.entries };
       }
-      if (validatedAuthority.process?.started_at !== undefined && entry.process.started_at !== validatedAuthority.process.started_at) {
+      if (entry.process.started_at !== validatedAuthority.process.started_at) {
         return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_PROCESS_MISMATCH: ${cardId}`, entries: fresh.entries };
       }
-      const authSession = validatedAuthority.session ?? {};
+      if (entry.process.pid !== validatedAuthority.process.pid) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_PID_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+      if (entry.lease_expiry !== validatedAuthority.lease_expiry) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_LEASE_EXPIRY_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+      const authSession = validatedAuthority.session;
       const entrySession = entry.session ?? {};
       if ((authSession.workspace_id ?? null) !== (entrySession.workspace_id ?? null)) {
         return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_SESSION_WORKSPACE_MISMATCH: ${cardId}`, entries: fresh.entries };
@@ -1632,13 +1684,13 @@ export function reconstructFromAuthorityAndObservations(durableReceipts, liveObs
       if ((authSession.agent_session ?? null) !== (entrySession.agent_session ?? null)) {
         return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_SESSION_AGENT_MISMATCH: ${cardId}`, entries: fresh.entries };
       }
-      if (validatedAuthority.lease_id !== undefined && entry.lease_id !== validatedAuthority.lease_id) {
+      if (entry.lease_id !== validatedAuthority.lease_id) {
         return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_LEASE_MISMATCH: ${cardId}`, entries: fresh.entries };
       }
-      if (validatedAuthority.fence !== undefined && entry.fence !== validatedAuthority.fence) {
+      if (entry.fence !== validatedAuthority.fence) {
         return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_FENCE_MISMATCH: ${cardId}`, entries: fresh.entries };
       }
-      if (validatedAuthority.fence_id !== undefined && entry.fence_id !== validatedAuthority.fence_id) {
+      if (entry.fence_id !== validatedAuthority.fence_id) {
         return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_FENCE_ID_MISMATCH: ${cardId}`, entries: fresh.entries };
       }
     }
@@ -1678,7 +1730,7 @@ export function admitEntryWithAuthority(registry, rawEntry, isoNow, { currentAut
   }
   const parsed = registryEntrySchema.parse(rawEntry);
   // F001: Validate fence matches authority
-  if (validatedAuthority.fence !== undefined && parsed.fence !== validatedAuthority.fence) {
+  if (parsed.fence !== validatedAuthority.fence) {
     return { ok: false, reason: `FENCE_MISMATCH: entry fence ${parsed.fence} != authority ${validatedAuthority.fence}` };
   }
   if (validatedAuthority.fence_id && parsed.fence_id !== validatedAuthority.fence_id) {
@@ -1700,39 +1752,42 @@ export function admitEntryWithAuthority(registry, rawEntry, isoNow, { currentAut
     }
   }
   // F001: Validate generation matches authority
-  if (validatedAuthority.generation !== undefined && parsed.generation !== validatedAuthority.generation) {
+  if (parsed.generation !== validatedAuthority.generation) {
     return { ok: false, reason: `GENERATION_MISMATCH: ${parsed.card_id}` };
   }
   // F001: Validate ref matches authority (canonical comparison)
-  if (validatedAuthority.ref !== undefined) {
-    const entryCanonRef = canonicalizeRef(parsed.ref);
-    const authCanonRef = canonicalizeRef(validatedAuthority.ref);
-    if (entryCanonRef !== authCanonRef) {
-      return { ok: false, reason: `REF_MISMATCH: ${parsed.card_id}` };
-    }
+  const entryCanonRef = canonicalizeRef(parsed.ref);
+  const authCanonRef = canonicalizeRef(validatedAuthority.ref);
+  if (!entryCanonRef || !authCanonRef || entryCanonRef !== authCanonRef) {
+    return { ok: false, reason: `REF_MISMATCH: ${parsed.card_id}` };
   }
   // F001: Validate head matches authority
-  if (validatedAuthority.head !== undefined && parsed.head !== validatedAuthority.head) {
+  if (parsed.head !== validatedAuthority.head) {
     return { ok: false, reason: `HEAD_MISMATCH: ${parsed.card_id}` };
   }
   // F001: Validate tree matches authority
-  if (validatedAuthority.tree !== undefined && parsed.tree !== validatedAuthority.tree) {
+  if (parsed.tree !== validatedAuthority.tree) {
     return { ok: false, reason: `TREE_MISMATCH: ${parsed.card_id}` };
   }
   // F001: Validate worktree matches authority (canonical comparison)
-  if (validatedAuthority.worktree !== undefined) {
-    const entryCanonWt = canonicalizeWorktree(parsed.worktree);
-    const authCanonWt = canonicalizeWorktree(validatedAuthority.worktree);
-    if (entryCanonWt !== authCanonWt) {
-      return { ok: false, reason: `WORKTREE_MISMATCH: ${parsed.card_id}` };
-    }
+  const entryCanonWt = canonicalizeWorktree(parsed.worktree);
+  const authCanonWt = canonicalizeWorktree(validatedAuthority.worktree);
+  if (!entryCanonWt || !authCanonWt || entryCanonWt !== authCanonWt) {
+    return { ok: false, reason: `WORKTREE_MISMATCH: ${parsed.card_id}` };
   }
-  // F001: Validate process identity from authority
-  if (validatedAuthority.process?.started_at !== undefined && parsed.process.started_at !== validatedAuthority.process.started_at) {
+  // F001: Validate process identity from authority (pid and started_at)
+  if (parsed.process.pid !== validatedAuthority.process.pid) {
+    return { ok: false, reason: `PROCESS_PID_MISMATCH: ${parsed.card_id}` };
+  }
+  if (parsed.process.started_at !== validatedAuthority.process.started_at) {
     return { ok: false, reason: `PROCESS_STARTED_AT_MISMATCH: ${parsed.card_id}` };
   }
+  // F001: Validate lease_expiry exact match with authority
+  if (parsed.lease_expiry !== validatedAuthority.lease_expiry) {
+    return { ok: false, reason: `LEASE_EXPIRY_MISMATCH: ${parsed.card_id}` };
+  }
   // F001: Validate session identity from authority
-  const authSession = validatedAuthority.session ?? {};
+  const authSession = validatedAuthority.session;
   const entrySession = parsed.session ?? {};
   if ((authSession.workspace_id ?? null) !== (entrySession.workspace_id ?? null)) {
     return { ok: false, reason: `SESSION_WORKSPACE_MISMATCH: ${parsed.card_id}` };
