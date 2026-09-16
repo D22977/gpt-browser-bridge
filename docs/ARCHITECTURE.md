@@ -1,154 +1,109 @@
-# GPT Browser Bridge — Architecture
+# GPT Browser Bridge — architecture orientation
 
-This document records the intended architecture, the local environment inventory
-(GBB-001 deliverable) and the skill/instruction loading matrix for each agent CLI.
+This document explains the boundaries visible in the repository. It is not a
+live registry, runtime checkpoint, or competing source of truth. Current
+decisions and status come from GitHub Control cards, exact refs/heads/trees/
+blobs, and read-back receipts; see [Issue #162](https://github.com/D22977/gpt-browser-bridge/issues/162)
+for the current resident/restartable restoration authority.
 
-Authoritative project rules: `plans/GBB_PARENT_WORK_ORDER.md`. This file is a
-living design doc that each card may extend.
-
-## 1. Overview
-
-```text
-Windows Task Scheduler
-        │
-        ▼
-resume.ps1                 (start-supervisor.ps1)
-        │
-        ▼
-Supervisor (deterministic Node process, no model)
-        ├─ heartbeat + lock + checkpoint
-        ├─ ORCA health
-        ├─ Control Tower terminal health / recovery
-        └─ morning_summary.md
-        ▼
-Control Tower Agent        (single decision point; never edits source directly)
-        │
-        ├─ Worker        — edits source inside allowed paths, runs tests, reports, commits
-        ├─ Reviewer      — fresh context, different agent/model family; conclusion only
-        ├─ Browser Action Runner — browser writes only (send / approved continue / approved re-open)
-        └─ Read-only Watcher — browser reads only, writes reply.md + result.json atomically
-```
-
-Principles:
-
-- Single-line serial execution (no parallelism between cards).
-- Control Tower is the **only** decision point.
-- All durable progress is written to the runtime tree **before** any terminal message.
-- Terminal handles are not permanent IDs; recovery uses `run_id` + terminal title.
-- Watcher source must never contain browser write APIs.
-- Supervisor only recovers; it never decides pass/rework and never resends.
-
-## 2. Paths
-
-| Kind | Path | In Git? |
-| ---- | ---- | ------- |
-| Repo (production) | `D:\AIWORK\GPT_BROWSER_BRIDGE\` | yes |
-| Worktrees | `D:\AIWORK_WT\GPT_BROWSER_BRIDGE\<TASK_ID>\` | per-card worktrees |
-| Runtime | `D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\` | **no** (ignored) |
-| This worktree | `C:\Users\Lupun\orca\workspaces\GPT_BROWSER_BRIDGE\gbb-001-a1` | yes (branch `gbb-001-a1`) |
-
-The runtime tree (`state/`, `locks/`, `jobs/`, `runs/`, `events/`, `logs/`) is the
-single source of truth for project progress. It is never committed.
-
-## 3. Runtime structure
+## 1. Responsibilities
 
 ```text
-D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\
-├─ state/    project_state.json, heartbeat.json, morning_summary.md
-├─ locks/    supervisor.lock
-├─ jobs/     <job_id>/ job.json, reply.md, result.json, watcher.log, diagnostics/
-├─ runs/     <run_id>/ dispatch.json, worker_report.md, reviewer_report.md, recovery.log
-├─ events/   events.ndjson
-└─ logs/     supervisor.log, control_tower.log, scheduler.log
+GitHub durable Control authority
+        │ exact card / generation / head / tree / target / receipt
+        ▼
+Resident/restartable local transport and Herdr delivery consumer
+        │ read authority again before each bounded action
+        ▼
+Deterministic Supervisor
+        ├─ heartbeat, lock, checkpoint, and bounded recovery
+        ├─ local continuity and terminal health
+        └─ delivery result and morning-summary records
+        ▼
+Role-specific execution
+        ├─ Control Tower — decides and accepts
+        ├─ Worker — edits only allow-listed paths
+        ├─ Reviewer — fresh, independent, read-only verdict
+        ├─ Sender — browser writes only
+        └─ Watcher — browser reads only
 ```
 
-`project_state.json` legal states: `INITIALIZING`, `RUNNING`, `WAITING_WORKER`,
-`WAITING_REVIEWER`, `WAITING_BROWSER`, `REWORK`, `NEEDS_HUMAN`, `COMPLETED`,
-`CANCELLED`. Supervisor must never move `NEEDS_HUMAN → RUNNING` on its own.
+The Supervisor transports and recovers durable work; it does not decide whether
+work passes, adopt a candidate, or resend an uncertain browser action. A
+resident consumer is the intended normal unattended path for Issue #162. A
+one-shot workflow can be a bounded transport, bootstrap, diagnostic, or
+historical record, but its presence does not make it the normal loop.
 
-## 4. Repo structure (intended)
+## 2. Durable versus local state
 
-See parent work order §8. Implemented so far (GBB-001):
+GitHub is the semantic authority for current work: cards, comments, review and
+terminal receipts, exact refs, and exact content identities. The local runtime
+tree is transport/continuity state only. Typical local state includes locks,
+heartbeats, jobs, checkpoints, recovery records, logs, and idempotency state;
+its exact path is an environment binding and must be verified from the current
+card rather than copied from this document.
 
-```text
-README.md, AGENTS.md, package.json, package-lock.json, THIRD_PARTY_NOTICES.md,
-.gitignore
-plans/        parent work order (formal + raw)
-skills/       control-tower, worker, reviewer, browser-sender, browser-watcher,
-              recovery-supervisor  (canonical SKILL.md, single source of truth)
-src/          contracts.mjs, adapters/ (orca / browser / agent)
-scripts/      bootstrap.ps1, start-supervisor.ps1, resume.ps1, keep-awake.ps1,
-              register-resume-task.ps1, unregister-resume-task.ps1
-tests/        contracts.test.mjs
-docs/         ARCHITECTURE.md, SECURITY.md
-```
+## 3. Repository boundaries
 
-## 5. Environment inventory (recorded 2026-07-31, GBB-001)
+| Area | Responsibility | Mutation rule |
+| --- | --- | --- |
+| `src/` | deterministic contracts, adapters, Supervisor, Sender, Watcher, and resident delivery | only with an exact Worker card |
+| `scripts/` | Windows lifecycle/resume entrypoints | only with an exact Worker card |
+| `tests/` | executable regression and negative-path coverage | change with the behavior card, never to hide a failure |
+| `skills/` | role contracts and operational instructions | separate exact skill-change authority |
+| `.github/workflows/` | GitHub transport, bounded automation, and historical/transition records | no new normal-loop series; retirement needs reference audit and Control decision |
+| `plans/` | historical or card-specific planning material | not semantic authority unless explicitly bound |
+| `docs/` | orientation and security explanation | must not duplicate mutable current status |
 
-| Tool | Version / state | Notes |
-| ---- | --------------- | ----- |
-| Node.js | `v24.18.0` | `C:\Program Files\nodejs\node.exe` |
-| npm | `11.16.0` | |
-| Git | `2.55.0.windows.3` | |
-| opencode | `1.18.10` | `%APPDATA%\npm\opencode.cmd` |
-| claude | `2.1.218` (Claude Code) | `C:\Users\Lupun\.local\bin\claude.exe` |
-| codex | `codex-cli 0.145.0` | `%APPDATA%\npm\codex.cmd` |
-| orca | app `1.4.162` | CLI at `%LOCALAPPDATA%\Programs\orca\resources\bin\orca.exe` |
+## 4. Compatibility surfaces
 
-Notes:
+The current Supervisor still contains ORCA terminal-recovery compatibility and
+the repository retains its tests and fixtures. That coexistence is not proof of
+overdevelopment: ORCA removal changes supported behavior and requires a separate
+architecture/support decision. Likewise, the Herdr resume adapter and its
+regression matrix protect exact admission, duplicate suppression, authority
+revalidation, physical-send fencing, and uncertain-send stopping; their size
+alone is not a deletion signal.
 
-- `orca` / `orca-cli` are **not** on `PATH` in a plain PowerShell. The public CLI
-  binary is `C:\Users\Lupun\AppData\Local\Programs\orca\resources\bin\orca.exe`
-  (see `C:\Users\Lupun\.agents\skills\orca-cli\SKILL.md` resolution rules: prefer
-  `$env:ORCA_CLI_COMMAND` when set, else `orca`). `%LOCALAPPDATA%\Programs\orca\Orca.exe`
-  is the Electron app launcher (single-instance) and is not the CLI.
-- `opencode` requires `NO_COLOR` or a non-TTY to emit clean `--help` text (ANSI art).
-- None of the missing tools were installed by this card; missing CLI tools are only
-  recorded per parent work order §12.4–§12.5.
-- `playwright-core@1.62.1`, `write-file-atomic@8.0.0`, `zod@4.4.3` are installed as
-  the only runtime dependencies (`package.json`). `npm install` reports 0
-  vulnerabilities. (2 devDependencies resolved transitively — none added by us.)
-- Node 24 on Windows: `node --test tests/` (bare directory argument) fails with
-  `MODULE_NOT_FOUND` (nodejs/node#64555). The `npm test` script therefore uses the
-  glob form `node --test "tests/**/*.test.mjs"`; see `AGENTS.md`.
+Sender and Watcher intentionally remain separate. The Watcher is read-only and
+must not share the Sender's browser-write runner merely to reduce duplicated
+plumbing.
 
-## 6. Skill loading matrix
+## 5. Recovery and safety invariants
 
-Canonical skills live in this repo under `skills/<role>/SKILL.md`. Different CLIs
-load instructions/skills from different locations; the matrix below records what was
-found on this machine (GBB-001). Do **not** hand-maintain diverging copies of the
-same rules per tool; copy/adapt from the canonical files only.
+- Re-list and revalidate the exact target after a restart or transport drift;
+  never trust a stale terminal handle or stale ref.
+- Bind every action to the current card, generation, exact source head/tree,
+  target, and idempotency key.
+- Persist delivery state before the physical prompt where required, use the
+  final reservation/lease/fence gate, and stop with `NO_BLIND_RETRY` when send
+  outcome is uncertain.
+- Treat malformed, incomplete, ambiguous, stale, or mismatched GitHub history as
+  a control-required condition.
+- Preserve `NEEDS_HUMAN` and other terminal boundaries; recovery cannot silently
+  turn them back into active work.
 
-| Tool | Instructions file (repo-local) | Skill / instruction locations on this machine | Notes |
-| ---- | ------------------------------ | --------------------------------------------- | ----- |
-| opencode | `AGENTS.md` (root) | project `opencode.json` / `.opencode/`; user config `~/.config/opencode/opencode.json(c)`; skills loaded from `~/.agents/skills/<name>/SKILL.md` | `opencode.json` at repo root currently sets model + permission rules (provided by Control Tower; outside GBB-001 allowed paths). |
-| claude | `CLAUDE.md` / `AGENTS.md` | `~/.claude/skills/<name>/SKILL.md`; `~/.claude/settings.json`; project `.claude/skills/` | Installed via `C:\Users\Lupun\.local\bin\claude.exe`. |
-| codex | `AGENTS.md` (root, supported) | `~/.codex/AGENTS.md`; `~/.codex/skills/` (incl. `.system/` bundled skills); `~/.codex/config.toml` (model, plugins, marketplaces) | Installed via npm (`%APPDATA%\npm\codex.cmd`). |
-| orca | `orca skills get <name>` | orca CLI bundles version-matched skill guides (`orca skills list` / `orca skills get`); agent skills under `~/.agents/skills/` | Do not hardcode orca skill text; fetch via `orca skills get orca-cli` etc. |
+## 6. Verification and change flow
 
-Adapter strategy (parent work order §7): for each CLI that loads skills from its own
-directory, create a copy/symlink adapter from the canonical `skills/<role>/SKILL.md`
-into that tool's skill location, and record the mapping here. No manual divergence.
+1. Control publishes an exact card and the Worker reads it back.
+2. Worker consumes the card in an isolated worktree, changes only allow-listed
+   paths, and publishes a terminal receipt with exact hashes and evidence.
+3. A NEW/FRESH/INDEPENDENT Reviewer rereads the current authority and exact
+   candidate; it does not modify or adopt the candidate.
+4. Control explicitly accepts or rejects the bounded result. Reviewer PASS does
+   not itself authorize merge, release, deployment, or a successor.
 
-## 7. Skills
+For workflow retirement, the prerequisite is a complete reference audit against
+current/open cards, comments, exact path/blob bindings, active normal-path needs,
+and superseding terminal/acceptance receipts. Unproven items remain
+`KEEP_ACTIVE`, `KEEP_HISTORICAL`, or `UNKNOWN`; do not delete by file age or line
+count.
 
-Canonical skills are the role contracts. Content is specified in parent work order
-§7.1–§7.6 and implemented in `skills/<role>/SKILL.md`. They define role boundaries
-(Section 6 of the parent order): Sender (browser writes only), Watcher (browser reads
-only), Worker (allowed-paths source edits), Reviewer (fresh context, read-only),
-Control Tower (only decision point), Recovery Supervisor (deterministic recoverer).
+## 7. Environment notes
 
-## 8. Contracts & adapters
+Tool versions, runner labels, executable locations, and runtime roots drift.
+Record and verify them from the current Control card or live read-only checks;
+do not treat an old inventory in this document as current configuration.
 
-- `src/contracts.mjs` — Zod schemas for `job.json`, `result.json`,
-  `project_state.json` and agent report schemas (see `docs/` schemas). Validated by
-  `tests/contracts.test.mjs` with `node:test`.
-- `src/adapters/` — interface stubs for `orca_adapter.mjs` (terminal/worktree ops),
-  `browser_adapter.mjs` (send vs watch separation), `agent_adapter.mjs`
-  (CLI invocation for worker/reviewer). Bodies are filled by later cards.
-
-## 9. Security posture
-
-See `docs/SECURITY.md`. Highlights: CDP binds `127.0.0.1` only; no cookies/tokens/
-Chrome profiles in Git; logs limited to conversation IDs, titles, counts, hashes,
-error codes, timestamps; `output_dir` validated and confined to the runtime root.
+Security policy is maintained in [docs/SECURITY.md](SECURITY.md). Role and
+mutation rules are summarized in [AGENTS.md](../AGENTS.md).
