@@ -392,6 +392,28 @@ export function findExistingDelivery(comments, logicalKey, protocol = HERDR_RESU
   return null;
 }
 
+// The producer must be allowed to pass its own just-published SEND_PENDING
+// marker through the final gate. A different marker for the same logical key
+// remains a duplicate and blocks the prompt.
+function isOwnPublishedPending(existing, pending) {
+  if (!existing || !pending || existing.state !== SEND_PENDING) return false;
+  const fields = [
+    ["logical_event_key", pending.logical_event_key],
+    ["source_terminal_receipt", String(pending.source_terminal_receipt)],
+    ["control_generation", String(pending.control_generation)],
+    ["card_id", pending.card_id],
+    ["allowed_action_class", pending.allowed_action_class],
+    ["target_agent_name", pending.target_agent_name],
+    ["target_executor_instance_id", pending.target_executor_instance_id],
+    ["target_surface", pending.target_surface],
+    ["target_herdr_agent", pending.target_herdr_agent],
+    ["target_herdr_workspace_id", pending.target_herdr_workspace_id],
+    ["target_herdr_pane_id", pending.target_herdr_pane_id],
+    ["target_herdr_agent_session", pending.target_herdr_agent_session],
+  ];
+  return fields.every(([field, expected]) => existing[field] === expected);
+}
+
 function sessionValue(value) {
   if (typeof value === "string") return value;
   return value?.value ?? value?.id ?? "";
@@ -824,7 +846,7 @@ export async function deliverResumeOnce({
   if (beforePhysicalSend && !physicalPromptBoundary) {
     let physicalGate;
     try {
-      physicalGate = normalizeGateResult(await beforePhysicalSend({ logicalKey, waitTuple: tuple, decision: parsed.decision }));
+      physicalGate = normalizeGateResult(await beforePhysicalSend({ logicalKey, waitTuple: tuple, decision: parsed.decision, phase: "before_physical_send", pendingReceipt: sendPendingReceipt }));
     } catch (error) {
       return { decision: CONTROL_REQUIRED, logical_key: logicalKey, reason: "CONTROL_REQUIRED_PHYSICAL_SEND_GATE_FAILED", error: String(error?.message ?? error) };
     }
@@ -1039,7 +1061,7 @@ export function createResidentHerdrConsumer(config = {}) {
             }
             const latestComments = normalizeCurrentComments(await config.readComments({ waitTuple: details.waitTuple, logicalKey: details.logicalKey, phase: "before_send" }));
             const duplicate = findExistingDelivery(latestComments, details.logicalKey, config.protocol);
-            if (duplicate) return { allow: false, decision: "NO_OP_DUPLICATE", reason: "NO_OP_DUPLICATE" };
+            if (duplicate && !isOwnPublishedPending(duplicate, details.pendingReceipt)) return { allow: false, decision: "NO_OP_DUPLICATE", reason: "NO_OP_DUPLICATE" };
             return { allow: true };
           } catch (error) {
             const reason = error?.code === "GITHUB_COMMENTS_READBACK_AMBIGUOUS"
@@ -1061,7 +1083,7 @@ export function createResidentHerdrConsumer(config = {}) {
             }
             const latestComments = normalizeCurrentComments(await config.readComments({ waitTuple: details.waitTuple, logicalKey: details.logicalKey, phase: "before_physical_send" }));
             const duplicate = findExistingDelivery(latestComments, details.logicalKey, config.protocol);
-            if (duplicate) return { allow: false, decision: "NO_OP_DUPLICATE", reason: "NO_OP_DUPLICATE" };
+            if (duplicate && !isOwnPublishedPending(duplicate, details.pendingReceipt)) return { allow: false, decision: "NO_OP_DUPLICATE", reason: "NO_OP_DUPLICATE" };
             const rawNow = typeof config.now === "function" ? config.now() : Date.now();
             const nowMs = typeof rawNow === "number" ? rawNow : Date.parse(rawNow);
             if (!Number.isFinite(nowMs)) return { allow: false, decision: CONTROL_REQUIRED, reason: "CONTROL_REQUIRED_PHYSICAL_SEND_TIME_UNREADABLE" };

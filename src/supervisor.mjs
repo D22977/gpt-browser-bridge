@@ -310,7 +310,7 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
     if (!state.present) {
       const created = await createExclusiveJson(paths.lock, newRecord);
       if (created.error) return { owned: false, holder: null, reason: "CONTROL_REQUIRED_LOCK_STATE_UNREADABLE" };
-      if (created.created) return { owned: true, holder: pid, fence: newRecord.fence };
+      if (created.created) return { owned: true, holder: pid, pid: newRecord.pid, fence: newRecord.fence, host_id: newRecord.host_id ?? null };
       continue;
     }
 
@@ -348,7 +348,7 @@ export async function acquireOrConfirmLock(paths, { pid, hostId = null, authoriz
         ...(current.lease_expires_at ? { lease_expires_at: current.lease_expires_at } : {}),
       };
       await writeFileAtomic(paths.lock, JSON.stringify(refreshed));
-      return { owned: true, holder: pid, fence: refreshed.fence };
+      return { owned: true, holder: pid, pid: refreshed.pid, fence: refreshed.fence, host_id: currentHostId };
     }
     let liveOwner;
     try {
@@ -971,7 +971,20 @@ export async function runResumeDeliveryCheck(ctx, {
       if (startingFingerprint !== null && latestFingerprint !== startingFingerprint) return { allow: false, decision: "CONTROL_REQUIRED", reason: "AUTHORITY_CHANGED" };
       const latestComments = normalizeCurrentComments(await cfg.readComments({ waitTuple: tupleCheck.waitTuple, decision: parsed.decision, logicalKey: details.logicalKey, phase: "before_send" }));
       const duplicate = findExistingDelivery(latestComments, details.logicalKey, cfg.protocol);
-      if (duplicate) return { allow: false, decision: "NO_OP_DUPLICATE", reason: "NO_OP_DUPLICATE" };
+      const ownPending = details.phase === "before_physical_send" && duplicate?.state === "SEND_PENDING" && details.pendingReceipt
+        && duplicate.logical_event_key === details.pendingReceipt.logical_event_key
+        && duplicate.source_terminal_receipt === String(details.pendingReceipt.source_terminal_receipt)
+        && duplicate.control_generation === String(details.pendingReceipt.control_generation)
+        && duplicate.card_id === details.pendingReceipt.card_id
+        && duplicate.allowed_action_class === details.pendingReceipt.allowed_action_class
+        && duplicate.target_agent_name === details.pendingReceipt.target_agent_name
+        && duplicate.target_executor_instance_id === details.pendingReceipt.target_executor_instance_id
+        && duplicate.target_surface === details.pendingReceipt.target_surface
+        && duplicate.target_herdr_agent === details.pendingReceipt.target_herdr_agent
+        && duplicate.target_herdr_workspace_id === details.pendingReceipt.target_herdr_workspace_id
+        && duplicate.target_herdr_pane_id === details.pendingReceipt.target_herdr_pane_id
+        && duplicate.target_herdr_agent_session === details.pendingReceipt.target_herdr_agent_session;
+      if (duplicate && !ownPending) return { allow: false, decision: "NO_OP_DUPLICATE", reason: "NO_OP_DUPLICATE" };
       if (typeof ownershipRevalidator === "function") {
         const ownership = await ownershipRevalidator({ logicalKey: details.logicalKey, waitTuple: details.waitTuple });
         if (!ownership?.owned) return { allow: false, decision: "CONTROL_REQUIRED", reason: ownership?.reason ?? "CONTROL_REQUIRED_LOCK_NOT_OWNED" };
@@ -1148,6 +1161,11 @@ export function canonicalizeWorktree(wt) {
     let body = suffix.slice(1);
     if (body.endsWith("\\") || body.endsWith("/")) body = body.slice(0, -1);
     if (body.length === 0) return `${root}/`;
+    // F004: Reject single-separator mixed drive spellings (e.g. D:\worktrees/reg-01).
+    // The body must use exclusively backslashes or exclusively forward slashes.
+    const hasBackslash = suffix.includes("\\");
+    const hasForwardSlash = suffix.includes("/");
+    if (hasBackslash && hasForwardSlash) return null;
     const segments = body.split(/[\\/]/);
     if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) return null;
     return `${root}/${segments.join("/").toLowerCase()}`;
@@ -1842,12 +1860,63 @@ function normalizeCtx(ctxIn) {
     // F001: single typed currentAuthority object replaces partial admissionLeaseId/fence/fenceId
     registry: ctxIn.registry ?? createRegistry(),
     currentAuthority: ctxIn.currentAuthority ?? null,
+    // F001: the candidate authority is never sufficient by itself. The
+    // caller must provide a fresh trusted identity read after lock acquire;
+    // the complete typed tuple is compared before any downstream mutation.
+    readCurrentIdentity: ctxIn.readCurrentIdentity ?? null,
     // F2: reconstruction inputs
     durableReceipts: ctxIn.durableReceipts ?? [],
     liveObservations: ctxIn.liveObservations ?? [],
     // F1: pending admission entries injected by the resident consumer
     pendingAdmissions: ctxIn.pendingAdmissions ?? [],
   };
+}
+
+function authorityTupleDifference(candidate, observed) {
+  const candidateWorktree = canonicalizeWorktree(candidate.worktree);
+  const observedWorktree = canonicalizeWorktree(observed.worktree);
+  if ((!candidateWorktree || !observedWorktree) && candidate.worktree !== observed.worktree) return "WORKTREE";
+  if (candidateWorktree && observedWorktree && candidateWorktree !== observedWorktree) return "WORKTREE";
+  if (candidate.generation !== observed.generation) return "GENERATION";
+  if (canonicalizeRef(candidate.ref) !== canonicalizeRef(observed.ref)) return "REF";
+  if (candidate.head !== observed.head) return "HEAD";
+  if (candidate.tree !== observed.tree) return "TREE";
+  if (candidate.process.pid !== observed.process.pid) return "PROCESS_PID";
+  if (candidate.process.started_at !== observed.process.started_at) return "PROCESS_STARTED_AT";
+  for (const field of ["workspace_id", "pane_id", "agent_session"]) {
+    if (candidate.session[field] !== observed.session[field]) return `SESSION_${field.toUpperCase()}`;
+  }
+  if (candidate.lease_id !== observed.lease_id) return "LEASE_ID";
+  if (candidate.lease_expiry !== observed.lease_expiry) return "LEASE_EXPIRY";
+  if (candidate.fence !== observed.fence) return "FENCE";
+  if (candidate.fence_id !== observed.fence_id) return "FENCE_ID";
+  return null;
+}
+
+async function readAndVerifyCurrentAuthority(ctx, lock, isoNow) {
+  if (typeof ctx.readCurrentIdentity !== "function") {
+    return { ok: false, reason: "CURRENT_IDENTITY_READER_MISSING" };
+  }
+  let raw;
+  try {
+    raw = await ctx.readCurrentIdentity({ phase: "after_lock", lock, isoNow });
+  } catch (error) {
+    return { ok: false, reason: "CURRENT_IDENTITY_READ_FAILED", error: String(error?.message ?? error) };
+  }
+  const observedInput = raw?.value ?? raw;
+  let observed;
+  try {
+    observed = currentAuthoritySchema.parse(observedInput);
+  } catch (error) {
+    return { ok: false, reason: `CURRENT_IDENTITY_INVALID: ${error?.message ?? String(error)}` };
+  }
+  const lockHostId = lock.host_id ?? null;
+  const observedHostId = observedInput?.host_id ?? lockHostId;
+  if (observedHostId !== lockHostId) return { ok: false, reason: "CURRENT_IDENTITY_HOST_MISMATCH" };
+  if (observed.process.pid !== lock.pid) return { ok: false, reason: "CURRENT_IDENTITY_PID_MISMATCH" };
+  if (observed.fence !== lock.fence) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_MISMATCH" };
+  if (observed.fence_id !== String(lock.fence)) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_ID_MISMATCH" };
+  return { ok: true, authority: { ...observed, host_id: lockHostId } };
 }
 
 export async function runLoopOnce(ctxIn) {
@@ -1865,12 +1934,20 @@ export async function runLoopOnce(ctxIn) {
     return { stop: true, reason: lock.reason ?? "LOCK_NOT_OWNED", holder: lock.holder, at: isoNow };
   }
 
-  // F001: Verify currentAuthority fence against the acquired lock.
-  // The lock record is the production source of truth for the numeric fence
-  // and derived string fence_id. A caller-supplied currentAuthority with a
-  // different fence must be rejected before any reconstruction or admission.
+  // F001: Verify currentAuthority against the acquired lock and a fresh,
+  // independently read current identity. The lock record is the production
+  // source of truth for pid, host_id, numeric fence, and derived fence_id. A
+  // caller-supplied authority with a matching fence but forged process,
+  // session, ref, head, tree, worktree, lease, or host must be rejected before
+  // any reconstruction or admission.
   const derivedFenceId = String(lock.fence);
-  if (ctx.currentAuthority) {
+  let verifiedAuthority = null;
+  if (ctx.currentAuthority || ctx.pendingAdmissions.length > 0 || ctx.durableReceipts.length > 0 || ctx.liveObservations.length > 0) {
+    if (!ctx.currentAuthority) {
+      tickEvents.push({ type: "lock_authority_rejected", reason: "AUTHORITY_MISSING" });
+      await appendEvents(paths, tickEvents, isoNow);
+      return { stop: false, at: isoNow, reason: "LOCK_AUTHORITY_MISSING" };
+    }
     let validatedAuthority;
     try {
       validatedAuthority = currentAuthoritySchema.parse(ctx.currentAuthority);
@@ -1879,6 +1956,7 @@ export async function runLoopOnce(ctxIn) {
       await appendEvents(paths, tickEvents, isoNow);
       return { stop: false, at: isoNow, reason: "LOCK_AUTHORITY_INVALID" };
     }
+    // Preserve the typed fence diagnostics before invoking the second read.
     if (validatedAuthority.fence !== lock.fence) {
       tickEvents.push({ type: "lock_authority_rejected", reason: `LOCK_FENCE_MISMATCH: authority fence ${validatedAuthority.fence} != lock fence ${lock.fence}` });
       await appendEvents(paths, tickEvents, isoNow);
@@ -1889,18 +1967,57 @@ export async function runLoopOnce(ctxIn) {
       await appendEvents(paths, tickEvents, isoNow);
       return { stop: false, at: isoNow, reason: "LOCK_AUTHORITY_FENCE_ID_MISMATCH" };
     }
+    const lockHostId = lock.host_id ?? null;
+    if (!lockHostId) {
+      tickEvents.push({ type: "lock_authority_rejected", reason: "LOCK_HOST_ID_MISSING" });
+      await appendEvents(paths, tickEvents, isoNow);
+      return { stop: false, at: isoNow, reason: "LOCK_AUTHORITY_HOST_MISSING" };
+    }
+    if (ctx.currentAuthority.host_id !== undefined && ctx.currentAuthority.host_id !== lockHostId) {
+      tickEvents.push({ type: "lock_authority_rejected", reason: "LOCK_HOST_ID_MISMATCH" });
+      await appendEvents(paths, tickEvents, isoNow);
+      return { stop: false, at: isoNow, reason: "LOCK_AUTHORITY_HOST_MISMATCH" };
+    }
+    const identityResult = await readAndVerifyCurrentAuthority(ctx, lock, isoNow);
+    if (!identityResult.ok) {
+      const reason = identityResult.reason === "CURRENT_IDENTITY_PID_MISMATCH"
+        ? "LOCK_AUTHORITY_PID_MISMATCH"
+        : identityResult.reason === "CURRENT_IDENTITY_HOST_MISMATCH"
+          ? "LOCK_AUTHORITY_HOST_MISMATCH"
+          : identityResult.reason === "CURRENT_IDENTITY_FENCE_MISMATCH"
+            ? "LOCK_AUTHORITY_FENCE_MISMATCH"
+            : identityResult.reason === "CURRENT_IDENTITY_FENCE_ID_MISMATCH"
+              ? "LOCK_AUTHORITY_FENCE_ID_MISMATCH"
+              : `LOCK_AUTHORITY_${identityResult.reason}`;
+      tickEvents.push({ type: "lock_authority_rejected", reason });
+      await appendEvents(paths, tickEvents, isoNow);
+      return { stop: false, at: isoNow, reason };
+    }
+    const identityDifference = authorityTupleDifference(validatedAuthority, identityResult.authority);
+    if (identityDifference) {
+      const reason = identityDifference === "PROCESS_PID"
+        ? "LOCK_AUTHORITY_PID_MISMATCH"
+        : `LOCK_AUTHORITY_${identityDifference}_MISMATCH`;
+      tickEvents.push({ type: "lock_authority_rejected", reason });
+      await appendEvents(paths, tickEvents, isoNow);
+      return { stop: false, at: isoNow, reason };
+    }
+    // F001: only the post-lock identity snapshot is passed downstream. The
+    // caller candidate is used for equality checking, never as authority.
+    verifiedAuthority = identityResult.authority;
   }
 
   // F1/F002: Registry reconstruction from durable receipts + live observations
   // under the ACQUIRED lock/fence. Derive fence_id (string) from the numeric
   // lock fence so string fence_id comparisons in reconstruction and admission
-  // never fail for a type mismatch.
+  // never fail for a type mismatch. Use verifiedAuthority (bound to actual lock
+  // and current process) instead of caller-injected ctx.currentAuthority.
   let registry = ctx.registry;
   if (ctx.durableReceipts.length > 0 || ctx.liveObservations.length > 0) {
     const reconResult = reconstructFromAuthorityAndObservations(
       ctx.durableReceipts,
       ctx.liveObservations,
-      { currentFenceId: derivedFenceId, currentAuthority: ctx.currentAuthority }
+      { currentFenceId: derivedFenceId, currentAuthority: verifiedAuthority }
     );
     if (!reconResult.ok) {
       tickEvents.push({ type: "registry_reconstruction_rejected", reason: reconResult.reason });
@@ -1918,15 +2035,15 @@ export async function runLoopOnce(ctxIn) {
   }
 
   // F001/F1: Admission gate - admit pending entries under the ACQUIRED lock/fence.
-  // Derive admission authority from the actual lock, not caller self-asserted fields.
-  // F001: Use typed currentAuthority object validated against currentAuthoritySchema.
+  // Use verifiedAuthority (bound to actual lock and current process) instead of
+  // caller-injected ctx.currentAuthority.
   // On ANY rejection, fail-closed: no project-state read, no terminal recovery,
   // no resume delivery, no physical send.
   const admissionResults = [];
   let admissionRejected = false;
   for (const rawEntry of ctx.pendingAdmissions) {
     const result = admitEntryWithAuthority(registry, rawEntry, isoNow, {
-      currentAuthority: ctx.currentAuthority,
+      currentAuthority: verifiedAuthority,
     });
     admissionResults.push({ card_id: rawEntry.card_id, ...result });
     if (!result.ok) {

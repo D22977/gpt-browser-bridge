@@ -2430,21 +2430,24 @@ test("F1: Supervisor runLoopOnce exercises registry admission path under lock/fe
   const { root, paths } = await tempRuntime(t);
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
   const pendingEntry = regEntry({ card_id: "W-PROD-01", ref: "refs/heads/prod", allowlist_paths: ["src/prod.mjs"], worktree: "D:\\worktrees\\prod", fence_id: "1", lease_id: "lease-supervisor-01", session: { workspace_id: "w-prod", pane_id: "p-prod", agent_session: "s-prod" }, process: { pid: 41020, started_at: REG_TS } });
+  const authority = {
+    generation: 1, ref: "refs/heads/prod", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\prod", process: { pid: 41020, started_at: REG_TS },
+    session: { workspace_id: "w-prod", pane_id: "p-prod", agent_session: "s-prod" },
+    lease_id: "lease-supervisor-01", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
     pid: 41020,
+    hostId: "host-a",
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: createRegistry(),
     admissionLeaseId: "lease-supervisor-01",
     pendingAdmissions: [pendingEntry],
-    currentAuthority: {
-      generation: 1, ref: "refs/heads/prod", head: "a".repeat(40), tree: "b".repeat(40),
-      worktree: "D:\\worktrees\\prod", process: { pid: 41020, started_at: REG_TS },
-      session: { workspace_id: "w-prod", pane_id: "p-prod", agent_session: "s-prod" },
-      lease_id: "lease-supervisor-01", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
-    },
+    currentAuthority: authority,
+    readCurrentIdentity: async () => authority,
   });
   assert.equal(outcome.stop, false);
   assert.ok(outcome.at);
@@ -2485,19 +2488,22 @@ test("F6-F1: Supervisor runLoopOnce rejects third worker through real admission 
   });
   // Try to admit a third worker - should be rejected
   const pendingEntry = regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"], worktree: "D:\\worktrees\\w3", fence_id: "1", lease_id: "lease-3", session: { workspace_id: "w3", pane_id: "p3", agent_session: "s3" }, process: { pid: 41030, started_at: REG_TS } });
+  const authority = {
+    generation: 1, ref: "refs/heads/c", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\w3", process: { pid: 41030, started_at: REG_TS },
+    session: { workspace_id: "w3", pane_id: "p3", agent_session: "s3" },
+    lease_id: "lease-3", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
     pid: 41030,
+    hostId: "host-a",
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    currentAuthority: {
-      generation: 1, ref: "refs/heads/c", head: "a".repeat(40), tree: "b".repeat(40),
-      worktree: "D:\\worktrees\\w3", process: { pid: 41030, started_at: REG_TS },
-      session: { workspace_id: "w3", pane_id: "p3", agent_session: "s3" },
-      lease_id: "lease-3", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
-    },
+    currentAuthority: authority,
+    readCurrentIdentity: async () => authority,
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.stop, false);
@@ -2522,19 +2528,22 @@ test("F6-F1: Supervisor runLoopOnce rejects second reviewer through real admissi
     currentAuthority: authR1,
   });
   const pendingEntry = regEntry({ card_id: "R2", role: "reviewer", fence_id: "1", lease_id: "lease-r2", process: { pid: 41031, started_at: REG_TS } });
+  const authority = {
+    generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\reg-01", process: { pid: 41031, started_at: REG_TS },
+    session: { workspace_id: "w-reg-01", pane_id: "p-reg-01", agent_session: "s-reg-01" },
+    lease_id: "lease-r2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
     pid: 41031,
+    hostId: "host-a",
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    currentAuthority: {
-      generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
-      worktree: "D:\\worktrees\\reg-01", process: { pid: 41031, started_at: REG_TS },
-      session: { workspace_id: "w-reg-01", pane_id: "p-reg-01", agent_session: "s-reg-01" },
-      lease_id: "lease-r2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
-    },
+    currentAuthority: authority,
+    readCurrentIdentity: async () => authority,
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.admissionResults[0].ok, false);
@@ -2556,19 +2565,22 @@ test("F6-F1: Supervisor runLoopOnce rejects same ref writer through real admissi
     currentAuthority: auth1,
   });
   const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/main", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" }, process: { pid: 41032, started_at: REG_TS } });
+  const authority = {
+    generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\w2", process: { pid: 41032, started_at: REG_TS },
+    session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
+    lease_id: "lease-2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
     pid: 41032,
+    hostId: "host-a",
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    currentAuthority: {
-      generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
-      worktree: "D:\\worktrees\\w2", process: { pid: 41032, started_at: REG_TS },
-      session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
-      lease_id: "lease-2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
-    },
+    currentAuthority: authority,
+    readCurrentIdentity: async () => authority,
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.admissionResults[0].ok, false);
@@ -2590,19 +2602,22 @@ test("F6-F1: Supervisor runLoopOnce rejects overlapping paths through real admis
     currentAuthority: auth1,
   });
   const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/contracts.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" }, process: { pid: 41033, started_at: REG_TS } });
+  const authority = {
+    generation: 1, ref: "refs/heads/b", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\w2", process: { pid: 41033, started_at: REG_TS },
+    session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
+    lease_id: "lease-2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
     pid: 41033,
+    hostId: "host-a",
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    currentAuthority: {
-      generation: 1, ref: "refs/heads/b", head: "a".repeat(40), tree: "b".repeat(40),
-      worktree: "D:\\worktrees\\w2", process: { pid: 41033, started_at: REG_TS },
-      session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
-      lease_id: "lease-2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
-    },
+    currentAuthority: authority,
+    readCurrentIdentity: async () => authority,
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.admissionResults[0].ok, false);
@@ -2625,19 +2640,22 @@ test("F6-F1: Supervisor runLoopOnce rejects same worktree alias through real adm
   });
   // Different case, same canonical path
   const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "d:\\Worktrees\\SAME", fence_id: "1", lease_id: "lease-2", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" }, process: { pid: 41034, started_at: REG_TS } });
+  const authority = {
+    generation: 1, ref: "refs/heads/b", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "d:\\Worktrees\\SAME", process: { pid: 41034, started_at: REG_TS },
+    session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
+    lease_id: "lease-2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
     pid: 41034,
+    hostId: "host-a",
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    currentAuthority: {
-      generation: 1, ref: "refs/heads/b", head: "a".repeat(40), tree: "b".repeat(40),
-      worktree: "d:\\Worktrees\\SAME", process: { pid: 41034, started_at: REG_TS },
-      session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
-      lease_id: "lease-2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
-    },
+    currentAuthority: authority,
+    readCurrentIdentity: async () => authority,
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.admissionResults[0].ok, false);
@@ -2660,19 +2678,22 @@ test("F6-F1: Supervisor runLoopOnce rejects stale generation through real admiss
   });
   // Try to admit same card_id with stale generation - uses same lease_id to pass lease check
   const pendingEntry = regEntry({ card_id: "W1", generation: 1, ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-1", session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" }, process: { pid: 41035, started_at: REG_TS } });
+  const authority = {
+    generation: 1, ref: "refs/heads/b", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\w2", process: { pid: 41035, started_at: REG_TS },
+    session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
+    lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
     pid: 41035,
+    hostId: "host-a",
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    currentAuthority: {
-      generation: 1, ref: "refs/heads/b", head: "a".repeat(40), tree: "b".repeat(40),
-      worktree: "D:\\worktrees\\w2", process: { pid: 41035, started_at: REG_TS },
-      session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
-      lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
-    },
+    currentAuthority: authority,
+    readCurrentIdentity: async () => authority,
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.admissionResults[0].ok, false);
@@ -2692,28 +2713,31 @@ test("F6-F3: Supervisor runLoopOnce rejects expired lease through real admission
     lease_expiry: "2026-08-01T08:00:00+08:00", // expired before REG_TS
     fence_id: "1",
   });
+  const authority = {
+    generation: 1,
+    ref: "refs/heads/expired",
+    head: "a".repeat(40),
+    tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\expired",
+    process: { pid: 41036, started_at: REG_TS },
+    session: { workspace_id: "w-expired", pane_id: "p-expired", agent_session: "s-expired" },
+    lease_id: "lease-expired",
+    lease_expiry: "2026-08-01T08:00:00+08:00",
+    fence: 1,
+    fence_id: "1",
+  };
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
     pid: 41036,
+    hostId: "host-a",
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: createRegistry(),
     admissionLeaseId: "lease-expired",
     pendingAdmissions: [pendingEntry],
-    currentAuthority: {
-      generation: 1,
-      ref: "refs/heads/expired",
-      head: "a".repeat(40),
-      tree: "b".repeat(40),
-      worktree: "D:\\worktrees\\expired",
-      process: { pid: 41036, started_at: REG_TS },
-      session: { workspace_id: "w-expired", pane_id: "p-expired", agent_session: "s-expired" },
-      lease_id: "lease-expired",
-      lease_expiry: "2026-08-01T08:00:00+08:00",
-      fence: 1,
-      fence_id: "1",
-    },
+    currentAuthority: authority,
+    readCurrentIdentity: async () => authority,
   });
   assert.equal(outcome.admissionResults[0].ok, false);
   assert.match(outcome.admissionResults[0].reason, /LEASE_EXPIRED/);
@@ -2965,20 +2989,23 @@ test("F001: runLoopOnce derives string fence_id from numeric lock fence for reco
     worktree: "D:\\worktrees\\recon",
     state: "ACTIVE",
   });
+  const authority = {
+    generation: 1, ref: "refs/heads/recon", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\recon", process: { pid: 41040, started_at: REG_TS },
+    session: { workspace_id: "w-recon", pane_id: "p-recon", agent_session: "s-recon" },
+    lease_id: "lease-recon", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
     pid: 41040,
+    hostId: "host-a",
     now: () => BASE_MS,
     isAlive: async () => false,
     durableReceipts: [receipt],
     liveObservations: [live],
-    currentAuthority: {
-      generation: 1, ref: "refs/heads/recon", head: "a".repeat(40), tree: "b".repeat(40),
-      worktree: "D:\\worktrees\\recon", process: { pid: 41040, started_at: REG_TS },
-      session: { workspace_id: "w-recon", pane_id: "p-recon", agent_session: "s-recon" },
-      lease_id: "lease-recon", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
-    },
+    currentAuthority: authority,
+    readCurrentIdentity: async () => authority,
   });
   // The reconstruction should succeed because fence_id is derived as String(lock.fence) = "1"
   assert.equal(outcome.stop, false);
@@ -3035,6 +3062,70 @@ test("F001: runLoopOnce rejects currentAuthority fence_id mismatch with derived 
   assert.equal(outcome.stop, false);
   assert.equal(outcome.reason, "LOCK_AUTHORITY_FENCE_ID_MISMATCH");
 });
+
+// F001: Same-fence forged pid must be rejected. Acquired lock has fence=1,
+// caller supplies currentAuthority with fence=1 but forged pid; must fail
+// before downstream work.
+test("F001: runLoopOnce rejects same-fence forged pid (authority pid != current process pid)", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({ pid: 41040, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 1 }));
+  const observedAuthority = {
+    generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\reg-01", process: { pid: 41040, started_at: REG_TS },
+    session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
+    lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41040,
+    hostId: "host-a",
+    now: () => BASE_MS,
+    isAlive: async () => true,
+    currentAuthority: {
+      generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
+      worktree: "D:\\worktrees\\reg-01", process: { pid: 99999, started_at: REG_TS },
+      session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
+      lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+    },
+    readCurrentIdentity: async () => observedAuthority,
+  });
+  assert.equal(outcome.stop, false);
+  assert.equal(outcome.reason, "LOCK_AUTHORITY_PID_MISMATCH");
+});
+
+for (const [label, forge, expectedReason] of [
+  ["host", (authority) => ({ ...authority, host_id: "host-forged" }), "LOCK_AUTHORITY_HOST_MISMATCH"],
+  ["head", (authority) => ({ ...authority, head: "c".repeat(40) }), "LOCK_AUTHORITY_HEAD_MISMATCH"],
+  ["session", (authority) => ({ ...authority, session: { ...authority.session, pane_id: "p-forged" } }), "LOCK_AUTHORITY_SESSION_PANE_ID_MISMATCH"],
+]) {
+  test(`F001: runLoopOnce rejects same-fence forged ${label} against fresh identity`, async (t) => {
+    const { root, paths } = await tempRuntime(t);
+    await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+    await mkdir(path.dirname(paths.lock), { recursive: true });
+    await writeFile(paths.lock, JSON.stringify({ pid: 41040, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 1 }));
+    const observedAuthority = {
+      generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
+      worktree: "D:\\worktrees\\reg-01", process: { pid: 41040, started_at: REG_TS },
+      session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
+      lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1", host_id: "host-a",
+    };
+    const outcome = await runLoopOnce({
+      runtimeRoot: root,
+      orca: quietOrca(),
+      pid: 41040,
+      hostId: "host-a",
+      now: () => BASE_MS,
+      isAlive: async () => true,
+      currentAuthority: forge(observedAuthority),
+      readCurrentIdentity: async () => observedAuthority,
+    });
+    assert.equal(outcome.stop, false);
+    assert.equal(outcome.reason, expectedReason);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // F002: reconstructFromAuthorityAndObservations validates authority fields
@@ -3137,20 +3228,29 @@ minimal_wake: Read GitHub directly.
 });
 
 // ---------------------------------------------------------------------------
-// F006: Durable pre-send SEND_PENDING GitHub marker + regression test
-// SEND_PENDING is persisted before physical send. If local state is lost
-// (Supervisor restart), the persisted SEND_PENDING marker survives and blocks
-// a blind retry. This test proves the idempotency boundary.
+// F006: Causal durable fresh restart proof
+// Uses one shared fake durable GitHub comment store at the adapter boundary.
+// First run publishes SEND_PENDING into the store, readback reads the same
+// store, physical prompt succeeds once, terminal publication fails. Then all
+// local recovery state is discarded and a genuinely fresh consumer discovers
+// only the durable SEND_PENDING marker and returns NO_BLIND_RETRY without a
+// second physical prompt. Prompt count must remain exactly one.
 // ---------------------------------------------------------------------------
 
-test("F006: SEND_PENDING durable pre-send idempotency survives local state loss", async (t) => {
+test("F006: causal durable fresh restart — shared store, first publish + prompt, terminal fail, fresh consumer blocks second prompt", async (t) => {
   const { root, paths } = await tempRuntime(t);
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
   await mkdir(path.dirname(paths.lock), { recursive: true });
-  await writeFile(paths.lock, JSON.stringify({ pid: 60001, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 1 }));
+  await writeFile(paths.lock, JSON.stringify({ pid: 70001, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 1 }));
+
+  // Shared durable GitHub comment store — the single source of truth for
+  // publication and readback causality. publishReceipt(SEND_PENDING) writes
+  // into this store; every readComments reads from the same store.
+  const durableGitHubComments = [];
+  const readPhases = [];
+  const publishStates = [];
 
   let promptCount = 0;
-  let publishCount = 0;
 
   const waitTuple = {
     source_terminal_receipt: 1629000001,
@@ -3179,11 +3279,26 @@ surface: HERDR
 minimal_wake: Read GitHub directly.
 `;
 
-  // First tick: SEND_PENDING is published to durable store, readback succeeds, physical send succeeds
+  function buildReadComments(logicalKey) {
+    return async ({ phase } = {}) => {
+      readPhases.push({ phase, count: durableGitHubComments.length });
+      // All phases read from the shared durable store
+      const comments = durableGitHubComments.map((body, idx) => ({
+        id: `gh-comment-${idx}`,
+        created_at: "2026-08-01T09:00:00+08:00",
+        body,
+      }));
+      return completeComments(comments);
+    };
+  }
+
+  // First run: fresh consumer publishes SEND_PENDING into the durable store,
+  // readback reads from the same store, physical prompt succeeds once,
+  // terminal receipt publication fails.
   const firstOutcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
-    pid: 60001,
+    pid: 70001,
     hostId: "host-a",
     now: () => BASE_MS,
     isAlive: async () => true,
@@ -3192,23 +3307,60 @@ minimal_wake: Read GitHub directly.
       waitTuple,
       readAuthority: async () => ({ binding: residentAuthorityBinding() }),
       decisionBody,
-      readComments: async ({ phase, logicalKey } = {}) => phase === "send_pending_readback"
-        ? completeComments([{ id: "send-pending-1", body: pendingDeliveryReceipt(logicalKey) }])
-        : completeComments(),
+      readComments: buildReadComments(),
       herdr: { prompt: async () => { promptCount += 1; return { accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: "r49" }; } },
-      publishReceipt: async (receipt) => { publishCount += 1; return { id: `receipt-${publishCount}` }; },
+      publishReceipt: async (receipt) => {
+        publishStates.push(receipt?.state);
+        if (receipt?.state === "SEND_PENDING") {
+          // Publish SEND_PENDING into the shared durable store
+          const body = [
+            "HERDR_RESUME_DELIVERY_V1",
+            `state: ${receipt.state}`,
+            `logical_event_key: ${receipt.logical_event_key}`,
+            `source_terminal_receipt: ${receipt.source_terminal_receipt}`,
+            `control_generation: ${receipt.control_generation}`,
+            `card_id: ${receipt.card_id}`,
+            `allowed_action_class: ${receipt.allowed_action_class}`,
+            `target_agent_name: ${receipt.target_agent_name}`,
+            `target_executor_instance_id: ${receipt.target_executor_instance_id}`,
+            `target_surface: ${receipt.target_surface}`,
+            `target_herdr_agent: ${receipt.target_herdr_agent}`,
+            `target_herdr_workspace_id: ${receipt.target_herdr_workspace_id}`,
+            `target_herdr_pane_id: ${receipt.target_herdr_pane_id}`,
+            `target_herdr_agent_session: ${receipt.target_herdr_agent_session}`,
+          ].join("\n");
+          durableGitHubComments.push(body);
+          return { id: `gh-send-pending-${durableGitHubComments.length}` };
+        }
+        if (receipt?.state === "CONSUMED_STARTED") {
+          // Terminal publication fails
+          throw new Error("TERMINAL_PUBLICATION_FAILED");
+        }
+        return { id: `gh-other-${durableGitHubComments.length}` };
+      },
     },
   });
 
-  assert.equal(promptCount, 1, "first tick must send physical prompt");
+  // Physical prompt was sent exactly once
+  assert.equal(promptCount, 1, `first run must send exactly one physical prompt: ${JSON.stringify(firstOutcome)}`);
+  assert.deepEqual(publishStates, ["SEND_PENDING", "CONSUMED_STARTED"], "terminal receipt publication must be attempted after the physical prompt");
+  assert.deepEqual(readPhases.filter(({ phase }) => phase === "send_pending_readback").map(({ count }) => count), [1], "SEND_PENDING readback must observe the same durable store write");
+  assert.equal(firstOutcome.events.find((event) => event.type === "resume_delivery_no_blind_retry")?.decision, "NO_BLIND_RETRY");
+  // SEND_PENDING was published to the durable store
+  assert.ok(durableGitHubComments.length >= 1, "SEND_PENDING must be in durable store");
 
-  // Second tick: genuine fresh restart - NO deliveryState (local state lost),
-  // readComments returns the durable SEND_PENDING marker from GitHub comments.
-  // findExistingDelivery at the adapter boundary discovers it and returns NO_OP_DUPLICATE.
+  // Discard all local recovery/delivery state — simulate fresh process
+  const recoveryStatePath = path.join(root, "state", "recovery_state.json");
+  await rm(recoveryStatePath, { force: true });
+
+  // Second run: genuinely fresh consumer with NO local state. Only the
+  // durable GitHub comment store survives. The fresh readComments reads
+  // the SEND_PENDING marker from the store, findExistingDelivery
+  // discovers it, and returns NO_OP_DUPLICATE without a second prompt.
   const secondOutcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
-    pid: 60001,
+    pid: 70001,
     hostId: "host-a",
     now: () => BASE_MS + 15_000,
     isAlive: async () => true,
@@ -3217,14 +3369,18 @@ minimal_wake: Read GitHub directly.
       waitTuple,
       readAuthority: async () => ({ binding: residentAuthorityBinding() }),
       decisionBody,
-      readComments: async ({ logicalKey } = {}) =>
-        completeComments([{ id: "send-pending-durable", body: pendingDeliveryReceipt(logicalKey) }]),
-      herdr: { prompt: async () => { promptCount += 1; throw new Error("must not prompt on fresh restart"); } },
-      publishReceipt: async () => { throw new Error("must not publish on fresh restart"); } },
+      readComments: buildReadComments(),
+      herdr: { prompt: async () => { promptCount += 1; throw new Error("MUST_NOT_PROMPT_ON_FRESH_RESTART"); } },
+      publishReceipt: async () => { throw new Error("MUST_NOT_PUBLISH_ON_FRESH_RESTART"); },
+    },
   });
 
-  // Physical prompt count must remain exactly one
-  assert.equal(promptCount, 1, "fresh restart must not re-prompt; SEND_PENDING from durable GitHub store blocks retry");
+  // Prompt count must remain exactly one — the durable SEND_PENDING marker
+  // from the shared store blocks any second physical prompt
+  assert.equal(promptCount, 1, "fresh consumer must not re-prompt; durable SEND_PENDING blocks retry");
+  // The duplicate detection must have fired
+  const duplicateEvent = secondOutcome.events?.find((e) => e.type === "resume_delivery_duplicate");
+  assert.ok(duplicateEvent, "fresh consumer must detect SEND_PENDING duplicate from durable store");
 });
 
 // ---------------------------------------------------------------------------
@@ -3301,6 +3457,13 @@ test("F004: canonicalizeWorktree rejects aliases before normalization", () => {
   assert.equal(canonicalizeWorktree("\\\\server/share/worktree"), null);
 });
 
+// F004: Reject single-separator mixed drive spellings
+test("F004: canonicalizeWorktree rejects single-separator slash-mixed drive paths", () => {
+  assert.equal(canonicalizeWorktree("D:\\worktrees/reg-01"), null, "backslash then forward slash must be rejected");
+  assert.equal(canonicalizeWorktree("D:/worktrees\\reg-01"), null, "forward slash then backslash must be rejected");
+  assert.equal(canonicalizeWorktree("C:\\foo/bar/baz"), null, "mixed separators in body must be rejected");
+});
+
 // F004: Admission rejects invalid worktree forms through production boundary
 const INVALID_WORKTREE_CASES = [
   ["relative path", "worktrees/reg-01"],
@@ -3310,6 +3473,8 @@ const INVALID_WORKTREE_CASES = [
   ["dot-segment", "D:\\worktrees\\reg-01\\..\\reg-02"],
   ["double-separator alias", "D:\\worktrees\\reg-01\\\\alias"],
   ["slash-mixed alias", "D:\\worktrees\\reg-01//alias"],
+  ["slash-mixed backslash-then-forward", "D:\\worktrees/reg-01"],
+  ["slash-mixed forward-then-backslash", "D:/worktrees\\reg-01"],
   ["POSIX UNC", "//server/share/worktree"],
   ["ambiguous UNC dot-segment", "\\\\server\\share\\.\\worktree"],
   ["ambiguous UNC double-separator", "\\\\server\\share\\\\worktree"],
@@ -3334,6 +3499,12 @@ for (const [label, invalidWt] of INVALID_WORKTREE_CASES) {
       lease_expiry: "2026-08-01T10:00:00+08:00",
       generation: 1,
     });
+    const authority = {
+      generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
+      worktree: "D:\\worktrees\\reg-01", process: { pid: 41040, started_at: REG_TS },
+      session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
+      lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+    };
     const outcome = await runLoopOnce({
       runtimeRoot: root,
       orca: quietOrca(),
@@ -3342,12 +3513,8 @@ for (const [label, invalidWt] of INVALID_WORKTREE_CASES) {
       now: () => BASE_MS,
       isAlive: async () => true,
       pendingAdmissions: [entry],
-      currentAuthority: {
-        generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
-        worktree: "D:\\worktrees\\reg-01", process: { pid: 41040, started_at: REG_TS },
-        session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
-        lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
-      },
+      currentAuthority: authority,
+      readCurrentIdentity: async () => authority,
     });
     assert.equal(outcome.stop, false);
     assert.equal(outcome.reason, "REGISTRY_ADMISSION_REJECTED",
@@ -3382,6 +3549,12 @@ for (const [label, invalidWt] of INVALID_WORKTREE_CASES) {
       fence: 1,
       fence_id: "1",
     });
+    const authority = {
+      generation: 1, ref: "refs/heads/recon", head: "a".repeat(40), tree: "b".repeat(40),
+      worktree: invalidWt, process: { pid: 41040, started_at: REG_TS },
+      session: { workspace_id: "w-recon", pane_id: "p-recon", agent_session: "s-recon" },
+      lease_id: "lease-recon", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+    };
     const outcome = await runLoopOnce({
       runtimeRoot: root,
       orca: quietOrca(),
@@ -3391,12 +3564,8 @@ for (const [label, invalidWt] of INVALID_WORKTREE_CASES) {
       isAlive: async () => true,
       durableReceipts: [receipt],
       liveObservations: [live],
-      currentAuthority: {
-        generation: 1, ref: "refs/heads/recon", head: "a".repeat(40), tree: "b".repeat(40),
-        worktree: invalidWt, process: { pid: 41040, started_at: REG_TS },
-        session: { workspace_id: "w-recon", pane_id: "p-recon", agent_session: "s-recon" },
-        lease_id: "lease-recon", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
-      },
+      currentAuthority: authority,
+      readCurrentIdentity: async () => authority,
     });
     assert.equal(outcome.stop, false);
     assert.match(outcome.reason, /^REGISTRY_RECONSTRUCTION_REJECTED/,
