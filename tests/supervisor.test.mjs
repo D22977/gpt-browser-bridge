@@ -2986,6 +2986,58 @@ test("F001: runLoopOnce derives string fence_id from numeric lock fence for reco
     "reconstruction must not reject valid entries with numeric lock fence");
 });
 
+test("F001: runLoopOnce rejects currentAuthority fence mismatch with acquired lock", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({ pid: 41040, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 1 }));
+  const receipt = regEntry({ card_id: "W-FENCE-01", fence: 1, fence_id: "1" });
+  const live = regEntry({ card_id: "W-FENCE-01", fence: 1, fence_id: "1" });
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41040,
+    hostId: "host-a",
+    now: () => BASE_MS,
+    isAlive: async () => true,
+    durableReceipts: [receipt],
+    liveObservations: [live],
+    currentAuthority: {
+      generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
+      worktree: "D:\\worktrees\\reg-01", process: { pid: 41040, started_at: REG_TS },
+      session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
+      lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 2, fence_id: "2",
+    },
+  });
+  assert.equal(outcome.stop, false);
+  assert.equal(outcome.reason, "LOCK_AUTHORITY_FENCE_MISMATCH");
+});
+
+test("F001: runLoopOnce rejects currentAuthority fence_id mismatch with derived lock fence_id", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({ pid: 41040, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 1 }));
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41040,
+    hostId: "host-a",
+    now: () => BASE_MS,
+    isAlive: async () => true,
+    currentAuthority: {
+      generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
+      worktree: "D:\\worktrees\\reg-01", process: { pid: 41040, started_at: REG_TS },
+      session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
+      lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "wrong",
+    },
+  });
+  assert.equal(outcome.stop, false);
+  assert.equal(outcome.reason, "LOCK_AUTHORITY_FENCE_ID_MISMATCH");
+});
+
+// ---------------------------------------------------------------------------
+// F002: reconstructFromAuthorityAndObservations validates authority fields
 // ---------------------------------------------------------------------------
 // F006: Production-boundary runLoopOnce UNCERTAIN_SEND regression
 // Physical send succeeds, receipt publication fails, restart/recovery,
@@ -3098,8 +3150,7 @@ test("F006: SEND_PENDING durable pre-send idempotency survives local state loss"
   await writeFile(paths.lock, JSON.stringify({ pid: 60001, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 1 }));
 
   let promptCount = 0;
-  let persistCount = 0;
-  let lastPersistedState = null;
+  let publishCount = 0;
 
   const waitTuple = {
     source_terminal_receipt: 1629000001,
@@ -3128,7 +3179,7 @@ surface: HERDR
 minimal_wake: Read GitHub directly.
 `;
 
-  // First tick: SEND_PENDING is persisted, then physical send succeeds
+  // First tick: SEND_PENDING is published to durable store, readback succeeds, physical send succeeds
   const firstOutcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -3145,23 +3196,15 @@ minimal_wake: Read GitHub directly.
         ? completeComments([{ id: "send-pending-1", body: pendingDeliveryReceipt(logicalKey) }])
         : completeComments(),
       herdr: { prompt: async () => { promptCount += 1; return { accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: "r49" }; } },
-      publishReceipt: async () => ({ id: "receipt-1" }),
-      persistDeliveryState: async (state) => { persistCount += 1; lastPersistedState = state; },
+      publishReceipt: async (receipt) => { publishCount += 1; return { id: `receipt-${publishCount}` }; },
     },
   });
 
-  // Physical prompt was sent
-  assert.equal(promptCount, 1);
-  // SEND_PENDING was persisted before physical send
-  assert.ok(persistCount >= 1, "persistDeliveryState must be called");
-  // The persisted state should contain SEND_PENDING or DELIVERED
-  assert.ok(lastPersistedState, "state must be persisted");
+  assert.equal(promptCount, 1, "first tick must send physical prompt");
 
-  // Simulate local state loss: clear in-memory state but keep persisted state
-  // The persisted state should survive and block a blind retry
-  const persistedState = lastPersistedState;
-
-  // Second tick: persisted SEND_PENDING/DELIVERED state should block retry
+  // Second tick: genuine fresh restart - NO deliveryState (local state lost),
+  // readComments returns the durable SEND_PENDING marker from GitHub comments.
+  // findExistingDelivery at the adapter boundary discovers it and returns NO_OP_DUPLICATE.
   const secondOutcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -3174,16 +3217,14 @@ minimal_wake: Read GitHub directly.
       waitTuple,
       readAuthority: async () => ({ binding: residentAuthorityBinding() }),
       decisionBody,
-      readComments: async () => completeComments(),
-      herdr: { prompt: async () => { promptCount += 1; return { accepted: true }; } },
-      publishReceipt: async () => ({ id: "receipt-2" }),
-      persistDeliveryState: async (state) => { persistCount += 1; lastPersistedState = state; },
-    },
-    deliveryState: persistedState,
+      readComments: async ({ logicalKey } = {}) =>
+        completeComments([{ id: "send-pending-durable", body: pendingDeliveryReceipt(logicalKey) }]),
+      herdr: { prompt: async () => { promptCount += 1; throw new Error("must not prompt on fresh restart"); } },
+      publishReceipt: async () => { throw new Error("must not publish on fresh restart"); } },
   });
 
-  // Second prompt must NOT have been sent — the persisted state blocks retry
-  assert.equal(promptCount, 1, "second physical send must be blocked by persisted SEND_PENDING/DELIVERED state");
+  // Physical prompt count must remain exactly one
+  assert.equal(promptCount, 1, "fresh restart must not re-prompt; SEND_PENDING from durable GitHub store blocks retry");
 });
 
 // ---------------------------------------------------------------------------
@@ -3259,6 +3300,109 @@ test("F004: canonicalizeWorktree rejects aliases before normalization", () => {
   assert.equal(canonicalizeWorktree("\\\\server\\share\\\\worktree"), null);
   assert.equal(canonicalizeWorktree("\\\\server/share/worktree"), null);
 });
+
+// F004: Admission rejects invalid worktree forms through production boundary
+const INVALID_WORKTREE_CASES = [
+  ["relative path", "worktrees/reg-01"],
+  ["drive-relative", "D:worktrees\\reg-01"],
+  ["root-relative backslash", "\\worktrees\\reg-01"],
+  ["root-relative forward slash", "/worktrees/reg-01"],
+  ["dot-segment", "D:\\worktrees\\reg-01\\..\\reg-02"],
+  ["double-separator alias", "D:\\worktrees\\reg-01\\\\alias"],
+  ["slash-mixed alias", "D:\\worktrees\\reg-01//alias"],
+  ["POSIX UNC", "//server/share/worktree"],
+  ["ambiguous UNC dot-segment", "\\\\server\\share\\.\\worktree"],
+  ["ambiguous UNC double-separator", "\\\\server\\share\\\\worktree"],
+];
+
+for (const [label, invalidWt] of INVALID_WORKTREE_CASES) {
+  test(`F004: admission rejects invalid worktree (${label}) through runLoopOnce`, async (t) => {
+    const { root, paths } = await tempRuntime(t);
+    await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+    await mkdir(path.dirname(paths.lock), { recursive: true });
+    await writeFile(paths.lock, JSON.stringify({ pid: 41040, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 1 }));
+    const entry = regEntry({
+      card_id: "W-INVALID-WT",
+      worktree: invalidWt,
+      ref: "refs/heads/main",
+      allowlist_paths: ["src/invalid.mjs"],
+      fence: 1,
+      fence_id: "1",
+      lease_id: "lease-1",
+      process: { pid: 41040, started_at: REG_TS },
+      session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
+      lease_expiry: "2026-08-01T10:00:00+08:00",
+      generation: 1,
+    });
+    const outcome = await runLoopOnce({
+      runtimeRoot: root,
+      orca: quietOrca(),
+      pid: 41040,
+      hostId: "host-a",
+      now: () => BASE_MS,
+      isAlive: async () => true,
+      pendingAdmissions: [entry],
+      currentAuthority: {
+        generation: 1, ref: "refs/heads/main", head: "a".repeat(40), tree: "b".repeat(40),
+        worktree: "D:\\worktrees\\reg-01", process: { pid: 41040, started_at: REG_TS },
+        session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
+        lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+      },
+    });
+    assert.equal(outcome.stop, false);
+    assert.equal(outcome.reason, "REGISTRY_ADMISSION_REJECTED",
+      `admission must reject ${label} worktree ${JSON.stringify(invalidWt)}`);
+    assert.ok(outcome.admissionResults?.some((r) => !r.ok && (/(?:INVALID_WORKTREE|WORKTREE_MISMATCH)/.test(r.reason))),
+      `must have INVALID_WORKTREE or WORKTREE_MISMATCH rejection for ${label}`);
+  });
+}
+
+// F004: Reconstruction rejects invalid worktree forms through production boundary
+for (const [label, invalidWt] of INVALID_WORKTREE_CASES) {
+  test(`F004: reconstruction rejects invalid worktree (${label}) through runLoopOnce`, async (t) => {
+    const { root, paths } = await tempRuntime(t);
+    await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+    await mkdir(path.dirname(paths.lock), { recursive: true });
+    await writeFile(paths.lock, JSON.stringify({ pid: 41040, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 1 }));
+    const receipt = regEntry({
+      card_id: "W-RECON-INVALID-WT",
+      worktree: invalidWt,
+      ref: "refs/heads/recon",
+      allowlist_paths: ["src/recon.mjs"],
+      state: "ACTIVE",
+      fence: 1,
+      fence_id: "1",
+    });
+    const live = regEntry({
+      card_id: "W-RECON-INVALID-WT",
+      worktree: invalidWt,
+      ref: "refs/heads/recon",
+      allowlist_paths: ["src/recon.mjs"],
+      state: "ACTIVE",
+      fence: 1,
+      fence_id: "1",
+    });
+    const outcome = await runLoopOnce({
+      runtimeRoot: root,
+      orca: quietOrca(),
+      pid: 41040,
+      hostId: "host-a",
+      now: () => BASE_MS,
+      isAlive: async () => true,
+      durableReceipts: [receipt],
+      liveObservations: [live],
+      currentAuthority: {
+        generation: 1, ref: "refs/heads/recon", head: "a".repeat(40), tree: "b".repeat(40),
+        worktree: invalidWt, process: { pid: 41040, started_at: REG_TS },
+        session: { workspace_id: "w-recon", pane_id: "p-recon", agent_session: "s-recon" },
+        lease_id: "lease-recon", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+      },
+    });
+    assert.equal(outcome.stop, false);
+    assert.match(outcome.reason, /^REGISTRY_RECONSTRUCTION_REJECTED/,
+      `reconstruction must reject ${label} worktree ${JSON.stringify(invalidWt)}`);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // F005: reclassifyEntry RELEASED requires identity-bound releaseAuthority

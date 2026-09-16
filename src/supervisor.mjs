@@ -1865,12 +1865,37 @@ export async function runLoopOnce(ctxIn) {
     return { stop: true, reason: lock.reason ?? "LOCK_NOT_OWNED", holder: lock.holder, at: isoNow };
   }
 
+  // F001: Verify currentAuthority fence against the acquired lock.
+  // The lock record is the production source of truth for the numeric fence
+  // and derived string fence_id. A caller-supplied currentAuthority with a
+  // different fence must be rejected before any reconstruction or admission.
+  const derivedFenceId = String(lock.fence);
+  if (ctx.currentAuthority) {
+    let validatedAuthority;
+    try {
+      validatedAuthority = currentAuthoritySchema.parse(ctx.currentAuthority);
+    } catch {
+      tickEvents.push({ type: "lock_authority_rejected", reason: "AUTHORITY_INVALID" });
+      await appendEvents(paths, tickEvents, isoNow);
+      return { stop: false, at: isoNow, reason: "LOCK_AUTHORITY_INVALID" };
+    }
+    if (validatedAuthority.fence !== lock.fence) {
+      tickEvents.push({ type: "lock_authority_rejected", reason: `LOCK_FENCE_MISMATCH: authority fence ${validatedAuthority.fence} != lock fence ${lock.fence}` });
+      await appendEvents(paths, tickEvents, isoNow);
+      return { stop: false, at: isoNow, reason: "LOCK_AUTHORITY_FENCE_MISMATCH" };
+    }
+    if (validatedAuthority.fence_id && validatedAuthority.fence_id !== derivedFenceId) {
+      tickEvents.push({ type: "lock_authority_rejected", reason: `LOCK_FENCE_ID_MISMATCH: authority fence_id ${validatedAuthority.fence_id} != derived ${derivedFenceId}` });
+      await appendEvents(paths, tickEvents, isoNow);
+      return { stop: false, at: isoNow, reason: "LOCK_AUTHORITY_FENCE_ID_MISMATCH" };
+    }
+  }
+
   // F1/F002: Registry reconstruction from durable receipts + live observations
   // under the ACQUIRED lock/fence. Derive fence_id (string) from the numeric
   // lock fence so string fence_id comparisons in reconstruction and admission
   // never fail for a type mismatch.
   let registry = ctx.registry;
-  const derivedFenceId = String(lock.fence);
   if (ctx.durableReceipts.length > 0 || ctx.liveObservations.length > 0) {
     const reconResult = reconstructFromAuthorityAndObservations(
       ctx.durableReceipts,
@@ -1883,6 +1908,13 @@ export async function runLoopOnce(ctxIn) {
       return { stop: false, at: isoNow, reason: `REGISTRY_RECONSTRUCTION_REJECTED: ${reconResult.reason}` };
     }
     registry = { entries: reconResult.entries, currentFenceId: derivedFenceId };
+  }
+
+  // F001: Ensure the registry carries the lock-derived currentFenceId even
+  // when no reconstruction occurs, so validateEntryAdmission can catch a
+  // fence_id divergence between the entry and the acquired lock.
+  if (!registry.currentFenceId) {
+    registry = { ...registry, currentFenceId: derivedFenceId };
   }
 
   // F001/F1: Admission gate - admit pending entries under the ACQUIRED lock/fence.

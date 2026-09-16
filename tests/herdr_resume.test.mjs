@@ -857,22 +857,25 @@ test("duplicate durable delivery is NO_OP_DUPLICATE", async () => {
   assert.equal(prompts, 1);
 });
 
-test("persisted SEND_PENDING state blocks a restart from blind retrying", async () => {
+test("fresh consumer discovers SEND_PENDING from GitHub comments after local state loss", async () => {
   const tuple = waitTuple();
   const body = decisionBody();
   const logicalKey = buildLogicalEventKey(tuple, parseControlDecision(body));
   let prompts = 0;
+  const sendPendingReceipt = deliveryReceipt(logicalKey, { state: "SEND_PENDING" });
+  // No deliveryState: local state is completely lost.
+  // Comments contain the durable SEND_PENDING marker published by the first consumer.
+  // findExistingDelivery discovers it and returns NO_OP_DUPLICATE.
   const result = await deliverResumeOnce({
     waitTuple: tuple,
     decisionBody: body,
-    comments: [],
-    deliveryState: { logical_event_key: logicalKey, state: "SEND_PENDING" },
-    herdr: { prompt: async () => { prompts += 1; } },
-    publishReceipt: async () => ({ id: "never" }),
+    comments: [{ id: "durable-send-pending-1", body: sendPendingReceipt }],
+    herdr: { prompt: async () => { prompts += 1; throw new Error("must not prompt on fresh restart"); } },
+    publishReceipt: async () => { throw new Error("must not publish on fresh restart"); },
   });
-  assert.equal(result.decision, "NO_BLIND_RETRY");
-  assert.equal(result.reason, "SEND_PENDING");
-  assert.equal(prompts, 0);
+  assert.equal(result.decision, "NO_OP_DUPLICATE");
+  assert.equal(result.existing_state, "SEND_PENDING");
+  assert.equal(prompts, 0, "fresh consumer must not re-prompt; durable SEND_PENDING blocks retry");
 });
 
 test("uncertain prompt publishes NO_BLIND_RETRY and never prompts again", async () => {
