@@ -260,13 +260,10 @@ export const registryEntrySchema = z.object({
   worktree: z.string().min(1),
   process: processIdentitySchema,
   session: z.object({
-    workspace_id: z.string().min(1).optional(),
-    pane_id: z.string().min(1).optional(),
-    agent_session: z.string().min(1).optional(),
-  }).refine(
-    (s) => s.workspace_id || s.pane_id || s.agent_session,
-    { message: "session must have at least one of workspace_id, pane_id, or agent_session" }
-  ),
+    workspace_id: z.string().min(1),
+    pane_id: z.string().min(1),
+    agent_session: z.string().min(1),
+  }),
   lease_id: z.string().min(1),
   lease_expiry: z.string().datetime({ offset: true }),
   fence: z.number().int().positive(),
@@ -290,9 +287,9 @@ export const currentAuthoritySchema = z.object({
   worktree: z.string().min(1),
   process: processIdentitySchema,
   session: z.object({
-    workspace_id: z.string().min(1).optional(),
-    pane_id: z.string().min(1).optional(),
-    agent_session: z.string().min(1).optional(),
+    workspace_id: z.string().min(1),
+    pane_id: z.string().min(1),
+    agent_session: z.string().min(1),
   }),
   lease_id: z.string().min(1),
   lease_expiry: z.string().datetime({ offset: true }),

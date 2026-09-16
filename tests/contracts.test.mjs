@@ -445,7 +445,7 @@ test("Reviewer canary workflow is a static, read-only, fail-closed runner contra
 // F3 - Schema: session required, lease_expiry required, authority tuple
 // ---------------------------------------------------------------------------
 
-test("F3: registryEntrySchema requires session with at least one identity", () => {
+test("F3: registryEntrySchema requires session with all three identity fields", () => {
   assert.throws(
     () => registryEntrySchema.parse(validRegistryEntry({ session: {} })),
     /session/
@@ -459,18 +459,27 @@ test("F3: registryEntrySchema requires session (not optional)", () => {
   );
 });
 
-test("F3: registryEntrySchema accepts session with only workspace_id", () => {
-  const parsed = registryEntrySchema.parse(validRegistryEntry({
-    session: { workspace_id: "w1" },
-  }));
-  assert.equal(parsed.session.workspace_id, "w1");
+test("F3: registryEntrySchema rejects session with only workspace_id (all three required)", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(validRegistryEntry({ session: { workspace_id: "w1" } })),
+    /session/
+  );
 });
 
-test("F3: registryEntrySchema accepts session with only pane_id", () => {
+test("F3: registryEntrySchema rejects session with only pane_id (all three required)", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(validRegistryEntry({ session: { pane_id: "p1" } })),
+    /session/
+  );
+});
+
+test("F3: registryEntrySchema accepts session with all three fields", () => {
   const parsed = registryEntrySchema.parse(validRegistryEntry({
-    session: { pane_id: "p1" },
+    session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
   }));
+  assert.equal(parsed.session.workspace_id, "w1");
   assert.equal(parsed.session.pane_id, "p1");
+  assert.equal(parsed.session.agent_session, "s1");
 });
 
 test("F3: registryEntrySchema requires lease_expiry", () => {

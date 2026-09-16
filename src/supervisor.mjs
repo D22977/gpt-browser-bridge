@@ -1128,10 +1128,17 @@ export function canonicalizeRef(ref) {
   return null;
 }
 
-// Canonical worktree: forward-slash normalized, lower-cased, no trailing slash, no repeated separators.
+// Canonical worktree: forward-slash normalized, lower-cased, no trailing
+// slash, no repeated separators, reject dot-segments and ambiguous forms.
 export function canonicalizeWorktree(wt) {
   if (typeof wt !== "string" || wt.length === 0) return null;
-  return wt.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/+$/, "").toLowerCase();
+  let normalized = wt.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/+$/, "");
+  // Reject bare "." or ".." segments
+  if (normalized === "." || normalized === "..") return null;
+  if (/\/\.\.?$/ .test(normalized) || /^\.?\.?\//.test(normalized)) return null;
+  // Reject any remaining traversal
+  if (normalized.includes("/../") || normalized.endsWith("/..") || normalized.includes("/./")) return null;
+  return normalized.toLowerCase();
 }
 
 // Check if two allowlist path sets have any overlapping entry.
@@ -1239,21 +1246,51 @@ export function admitEntry(registry, rawEntry, isoNow) {
   const validation = validateEntryAdmission(registry, parsed, new Set());
   if (!validation.ok) return validation;
 
-  registry.entries[parsed.card_id] = { ...parsed, state: "ADMITTED", heartbeat_at: parsed.heartbeat_at || isoNow };
+  // F4: Store only canonical identities. Canonicalize ref, worktree, and
+  // allowlist_paths at admission so downstream comparisons never encounter
+  // ambiguous Windows path aliases or dot-segment forms.
+  const canonRef = canonicalizeRef(parsed.ref) ?? parsed.ref;
+  const canonWt = canonicalizeWorktree(parsed.worktree) ?? parsed.worktree;
+  const canonPaths = parsed.allowlist_paths.map((p) => canonicalizeRepoRelativePath(p) ?? p);
+  registry.entries[parsed.card_id] = {
+    ...parsed,
+    ref: canonRef,
+    worktree: canonWt,
+    allowlist_paths: canonPaths,
+    state: "ADMITTED",
+    heartbeat_at: parsed.heartbeat_at || isoNow,
+  };
   return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
-// Heartbeat: bound to exact process/session/fence ownership proof (F3)
+// Heartbeat: bound to complete authority tuple (F3/F6)
 // ---------------------------------------------------------------------------
 
-export function heartbeatEntry(registry, cardId, { isoNow, pid, fence, fence_id } = {}) {
+// F3/F6: Heartbeat REQUIRES the complete current authority tuple. Partial
+// proof (pid/fence/fence_id only) is not sufficient; caller-supplied
+// partial authority must not be accepted as proof of ownership.
+export function heartbeatEntry(registry, cardId, { isoNow, authority } = {}) {
   if (!registry.entries[cardId]) return false;
   const entry = registry.entries[cardId];
-  // F3: Heartbeat REQUIRES exact process, fence, and fence_id ownership proof
-  if (pid === undefined || entry.process.pid !== pid) return false;
-  if (fence === undefined || entry.fence !== fence) return false;
-  if (fence_id === undefined || entry.fence_id !== fence_id) return false;
+  if (!authority) return false;
+  // Verify complete authority tuple components
+  if (authority.pid === undefined || entry.process.pid !== authority.pid) return false;
+  if (authority.fence === undefined || entry.fence !== authority.fence) return false;
+  if (authority.fence_id === undefined || entry.fence_id !== authority.fence_id) return false;
+  if (authority.lease_id === undefined || entry.lease_id !== authority.lease_id) return false;
+  if (authority.generation === undefined || entry.generation !== authority.generation) return false;
+  if (authority.ref === undefined || canonicalizeRef(entry.ref) !== canonicalizeRef(authority.ref)) return false;
+  if (authority.head === undefined || entry.head !== authority.head) return false;
+  if (authority.tree === undefined || entry.tree !== authority.tree) return false;
+  if (authority.worktree === undefined || canonicalizeWorktree(entry.worktree) !== canonicalizeWorktree(authority.worktree)) return false;
+  if (authority.process?.started_at === undefined || entry.process.started_at !== authority.process.started_at) return false;
+  // Session tuple must match fully (F002: all fields required)
+  const authSession = authority.session ?? {};
+  const entrySession = entry.session ?? {};
+  if ((authSession.workspace_id ?? null) !== (entrySession.workspace_id ?? null)) return false;
+  if ((authSession.pane_id ?? null) !== (entrySession.pane_id ?? null)) return false;
+  if ((authSession.agent_session ?? null) !== (entrySession.agent_session ?? null)) return false;
   // F3: Validate lease is still current
   if (entry.lease_expiry) {
     const expiryMs = Date.parse(entry.lease_expiry);
@@ -1270,26 +1307,66 @@ export function heartbeatEntry(registry, cardId, { isoNow, pid, fence, fence_id 
 
 // Reclassify entry state with explicit transition validation.
 // Only allowed transitions from ALLOWED_TRANSITIONS are accepted.
-// F3: State mutation REQUIRES exact process/fence/fence_id ownership proof.
-export function reclassifyEntry(registry, cardId, newState, { pid, fence, fence_id, isoNow } = {}) {
+// F3/F6: State mutation REQUIRES the complete authority tuple; partial
+// proof (pid/fence/fence_id only) is not sufficient.
+// F5: RELEASED/reclaim requires explicit terminal or revocation authority
+// bound to the same full ownership tuple; lease expiry alone is insufficient.
+export function reclassifyEntry(registry, cardId, newState, { authority, isoNow, releaseAuthority } = {}) {
   if (!registry.entries[cardId]) return { ok: false, reason: "ENTRY_NOT_FOUND" };
   const entry = registry.entries[cardId];
   const allowed = ALLOWED_TRANSITIONS[entry.state];
   if (!allowed || !allowed.includes(newState)) {
     return { ok: false, reason: `INVALID_TRANSITION: ${entry.state} -> ${newState}` };
   }
-  // F3: State mutation REQUIRES ownership proof - never optional
-  if (pid === undefined || entry.process.pid !== pid) {
+  // F3/F6: Verify complete authority tuple
+  if (!authority) return { ok: false, reason: "AUTHORITY_MISSING" };
+  if (authority.pid === undefined || entry.process.pid !== authority.pid) {
     return { ok: false, reason: "PID_MISMATCH" };
   }
-  if (fence === undefined || entry.fence !== fence) {
+  if (authority.fence === undefined || entry.fence !== authority.fence) {
     return { ok: false, reason: "FENCE_MISMATCH" };
   }
-  if (fence_id === undefined || entry.fence_id !== fence_id) {
+  if (authority.fence_id === undefined || entry.fence_id !== authority.fence_id) {
     return { ok: false, reason: "FENCE_ID_MISMATCH" };
   }
-  // For RELEASED transition, additionally validate lease expiry (F4)
+  if (authority.lease_id === undefined || entry.lease_id !== authority.lease_id) {
+    return { ok: false, reason: "LEASE_ID_MISMATCH" };
+  }
+  if (authority.generation === undefined || entry.generation !== authority.generation) {
+    return { ok: false, reason: "GENERATION_MISMATCH" };
+  }
+  if (authority.ref === undefined || canonicalizeRef(entry.ref) !== canonicalizeRef(authority.ref)) {
+    return { ok: false, reason: "REF_MISMATCH" };
+  }
+  if (authority.head === undefined || entry.head !== authority.head) {
+    return { ok: false, reason: "HEAD_MISMATCH" };
+  }
+  if (authority.tree === undefined || entry.tree !== authority.tree) {
+    return { ok: false, reason: "TREE_MISMATCH" };
+  }
+  if (authority.worktree === undefined || canonicalizeWorktree(entry.worktree) !== canonicalizeWorktree(authority.worktree)) {
+    return { ok: false, reason: "WORKTREE_MISMATCH" };
+  }
+  if (authority.process?.started_at === undefined || entry.process.started_at !== authority.process.started_at) {
+    return { ok: false, reason: "PROCESS_STARTED_AT_MISMATCH" };
+  }
+  const authSession = authority.session ?? {};
+  const entrySession = entry.session ?? {};
+  if ((authSession.workspace_id ?? null) !== (entrySession.workspace_id ?? null)) {
+    return { ok: false, reason: "SESSION_WORKSPACE_MISMATCH" };
+  }
+  if ((authSession.pane_id ?? null) !== (entrySession.pane_id ?? null)) {
+    return { ok: false, reason: "SESSION_PANE_MISMATCH" };
+  }
+  if ((authSession.agent_session ?? null) !== (entrySession.agent_session ?? null)) {
+    return { ok: false, reason: "SESSION_AGENT_MISMATCH" };
+  }
+  // F5: For RELEASED transition, require explicit terminal or revocation authority
+  // bound to the same full ownership tuple; lease expiry alone is insufficient.
   if (newState === "RELEASED") {
+    if (!releaseAuthority || !releaseAuthority.terminal_authority && !releaseAuthority.revocation_authority) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_MISSING: terminal or revocation authority required" };
+    }
     if (entry.lease_expiry) {
       const expiryMs = Date.parse(entry.lease_expiry);
       const nowMs = Date.parse(isoNow ?? new Date().toISOString());
@@ -1415,8 +1492,13 @@ export function reconstructFromAuthorityAndObservations(durableReceipts, liveObs
     }
 
     // Use the live observation as the source of truth for the reconstructed entry
-    // but preserve the receipt's admitted_at timestamp
-    joinedEntries.push({ ...live, admitted_at: receipt.admitted_at });
+    // but preserve the receipt's admitted_at timestamp.
+    // F4: Store only canonical identities.
+    const joinedEntry = { ...live, admitted_at: receipt.admitted_at };
+    joinedEntry.ref = canonicalizeRef(joinedEntry.ref) ?? joinedEntry.ref;
+    joinedEntry.worktree = canonicalizeWorktree(joinedEntry.worktree) ?? joinedEntry.worktree;
+    joinedEntry.allowlist_paths = joinedEntry.allowlist_paths.map((p) => canonicalizeRepoRelativePath(p) ?? p);
+    joinedEntries.push(joinedEntry);
   }
 
   // Re-run the same canonical admission validator used for live admission
@@ -1474,7 +1556,18 @@ export function admitEntryWithAuthority(registry, rawEntry, isoNow, { authorityF
   const validation = validateEntryAdmission(registry, parsed, new Set());
   if (!validation.ok) return validation;
 
-  registry.entries[parsed.card_id] = { ...parsed, state: "ADMITTED", heartbeat_at: parsed.heartbeat_at || isoNow };
+  // F4: Store only canonical identities.
+  const canonRef = canonicalizeRef(parsed.ref) ?? parsed.ref;
+  const canonWt = canonicalizeWorktree(parsed.worktree) ?? parsed.worktree;
+  const canonPaths = parsed.allowlist_paths.map((p) => canonicalizeRepoRelativePath(p) ?? p);
+  registry.entries[parsed.card_id] = {
+    ...parsed,
+    ref: canonRef,
+    worktree: canonWt,
+    allowlist_paths: canonPaths,
+    state: "ADMITTED",
+    heartbeat_at: parsed.heartbeat_at || isoNow,
+  };
   return { ok: true };
 }
 
@@ -1529,20 +1622,23 @@ export async function runLoopOnce(ctxIn) {
   }
 
   // F1: Registry reconstruction from durable receipts + live observations
-  // under the ACQUIRED lock/fence. Derive fence from lock, not caller context.
+  // under the ACQUIRED lock/fence. Derive fence_id (string) from the numeric
+  // lock fence so string fence_id comparisons in reconstruction and admission
+  // never fail for a type mismatch.
   let registry = ctx.registry;
+  const derivedFenceId = String(lock.fence);
   if (ctx.durableReceipts.length > 0 || ctx.liveObservations.length > 0) {
     const reconResult = reconstructFromAuthorityAndObservations(
       ctx.durableReceipts,
       ctx.liveObservations,
-      { currentFenceId: lock.fence ?? null }
+      { currentFenceId: derivedFenceId }
     );
     if (!reconResult.ok) {
       tickEvents.push({ type: "registry_reconstruction_rejected", reason: reconResult.reason });
       await appendEvents(paths, tickEvents, isoNow);
       return { stop: false, at: isoNow, reason: `REGISTRY_RECONSTRUCTION_REJECTED: ${reconResult.reason}` };
     }
-    registry = { entries: reconResult.entries, currentFenceId: lock.fence ?? null };
+    registry = { entries: reconResult.entries, currentFenceId: derivedFenceId };
   }
 
   // F1: Admission gate - admit pending entries under the ACQUIRED lock/fence.
@@ -1552,7 +1648,7 @@ export async function runLoopOnce(ctxIn) {
   const admissionResults = [];
   let admissionRejected = false;
   const lockAuthorityFence = lock.fence;
-  const lockAuthorityFenceId = ctx.admissionFenceId;
+  const lockAuthorityFenceId = derivedFenceId;
   for (const rawEntry of ctx.pendingAdmissions) {
     const result = admitEntryWithAuthority(registry, rawEntry, isoNow, {
       authorityFence: lockAuthorityFence,

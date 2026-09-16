@@ -1634,6 +1634,22 @@ import {
 
 const REG_TS = "2026-08-01T09:00:00+08:00";
 
+function fullAuth(entry) {
+  return {
+    pid: entry.process.pid,
+    fence: entry.fence,
+    fence_id: entry.fence_id,
+    lease_id: entry.lease_id,
+    generation: entry.generation,
+    ref: entry.ref,
+    head: entry.head,
+    tree: entry.tree,
+    worktree: entry.worktree,
+    process: { started_at: entry.process.started_at },
+    session: { ...entry.session },
+  };
+}
+
 function regEntry(overrides = {}) {
   return {
     card_id: "GBB-REG-01",
@@ -1742,23 +1758,26 @@ test("admitEntry rejects entry with duplicate card_id same generation (already a
 
 test("heartbeatEntry updates heartbeat_at with ownership proof", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", authority: fullAuth(entry) });
   assert.equal(ok, true);
   assert.equal(reg.entries["W1"].heartbeat_at, "2026-08-01T09:01:00+08:00");
 });
 
 test("heartbeatEntry rejects wrong pid ownership", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", pid: 9999, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", authority: { ...fullAuth(entry), pid: 9999 } });
   assert.equal(ok, false);
 });
 
 test("heartbeatEntry rejects wrong fence ownership", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", pid: 1001, fence: 99, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", authority: { ...fullAuth(entry), fence: 99 } });
   assert.equal(ok, false);
 });
 
@@ -1770,16 +1789,18 @@ test("heartbeatEntry is a no-op for unknown card_id", () => {
 
 test("reclassifyEntry transitions state", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: fullAuth(entry) });
   assert.equal(result.ok, true);
   assert.equal(reg.entries["W1"].state, "HEARTBEAT_STALE");
 });
 
 test("reclassifyEntry rejects invalid transitions", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry) });
   assert.equal(result.ok, false);
   assert.match(result.reason, /INVALID_TRANSITION/);
   assert.equal(reg.entries["W1"].state, "ADMITTED");
@@ -1787,7 +1808,8 @@ test("reclassifyEntry rejects invalid transitions", () => {
 
 test("reclassifyEntry is a no-op for unknown card_id", () => {
   const reg = createRegistry();
-  const result = reclassifyEntry(reg, "UNKNOWN", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  const result = reclassifyEntry(reg, "UNKNOWN", "RELEASED", { authority: fullAuth(entry) });
   assert.equal(result.ok, false);
   assert.match(result.reason, /ENTRY_NOT_FOUND/);
   assert.deepEqual(reg.entries, {});
@@ -1833,8 +1855,9 @@ test("UNCERTAIN_SEND remains NO_BLIND_RETRY without registry reclaim", () => {
   const result = { decision: "NO_BLIND_RETRY" };
   assert.equal(result.decision, "NO_BLIND_RETRY");
   // Registry entry reclamation does not change NO_BLIND_RETRY classification
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const reclassResult = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const reclassResult = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: fullAuth(entry) });
   assert.equal(reclassResult.ok, true);
   assert.equal(result.decision, "NO_BLIND_RETRY");
 });
@@ -1900,24 +1923,27 @@ test("F3: registryEntrySchema requires fence_id", () => {
 
 test("F4: reclassifyEntry allows ADMITTED -> ACTIVE", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const result = reclassifyEntry(reg, "W1", "ACTIVE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const result = reclassifyEntry(reg, "W1", "ACTIVE", { authority: fullAuth(entry) });
   assert.equal(result.ok, true);
   assert.equal(reg.entries["W1"].state, "ACTIVE");
 });
 
 test("F4: reclassifyEntry allows ADMITTED -> HEARTBEAT_STALE", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: fullAuth(entry) });
   assert.equal(result.ok, true);
   assert.equal(reg.entries["W1"].state, "HEARTBEAT_STALE");
 });
 
 test("F4: reclassifyEntry rejects ADMITTED -> RELEASED (no direct RELEASE)", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry) });
   assert.equal(result.ok, false);
   assert.match(result.reason, /INVALID_TRANSITION/);
   assert.equal(reg.entries["W1"].state, "ADMITTED");
@@ -1925,65 +1951,81 @@ test("F4: reclassifyEntry rejects ADMITTED -> RELEASED (no direct RELEASE)", () 
 
 test("F4: reclassifyEntry rejects ADMITTED -> REVALIDATING (skip stale path)", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const result = reclassifyEntry(reg, "W1", "REVALIDATING", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const result = reclassifyEntry(reg, "W1", "REVALIDATING", { authority: fullAuth(entry) });
   assert.equal(result.ok, false);
   assert.match(result.reason, /INVALID_TRANSITION/);
 });
 
 test("F4: reclassifyEntry allows HEARTBEAT_STALE -> MARK_STALE_CANDIDATE", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
-  const result = reclassifyEntry(reg, "W1", "MARK_STALE_CANDIDATE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: fullAuth(entry) });
+  const result = reclassifyEntry(reg, "W1", "MARK_STALE_CANDIDATE", { authority: fullAuth(entry) });
   assert.equal(result.ok, true);
   assert.equal(reg.entries["W1"].state, "MARK_STALE_CANDIDATE");
 });
 
 test("F4: reclassifyEntry allows MARK_STALE_CANDIDATE -> REVALIDATING", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
-  reclassifyEntry(reg, "W1", "MARK_STALE_CANDIDATE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
-  const result = reclassifyEntry(reg, "W1", "REVALIDATING", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: fullAuth(entry) });
+  reclassifyEntry(reg, "W1", "MARK_STALE_CANDIDATE", { authority: fullAuth(entry) });
+  const result = reclassifyEntry(reg, "W1", "REVALIDATING", { authority: fullAuth(entry) });
   assert.equal(result.ok, true);
   assert.equal(reg.entries["W1"].state, "REVALIDATING");
 });
 
 test("F4: reclassifyEntry allows REVALIDATING -> RELEASED (authorized terminal release)", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
-  reclassifyEntry(reg, "W1", "MARK_STALE_CANDIDATE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
-  reclassifyEntry(reg, "W1", "REVALIDATING", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
-  // Lease must be expired for release to succeed
-  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01", isoNow: "2026-08-01T11:00:00+08:00" });
+  const entry = regEntry({ card_id: "W1", lease_expiry: "2026-08-01T08:00:00+08:00" });
+  admitEntry(reg, entry, REG_TS);
+  reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: fullAuth(entry) });
+  reclassifyEntry(reg, "W1", "MARK_STALE_CANDIDATE", { authority: fullAuth(entry) });
+  reclassifyEntry(reg, "W1", "REVALIDATING", { authority: fullAuth(entry) });
+  // Lease must be expired for release to succeed; terminal authority required
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry), isoNow: "2026-08-01T11:00:00+08:00", releaseAuthority: { terminal_authority: true } });
   assert.equal(result.ok, true);
   assert.equal(reg.entries["W1"].state, "RELEASED");
 });
 
 test("F4: reclassifyEntry rejects state mutation without pid ownership", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 9999, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: { ...fullAuth(entry), pid: 9999 } });
   assert.equal(result.ok, false);
   assert.match(result.reason, /PID_MISMATCH/);
 });
 
 test("F4: reclassifyEntry rejects state mutation without fence ownership", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 99, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: { ...fullAuth(entry), fence: 99 } });
   assert.equal(result.ok, false);
   assert.match(result.reason, /FENCE_MISMATCH/);
 });
 
 test("F4: reclassifyEntry rejects state mutation without fence_id ownership", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "wrong-fence-id" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: { ...fullAuth(entry), fence_id: "wrong-fence-id" } });
   assert.equal(result.ok, false);
   assert.match(result.reason, /FENCE_ID_MISMATCH/);
+});
+
+test("F4: reclassifyEntry rejects state mutation without authority", () => {
+  const reg = createRegistry();
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", {});
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /AUTHORITY_MISSING/);
 });
 
 test("F4: RELEASED state has no allowed transitions", () => {
@@ -2272,7 +2314,7 @@ test("F1: admitEntryWithAuthority rejects second reviewer under authority", () =
 test("F1: Supervisor runLoopOnce exercises registry admission path under lock/fence", async (t) => {
   const { root, paths } = await tempRuntime(t);
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
-  const pendingEntry = regEntry({ card_id: "W-PROD-01", ref: "refs/heads/prod", allowlist_paths: ["src/prod.mjs"], worktree: "D:\\worktrees\\prod", fence_id: "fence-supervisor-01", lease_id: "lease-supervisor-01" });
+  const pendingEntry = regEntry({ card_id: "W-PROD-01", ref: "refs/heads/prod", allowlist_paths: ["src/prod.mjs"], worktree: "D:\\worktrees\\prod", fence_id: "1", lease_id: "lease-supervisor-01" });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2280,8 +2322,6 @@ test("F1: Supervisor runLoopOnce exercises registry admission path under lock/fe
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: createRegistry(),
-    admissionFence: 1,
-    admissionFenceId: "fence-supervisor-01",
     admissionLeaseId: "lease-supervisor-01",
     pendingAdmissions: [pendingEntry],
   });
@@ -2304,14 +2344,14 @@ test("F6-F1: Supervisor runLoopOnce rejects third worker through real admission 
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
   const reg = createRegistry();
   // Pre-admit two workers into the registry
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", fence_id: "fence-01", lease_id: "lease-1" }), REG_TS, {
-    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-1",
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", fence_id: "1", lease_id: "lease-1" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "1", leaseId: "lease-1",
   });
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "fence-01", lease_id: "lease-2" }), REG_TS, {
-    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-2",
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-2" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "1", leaseId: "lease-2",
   });
   // Try to admit a third worker - should be rejected
-  const pendingEntry = regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"], worktree: "D:\\worktrees\\w3", fence_id: "fence-01", lease_id: "lease-3" });
+  const pendingEntry = regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"], worktree: "D:\\worktrees\\w3", fence_id: "1", lease_id: "lease-3" });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2319,8 +2359,6 @@ test("F6-F1: Supervisor runLoopOnce rejects third worker through real admission 
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    admissionFence: 1,
-    admissionFenceId: "fence-01",
     admissionLeaseId: "lease-3",
     pendingAdmissions: [pendingEntry],
   });
@@ -2336,10 +2374,10 @@ test("F6-F1: Supervisor runLoopOnce rejects second reviewer through real admissi
   const { root, paths } = await tempRuntime(t);
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
   const reg = createRegistry();
-  admitEntryWithAuthority(reg, regEntry({ card_id: "R1", role: "reviewer", fence_id: "fence-01", lease_id: "lease-r1" }), REG_TS, {
-    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-r1",
+  admitEntryWithAuthority(reg, regEntry({ card_id: "R1", role: "reviewer", fence_id: "1", lease_id: "lease-r1" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "1", leaseId: "lease-r1",
   });
-  const pendingEntry = regEntry({ card_id: "R2", role: "reviewer", fence_id: "fence-01", lease_id: "lease-r2" });
+  const pendingEntry = regEntry({ card_id: "R2", role: "reviewer", fence_id: "1", lease_id: "lease-r2" });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2347,8 +2385,6 @@ test("F6-F1: Supervisor runLoopOnce rejects second reviewer through real admissi
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    admissionFence: 1,
-    admissionFenceId: "fence-01",
     admissionLeaseId: "lease-r2",
     pendingAdmissions: [pendingEntry],
   });
@@ -2361,10 +2397,10 @@ test("F6-F1: Supervisor runLoopOnce rejects same ref writer through real admissi
   const { root, paths } = await tempRuntime(t);
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
   const reg = createRegistry();
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/main", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", fence_id: "fence-01", lease_id: "lease-1" }), REG_TS, {
-    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-1",
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/main", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", fence_id: "1", lease_id: "lease-1" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "1", leaseId: "lease-1",
   });
-  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/main", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "fence-01", lease_id: "lease-2" });
+  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/main", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-2" });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2372,8 +2408,6 @@ test("F6-F1: Supervisor runLoopOnce rejects same ref writer through real admissi
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    admissionFence: 1,
-    admissionFenceId: "fence-01",
     admissionLeaseId: "lease-2",
     pendingAdmissions: [pendingEntry],
   });
@@ -2386,10 +2420,10 @@ test("F6-F1: Supervisor runLoopOnce rejects overlapping paths through real admis
   const { root, paths } = await tempRuntime(t);
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
   const reg = createRegistry();
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/"], worktree: "D:\\worktrees\\w1", fence_id: "fence-01", lease_id: "lease-1" }), REG_TS, {
-    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-1",
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/"], worktree: "D:\\worktrees\\w1", fence_id: "1", lease_id: "lease-1" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "1", leaseId: "lease-1",
   });
-  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/contracts.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "fence-01", lease_id: "lease-2" });
+  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/contracts.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-2" });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2397,8 +2431,6 @@ test("F6-F1: Supervisor runLoopOnce rejects overlapping paths through real admis
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    admissionFence: 1,
-    admissionFenceId: "fence-01",
     admissionLeaseId: "lease-2",
     pendingAdmissions: [pendingEntry],
   });
@@ -2411,11 +2443,11 @@ test("F6-F1: Supervisor runLoopOnce rejects same worktree alias through real adm
   const { root, paths } = await tempRuntime(t);
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
   const reg = createRegistry();
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\same", fence_id: "fence-01", lease_id: "lease-1" }), REG_TS, {
-    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-1",
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\same", fence_id: "1", lease_id: "lease-1" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "1", leaseId: "lease-1",
   });
   // Different case, same canonical path
-  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "d:\\Worktrees\\SAME", fence_id: "fence-01", lease_id: "lease-2" });
+  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "d:\\Worktrees\\SAME", fence_id: "1", lease_id: "lease-2" });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2423,8 +2455,6 @@ test("F6-F1: Supervisor runLoopOnce rejects same worktree alias through real adm
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    admissionFence: 1,
-    admissionFenceId: "fence-01",
     admissionLeaseId: "lease-2",
     pendingAdmissions: [pendingEntry],
   });
@@ -2437,11 +2467,11 @@ test("F6-F1: Supervisor runLoopOnce rejects stale generation through real admiss
   const { root, paths } = await tempRuntime(t);
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
   const reg = createRegistry();
-  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", generation: 2, fence_id: "fence-01", lease_id: "lease-1" }), REG_TS, {
-    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-1",
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", generation: 2, fence_id: "1", lease_id: "lease-1" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "1", leaseId: "lease-1",
   });
   // Try to admit same card_id with stale generation - uses same lease_id to pass lease check
-  const pendingEntry = regEntry({ card_id: "W1", generation: 1, ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "fence-01", lease_id: "lease-1" });
+  const pendingEntry = regEntry({ card_id: "W1", generation: 1, ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "1", lease_id: "lease-1" });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2449,8 +2479,6 @@ test("F6-F1: Supervisor runLoopOnce rejects stale generation through real admiss
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: reg,
-    admissionFence: 1,
-    admissionFenceId: "fence-01",
     admissionLeaseId: "lease-1",
     pendingAdmissions: [pendingEntry],
   });
@@ -2469,7 +2497,7 @@ test("F6-F3: Supervisor runLoopOnce rejects expired lease through real admission
     worktree: "D:\\worktrees\\expired",
     lease_id: "lease-expired",
     lease_expiry: "2026-08-01T08:00:00+08:00", // expired before REG_TS
-    fence_id: "fence-01",
+    fence_id: "1",
   });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
@@ -2478,8 +2506,6 @@ test("F6-F3: Supervisor runLoopOnce rejects expired lease through real admission
     now: () => BASE_MS,
     isAlive: async () => false,
     registry: createRegistry(),
-    admissionFence: 1,
-    admissionFenceId: "fence-01",
     admissionLeaseId: "lease-expired",
     pendingAdmissions: [pendingEntry],
   });
@@ -2488,7 +2514,7 @@ test("F6-F3: Supervisor runLoopOnce rejects expired lease through real admission
 });
 
 // F3: heartbeatEntry requires mandatory ownership tuple
-test("F6-F3: heartbeatEntry rejects heartbeat without pid ownership", () => {
+test("F6-F3: heartbeatEntry rejects heartbeat without authority", () => {
   const reg = createRegistry();
   admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
   const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00" });
@@ -2497,34 +2523,38 @@ test("F6-F3: heartbeatEntry rejects heartbeat without pid ownership", () => {
 
 test("F6-F3: heartbeatEntry rejects expired lease", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1", lease_expiry: "2026-08-01T08:00:00+08:00" }), REG_TS);
-  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1", lease_expiry: "2026-08-01T08:00:00+08:00" });
+  admitEntry(reg, entry, REG_TS);
+  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", authority: fullAuth(entry) });
   assert.equal(ok, false);
 });
 
 // F3: reclassifyEntry requires mandatory ownership tuple
-test("F6-F3: reclassifyEntry rejects state mutation without pid", () => {
+test("F6-F3: reclassifyEntry rejects state mutation without authority", () => {
   const reg = createRegistry();
   admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { fence: 1, fence_id: "fence-reg-01" });
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", {});
   assert.equal(result.ok, false);
-  assert.match(result.reason, /PID_MISMATCH/);
+  assert.match(result.reason, /AUTHORITY_MISSING/);
 });
 
-test("F6-F3: reclassifyEntry rejects state mutation without fence", () => {
+test("F6-F3: reclassifyEntry rejects state mutation with partial authority (missing fence_id)", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence_id: "fence-reg-01" });
+  const entry = regEntry({ card_id: "W1" });
+  admitEntry(reg, entry, REG_TS);
+  const partial = { pid: 1001, fence: 1, fence_id: "fence-reg-01" };
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { authority: partial });
   assert.equal(result.ok, false);
-  assert.match(result.reason, /FENCE_MISMATCH/);
+  assert.match(result.reason, /LEASE_ID_MISMATCH|GENERATION_MISMATCH|REF_MISMATCH|HEAD_MISMATCH|TREE_MISMATCH|WORKTREE_MISMATCH|PROCESS_STARTED_AT_MISMATCH|SESSION_WORKSPACE_MISMATCH/);
 });
 
 // F4: ACTIVE -> RELEASED authorized release path
-test("F6-F4: reclassifyEntry allows ACTIVE -> RELEASED with expired lease", () => {
+test("F6-F4: reclassifyEntry allows ACTIVE -> RELEASED with expired lease and terminal authority", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1", lease_expiry: "2026-08-01T08:00:00+08:00" }), REG_TS);
-  reclassifyEntry(reg, "W1", "ACTIVE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
-  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01", isoNow: REG_TS });
+  const entry = regEntry({ card_id: "W1", lease_expiry: "2026-08-01T08:00:00+08:00" });
+  admitEntry(reg, entry, REG_TS);
+  reclassifyEntry(reg, "W1", "ACTIVE", { authority: fullAuth(entry) });
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry), isoNow: REG_TS, releaseAuthority: { terminal_authority: true } });
   assert.equal(result.ok, true);
   assert.equal(reg.entries["W1"].state, "RELEASED");
 });
@@ -2532,11 +2562,23 @@ test("F6-F4: reclassifyEntry allows ACTIVE -> RELEASED with expired lease", () =
 // F4: Release before lease expiry rejected
 test("F6-F4: reclassifyEntry rejects ACTIVE -> RELEASED when lease not expired", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1", lease_expiry: "2099-01-01T00:00:00+08:00" }), REG_TS);
-  reclassifyEntry(reg, "W1", "ACTIVE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
-  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01", isoNow: REG_TS });
+  const entry = regEntry({ card_id: "W1", lease_expiry: "2099-01-01T00:00:00+08:00" });
+  admitEntry(reg, entry, REG_TS);
+  reclassifyEntry(reg, "W1", "ACTIVE", { authority: fullAuth(entry) });
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry), isoNow: REG_TS, releaseAuthority: { terminal_authority: true } });
   assert.equal(result.ok, false);
   assert.match(result.reason, /LEASE_NOT_EXPIRED/);
+});
+
+// F5: RELEASED rejected without terminal/revocation authority
+test("F6-F4: reclassifyEntry rejects ACTIVE -> RELEASED without terminal or revocation authority", () => {
+  const reg = createRegistry();
+  const entry = regEntry({ card_id: "W1", lease_expiry: "2026-08-01T08:00:00+08:00" });
+  admitEntry(reg, entry, REG_TS);
+  reclassifyEntry(reg, "W1", "ACTIVE", { authority: fullAuth(entry) });
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { authority: fullAuth(entry), isoNow: REG_TS });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /RELEASE_AUTHORITY_MISSING/);
 });
 
 // F5: canonicalizeRepoRelativePath rejects bare "."
@@ -2681,4 +2723,139 @@ test("F6: physical send lease blocks second prompt for same logical key", async 
   assert.equal(second.allow, false);
   assert.equal(second.decision, "CONTROL_REQUIRED");
   assert.match(second.reason, /PHYSICAL_SEND_LEASE_HELD/);
+});
+
+// ---------------------------------------------------------------------------
+// F001: Production reconstruction uses string fence_id from numeric lock.fence
+// ---------------------------------------------------------------------------
+
+test("F001: runLoopOnce derives string fence_id from numeric lock fence for reconstruction", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  // Simulate a durable receipt with string fence_id "1" (matching numeric fence 1)
+  const receipt = regEntry({
+    card_id: "W-RECON-01",
+    fence: 1,
+    fence_id: "1",
+    ref: "refs/heads/recon",
+    allowlist_paths: ["src/recon.mjs"],
+    worktree: "D:\\worktrees\\recon",
+    state: "ACTIVE",
+  });
+  const live = regEntry({
+    card_id: "W-RECON-01",
+    fence: 1,
+    fence_id: "1",
+    ref: "refs/heads/recon",
+    allowlist_paths: ["src/recon.mjs"],
+    worktree: "D:\\worktrees\\recon",
+    state: "ACTIVE",
+  });
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41040,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    durableReceipts: [receipt],
+    liveObservations: [live],
+  });
+  // The reconstruction should succeed because fence_id is derived as String(lock.fence) = "1"
+  assert.equal(outcome.stop, false);
+  assert.ok(!outcome.events.find((e) => e.type === "registry_reconstruction_rejected"),
+    "reconstruction must not reject valid entries with numeric lock fence");
+});
+
+// ---------------------------------------------------------------------------
+// F006: Production-boundary runLoopOnce UNCERTAIN_SEND regression
+// Physical send succeeds, receipt publication fails, restart/recovery,
+// second physical send is proven blocked.
+// ---------------------------------------------------------------------------
+
+test("F006: runLoopOnce UNCERTAIN_SEND regression — physical send succeeds, receipt fails, restart blocks second send", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({ pid: 50001, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 1 }));
+
+  let promptCount = 0;
+  let publishCount = 0;
+  let publishFails = true;
+
+  const waitTuple = {
+    source_terminal_receipt: 1629000001,
+    control_generation: 13,
+    card_id: "GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01",
+    allowed_action_class: "ISSUE162_RESIDENT_CONSUMER",
+    executor_role: "WORKER",
+    target: { agent_name: "R49-EXECUTOR", executor_instance_id: "r49-executor-instance", surface: "HERDR", herdr_agent: "codex", herdr_workspace_id: "wR49", herdr_agent_kind: "codex" },
+  };
+  const decisionBody = `CONTROL_DECISION_V1
+
+state: EXECUTE_NOW
+control_generation: 13
+decision_topic: ISSUE162_RESIDENT_CONSUMER
+
+SOURCE_BINDING
+source_terminal_receipt: D22977/gpt-browser-bridge Issue #162 receipt 1629000001
+source_control_generation: 13
+resume_card_id: GBB-G13-ISSUE162-RESIDENT-CONSUMER-HERDR-LOOP-R49-01
+
+EXACT_TARGET
+executor_role: WORKER
+agent_name: R49-EXECUTOR
+executor_instance_id: r49-executor-instance
+surface: HERDR
+minimal_wake: Read GitHub directly.
+`;
+
+  // First tick: physical send succeeds, receipt publication fails
+  const firstOutcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 50001,
+    hostId: "host-a",
+    now: () => BASE_MS,
+    isAlive: async () => true,
+    resumeDelivery: {
+      futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] },
+      waitTuple,
+      readAuthority: async () => ({ binding: residentAuthorityBinding() }),
+      decisionBody,
+      readComments: async () => completeComments(),
+      herdr: { prompt: async () => { promptCount += 1; return { accepted: true, workspace_id: "wR49", pane_id: "wR49:p1", agent_session: "r49" }; } },
+      publishReceipt: async () => { publishCount += 1; if (publishFails) throw new Error("PUBLICATION_FAILED"); return { id: "receipt-1" }; },
+    },
+  });
+
+  // Physical prompt was sent
+  assert.equal(promptCount, 1);
+  // Receipt publication failed
+  assert.equal(publishCount, 1);
+  // The delivery should have been attempted but receipt failed
+  const uncertainEvent = firstOutcome.events.find((e) => e.type === "resume_delivery_no_blind_retry" || e.type === "resume_delivery_failed" || e.type === "resume_delivery_control_required");
+  assert.ok(uncertainEvent, "expected delivery failure or no-blind-retry event from receipt publication failure");
+
+  // Second tick: recovery should NOT re-prompt (NO_BLIND_RETRY / UNCERTAIN_SEND)
+  publishFails = false;
+  const secondOutcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 50001,
+    hostId: "host-a",
+    now: () => BASE_MS + 15_000,
+    isAlive: async () => true,
+    resumeDelivery: {
+      futureConsumerBinding: { resident: true, restartable: true, source: "supervisor", event_classes: ["CONTROL_DECISION_V1"] },
+      waitTuple,
+      readAuthority: async () => ({ binding: residentAuthorityBinding() }),
+      decisionBody,
+      readComments: async () => completeComments(),
+      herdr: { prompt: async () => { promptCount += 1; return { accepted: true }; } },
+      publishReceipt: async () => ({ id: "receipt-2" }),
+    },
+  });
+
+  // Second prompt must NOT have been sent — the uncertain send state blocks retry
+  assert.equal(promptCount, 1, "second physical send must be blocked after uncertain send");
 });
