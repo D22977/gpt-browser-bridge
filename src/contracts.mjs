@@ -210,6 +210,12 @@ export const MAX_WORKERS = 2;
 export const MAX_REVIEWERS = 1;
 export const MAX_WRITERS_PER_REF = 1;
 
+// Exact full 40-hex SHA-1 (commit head / tree).
+const EXACT_40_HEX = /^[0-9a-f]{40}$/;
+
+// Canonical git ref: must start with refs/ or be a bare SHA; reject ambiguous forms.
+const CANONICAL_REF = /^(refs\/[^\s]+|[0-9a-f]{40})$/;
+
 // Process identity: stable binding to a specific OS process.
 export const processIdentitySchema = z.object({
   pid: z.number().int().positive(),
@@ -226,6 +232,18 @@ export const registryEntryStateEnum = z.enum([
   "RELEASED",      // slot released, entry no longer counted against limits
 ]);
 
+// Allowed state transitions for the stale handling state machine.
+// OBSERVE -> MARK_STALE_CANDIDATE -> REVALIDATE is the only stale path;
+// direct RELEASE from a non-terminal state is forbidden.
+export const ALLOWED_TRANSITIONS = {
+  ADMITTED:             ["ACTIVE", "HEARTBEAT_STALE"],
+  ACTIVE:               ["HEARTBEAT_STALE"],
+  HEARTBEAT_STALE:      ["MARK_STALE_CANDIDATE", "REVALIDATING"],
+  MARK_STALE_CANDIDATE: ["REVALIDATING", "HEARTBEAT_STALE"],
+  REVALIDATING:         ["ACTIVE", "MARK_STALE_CANDIDATE", "HEARTBEAT_STALE"],
+  RELEASED:             [],
+};
+
 // A single execution registry entry binding task/card id, generation, role,
 // exact ref/head/tree, allowlist identity, worktree, process identity,
 // session/pane identity, lease/fence, heartbeat, and state.
@@ -233,9 +251,9 @@ export const registryEntrySchema = z.object({
   card_id: z.string().min(1),
   generation: z.number().int().positive(),
   role: z.enum(["worker", "reviewer"]),
-  ref: z.string().min(1),
-  head: z.string().regex(/^[0-9a-f]{7,40}$/),
-  tree: z.string().min(1),
+  ref: z.string().regex(CANONICAL_REF),
+  head: z.string().regex(EXACT_40_HEX),
+  tree: z.string().regex(EXACT_40_HEX),
   allowlist_paths: z.array(z.string().min(1)).min(1),
   worktree: z.string().min(1),
   process: processIdentitySchema,
@@ -244,7 +262,9 @@ export const registryEntrySchema = z.object({
     pane_id: z.string().min(1).optional(),
     agent_session: z.string().min(1).optional(),
   }).optional(),
+  lease_id: z.string().min(1),
   fence: z.number().int().positive(),
+  fence_id: z.string().min(1),
   heartbeat_at: z.string().datetime({ offset: true }),
   state: registryEntryStateEnum,
   admitted_at: z.string().datetime({ offset: true }),

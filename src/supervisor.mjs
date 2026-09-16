@@ -1087,19 +1087,59 @@ import {
   MAX_REVIEWERS,
   MAX_WRITERS_PER_REF,
   registryEntrySchema,
+  ALLOWED_TRANSITIONS,
 } from "./contracts.mjs";
 
 export function createRegistry() {
   return { entries: {} };
 }
 
-// Check if two allowlist path sets have any overlapping entry. Two paths
-// overlap when either is a prefix of the other (normalized with trailing
-// slash) or they are equal.
+// ---------------------------------------------------------------------------
+// Path / ref / worktree canonicalization (F4/F5)
+// ---------------------------------------------------------------------------
+
+// Normalize a repo-relative path: forward slashes only, collapse repeated
+// separators, reject traversal and absolute forms.  Returns the canonical
+// form or null for inputs that cannot be valid repo-relative paths.
+export function canonicalizeRepoRelativePath(p) {
+  if (typeof p !== "string" || p.length === 0) return null;
+  // Reject absolute paths (drive letters, UNC, bare leading slash)
+  if (/^(?:[A-Za-z]:|\\\\|\/)/.test(p)) return null;
+  // Normalize to forward slashes, collapse repeated
+  let normalized = p.replace(/\\/g, "/").replace(/\/+/g, "/");
+  // Remove leading ./ segments
+  normalized = normalized.replace(/^\.\//, "");
+  // Reject any remaining traversal
+  if (/\.\./.test(normalized)) return null;
+  // Remove trailing slash unless it's the root "."
+  normalized = normalized.replace(/\/$/, "") || ".";
+  return normalized.toLowerCase();
+}
+
+// Canonical ref: lower-cased, must be a valid refs/ path or exact 40-hex SHA.
+export function canonicalizeRef(ref) {
+  if (typeof ref !== "string") return null;
+  const lower = ref.toLowerCase().trim();
+  if (/^refs\/[^\s]+$/.test(lower)) return lower;
+  if (/^[0-9a-f]{40}$/.test(lower)) return lower;
+  return null;
+}
+
+// Canonical worktree: forward-slash normalized, lower-cased, no trailing slash.
+export function canonicalizeWorktree(wt) {
+  if (typeof wt !== "string" || wt.length === 0) return null;
+  return wt.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+// Check if two allowlist path sets have any overlapping entry.
+// Paths are first canonicalized. Two paths overlap when either is a
+// prefix of the other (normalized with trailing slash) or they are equal.
 export function checkPathOverlap(pathsA, pathsB) {
-  for (const a of pathsA) {
+  const canonA = pathsA.map(canonicalizeRepoRelativePath).filter(Boolean);
+  const canonB = pathsB.map(canonicalizeRepoRelativePath).filter(Boolean);
+  for (const a of canonA) {
     const normA = a.endsWith("/") ? a : `${a}/`;
-    for (const b of pathsB) {
+    for (const b of canonB) {
       const normB = b.endsWith("/") ? b : `${b}/`;
       if (a === b || normA.startsWith(normB) || normB.startsWith(normA)) {
         return true;
@@ -1109,11 +1149,15 @@ export function checkPathOverlap(pathsA, pathsB) {
   return false;
 }
 
-// Admission gate: validates slot limits, ref uniqueness, path disjointness,
-// generation binding, and duplicate card_id. Returns {ok, reason?}.
-export function admitEntry(registry, rawEntry, isoNow) {
-  const parsed = registryEntrySchema.parse(rawEntry);
-  const { card_id, role, ref, generation, allowlist_paths } = parsed;
+// ---------------------------------------------------------------------------
+// Canonical admission validator (shared by admitEntry and reconstructRegistry)
+// ---------------------------------------------------------------------------
+
+// Validate a single entry against the current registry and authority context.
+// Returns {ok, reason?}.  `existingCardIds` is the set of card_ids already
+// admitted or expected from durable receipts.
+export function validateEntryAdmission(registry, entry, existingCardIds) {
+  const { card_id, role, ref, generation, allowlist_paths, worktree, fence, fence_id, lease_id } = entry;
 
   if (registry.entries[card_id]) {
     if (registry.entries[card_id].generation !== generation) {
@@ -1122,8 +1166,11 @@ export function admitEntry(registry, rawEntry, isoNow) {
     return { ok: false, reason: `ALREADY_ADMITTED: ${card_id}` };
   }
 
-  // Count active slots (ADMITTED, ACTIVE, HEARTBEAT_STALE, MARK_STALE_CANDIDATE, REVALIDATING)
-  // RELEASED entries do not count against limits.
+  // Reject entries whose card_id was already seen during reconstruction
+  if (existingCardIds.has(card_id)) {
+    return { ok: false, reason: `DUPLICATE_CARD: ${card_id}` };
+  }
+
   const activeEntries = Object.values(registry.entries).filter(
     (e) => e.state !== "RELEASED"
   );
@@ -1133,14 +1180,22 @@ export function admitEntry(registry, rawEntry, isoNow) {
     if (activeWorkers.length >= MAX_WORKERS) {
       return { ok: false, reason: `MAX_WORKERS: limit ${MAX_WORKERS} reached` };
     }
-    // Check same-ref writer limit
+    // Same-ref writer limit (canonical ref comparison)
     const sameRefWriters = activeWorkers.filter((e) => e.ref === ref);
     if (sameRefWriters.length >= MAX_WRITERS_PER_REF) {
       return { ok: false, reason: `MAX_WRITERS_PER_REF: ref ${ref} already has a writer` };
     }
-    // Check path overlap with all other active workers (not just same ref)
+    // Distinct canonical worktrees required for workers
+    const canonWt = canonicalizeWorktree(worktree);
+    if (!canonWt) {
+      return { ok: false, reason: `INVALID_WORKTREE: ${worktree}` };
+    }
     for (const other of activeWorkers) {
-      if (other.ref === ref) continue; // already checked above
+      if (other.ref === ref) continue;
+      const otherWt = canonicalizeWorktree(other.worktree);
+      if (canonWt === otherWt) {
+        return { ok: false, reason: `SAME_WORKTREE: ${card_id} shares worktree with ${other.card_id}` };
+      }
       if (checkPathOverlap(allowlist_paths, other.allowlist_paths)) {
         return { ok: false, reason: `OVERLAPPING_PATHS: ${card_id} overlaps with ${other.card_id}` };
       }
@@ -1152,21 +1207,72 @@ export function admitEntry(registry, rawEntry, isoNow) {
     }
   }
 
-  registry.entries[card_id] = { ...parsed, state: "ADMITTED", heartbeat_at: parsed.heartbeat_at || isoNow };
+  // Fence must match current authority fence
+  if (fence_id && registry.currentFenceId && fence_id !== registry.currentFenceId) {
+    return { ok: false, reason: `FENCE_MISMATCH: ${card_id}` };
+  }
+  // Lease must be present and non-empty
+  if (!lease_id) {
+    return { ok: false, reason: `LEASE_MISSING: ${card_id}` };
+  }
+
   return { ok: true };
 }
 
-// Update heartbeat timestamp for an admitted entry.
-export function heartbeatEntry(registry, cardId, isoNow) {
-  if (!registry.entries[cardId]) return;
-  registry.entries[cardId] = { ...registry.entries[cardId], heartbeat_at: isoNow };
+// ---------------------------------------------------------------------------
+// Admission gate: validates slot limits, ref uniqueness, path disjointness,
+// generation binding, and duplicate card_id. Returns {ok, reason?}.
+// ---------------------------------------------------------------------------
+
+export function admitEntry(registry, rawEntry, isoNow) {
+  const parsed = registryEntrySchema.parse(rawEntry);
+  const validation = validateEntryAdmission(registry, parsed, new Set());
+  if (!validation.ok) return validation;
+
+  registry.entries[parsed.card_id] = { ...parsed, state: "ADMITTED", heartbeat_at: parsed.heartbeat_at || isoNow };
+  return { ok: true };
 }
 
-// Reclassify entry state (stale processing: OBSERVE -> MARK_STALE_CANDIDATE -> REVALIDATE).
-// No kill/remove/close side effects.
-export function reclassifyEntry(registry, cardId, newState) {
-  if (!registry.entries[cardId]) return;
-  registry.entries[cardId] = { ...registry.entries[cardId], state: newState };
+// ---------------------------------------------------------------------------
+// Heartbeat: bound to exact process/session/fence ownership proof
+// ---------------------------------------------------------------------------
+
+export function heartbeatEntry(registry, cardId, { isoNow, pid, fence, fence_id } = {}) {
+  if (!registry.entries[cardId]) return false;
+  const entry = registry.entries[cardId];
+  // Heartbeat requires exact process and fence ownership proof
+  if (pid !== undefined && entry.process.pid !== pid) return false;
+  if (fence !== undefined && entry.fence !== fence) return false;
+  if (fence_id !== undefined && entry.fence_id !== fence_id) return false;
+  registry.entries[cardId] = { ...entry, heartbeat_at: isoNow };
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// State machine: explicit allowed transitions only (F4)
+// ---------------------------------------------------------------------------
+
+// Reclassify entry state with explicit transition validation.
+// Only allowed transitions from ALLOWED_TRANSITIONS are accepted.
+export function reclassifyEntry(registry, cardId, newState, { pid, fence, fence_id } = {}) {
+  if (!registry.entries[cardId]) return { ok: false, reason: "ENTRY_NOT_FOUND" };
+  const entry = registry.entries[cardId];
+  const allowed = ALLOWED_TRANSITIONS[entry.state];
+  if (!allowed || !allowed.includes(newState)) {
+    return { ok: false, reason: `INVALID_TRANSITION: ${entry.state} -> ${newState}` };
+  }
+  // State mutation requires exact process/fence ownership proof
+  if (pid !== undefined && entry.process.pid !== pid) {
+    return { ok: false, reason: "PID_MISMATCH" };
+  }
+  if (fence !== undefined && entry.fence !== fence) {
+    return { ok: false, reason: "FENCE_MISMATCH" };
+  }
+  if (fence_id !== undefined && entry.fence_id !== fence_id) {
+    return { ok: false, reason: "FENCE_ID_MISMATCH" };
+  }
+  registry.entries[cardId] = { ...entry, state: newState };
+  return { ok: true };
 }
 
 // Find entries whose heartbeat is older than nowMs - staleThresholdMs.
@@ -1182,13 +1288,25 @@ export function findExpiredEntries(registry, nowMs, staleThresholdMs) {
   return expired;
 }
 
-// Rebuild registry from durable GitHub receipts plus live local identity
-// observations. Local registry state cannot create or supersede semantic tasks.
-export function reconstructRegistry(registry, liveEntries, isoNow) {
+// ---------------------------------------------------------------------------
+// Reconstruction: join durable receipts + independently verified live
+// observations; reject duplicates/conflicts; re-run canonical validator;
+// never refresh heartbeat merely by reconstruction (F2).
+// ---------------------------------------------------------------------------
+
+export function reconstructRegistry(registry, liveEntries, isoNow, { currentFenceId = null } = {}) {
   const fresh = createRegistry();
+  fresh.currentFenceId = currentFenceId;
+  const seenCardIds = new Set();
   const activeEntries = [];
+
   for (const entry of liveEntries) {
     const parsed = registryEntrySchema.parse(entry);
+    // Reject duplicate card_ids within the observation set
+    if (seenCardIds.has(parsed.card_id)) {
+      return { ok: false, reason: `DUPLICATE_CARD_IN_OBSERVATIONS: ${parsed.card_id}`, entries: fresh.entries };
+    }
+    seenCardIds.add(parsed.card_id);
     activeEntries.push(parsed);
   }
 
@@ -1202,10 +1320,46 @@ export function reconstructRegistry(registry, liveEntries, isoNow) {
     return { ok: false, reason: `MAX_REVIEWERS: reconstruction has ${reviewers.length} reviewers, limit ${MAX_REVIEWERS}`, entries: fresh.entries };
   }
 
+  // Re-run the same canonical admission validator used for live admission.
+  // Check against entries already admitted into fresh AND entries in the
+  // original registry (for stale generation detection).
   for (const entry of activeEntries) {
-    fresh.entries[entry.card_id] = { ...entry, heartbeat_at: isoNow };
+    const alreadyAdmitted = new Set([
+      ...Object.keys(fresh.entries),
+      ...Object.keys(registry.entries),
+    ]);
+    const validation = validateEntryAdmission(fresh, entry, alreadyAdmitted);
+    if (!validation.ok) {
+      return { ok: false, reason: validation.reason, entries: fresh.entries };
+    }
+    // Admit into fresh so subsequent entries see this one
+    fresh.entries[entry.card_id] = { ...entry };
   }
   return { ok: true, entries: fresh.entries };
+}
+
+// ---------------------------------------------------------------------------
+// Admission with Supervisor authority context (wires into real path)
+// ---------------------------------------------------------------------------
+
+// Admit an entry under a specific Supervisor authority fence.
+// `authorityFence` is the current lock fence; entries must match it.
+export function admitEntryWithAuthority(registry, rawEntry, isoNow, { authorityFence, authorityFenceId, leaseId }) {
+  const parsed = registryEntrySchema.parse(rawEntry);
+  if (authorityFence !== undefined && parsed.fence !== authorityFence) {
+    return { ok: false, reason: `FENCE_MISMATCH: entry fence ${parsed.fence} != authority ${authorityFence}` };
+  }
+  if (authorityFenceId && parsed.fence_id !== authorityFenceId) {
+    return { ok: false, reason: `FENCE_ID_MISMATCH: ${parsed.card_id}` };
+  }
+  if (!leaseId) {
+    return { ok: false, reason: `LEASE_MISSING: ${parsed.card_id}` };
+  }
+  const validation = validateEntryAdmission(registry, parsed, new Set());
+  if (!validation.ok) return validation;
+
+  registry.entries[parsed.card_id] = { ...parsed, state: "ADMITTED", heartbeat_at: parsed.heartbeat_at || isoNow };
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------

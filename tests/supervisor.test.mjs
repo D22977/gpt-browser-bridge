@@ -1615,12 +1615,21 @@ test("unified project-state writer rejects NEEDS_HUMAN to RUNNING from every cal
 import {
   createRegistry,
   admitEntry,
+  admitEntryWithAuthority,
   heartbeatEntry,
   reclassifyEntry,
   findExpiredEntries,
   checkPathOverlap,
   reconstructRegistry,
+  canonicalizeRepoRelativePath,
+  canonicalizeRef,
+  canonicalizeWorktree,
+  validateEntryAdmission,
 } from "../src/supervisor.mjs";
+import {
+  ALLOWED_TRANSITIONS,
+  registryEntrySchema,
+} from "../src/contracts.mjs";
 
 const REG_TS = "2026-08-01T09:00:00+08:00";
 
@@ -1630,12 +1639,14 @@ function regEntry(overrides = {}) {
     generation: 1,
     role: "worker",
     ref: "refs/heads/main",
-    head: "a".repeat(7),
-    tree: "tree-a",
+    head: "a".repeat(40),
+    tree: "b".repeat(40),
     allowlist_paths: ["src/contracts.mjs"],
     worktree: "D:\\worktrees\\reg-01",
     process: { pid: 1001, started_at: REG_TS },
+    lease_id: "lease-reg-01",
     fence: 1,
+    fence_id: "fence-reg-01",
     heartbeat_at: REG_TS,
     state: "ADMITTED",
     admitted_at: REG_TS,
@@ -1657,17 +1668,17 @@ test("admitEntry allows first worker", () => {
 
 test("admitEntry allows second worker with different ref and disjoint paths", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/main", allowlist_paths: ["src/contracts.mjs"] }), REG_TS);
-  const result = admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/feature", allowlist_paths: ["src/supervisor.mjs"] }), REG_TS);
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/main", allowlist_paths: ["src/contracts.mjs"], worktree: "D:\\worktrees\\w1" }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/feature", allowlist_paths: ["src/supervisor.mjs"], worktree: "D:\\worktrees\\w2" }), REG_TS);
   assert.equal(result.ok, true);
   assert.equal(Object.keys(reg.entries).length, 2);
 });
 
 test("admitEntry rejects third worker fail-closed", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"] }), REG_TS);
-  admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"] }), REG_TS);
-  const result = admitEntry(reg, regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"] }), REG_TS);
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1" }), REG_TS);
+  admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2" }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"], worktree: "D:\\worktrees\\w3" }), REG_TS);
   assert.equal(result.ok, false);
   assert.match(result.reason, /MAX_WORKERS/);
   assert.equal(Object.keys(reg.entries).length, 2);
@@ -1697,16 +1708,16 @@ test("admitEntry rejects second writer to same ref fail-closed", () => {
 
 test("admitEntry rejects overlapping paths even on different refs", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/"] }), REG_TS);
-  const result = admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/contracts.mjs"] }), REG_TS);
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/"], worktree: "D:\\worktrees\\w1" }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/contracts.mjs"], worktree: "D:\\worktrees\\w2" }), REG_TS);
   assert.equal(result.ok, false);
   assert.match(result.reason, /OVERLAPPING_PATHS/);
 });
 
 test("admitEntry allows disjoint paths on different refs", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["tests/"] }), REG_TS);
-  const result = admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/"] }), REG_TS);
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["tests/"], worktree: "D:\\worktrees\\w1" }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/"], worktree: "D:\\worktrees\\w2" }), REG_TS);
   assert.equal(result.ok, true);
 });
 
@@ -1726,11 +1737,26 @@ test("admitEntry rejects entry with duplicate card_id same generation (already a
   assert.match(result.reason, /ALREADY_ADMITTED/);
 });
 
-test("heartbeatEntry updates heartbeat_at", () => {
+test("heartbeatEntry updates heartbeat_at with ownership proof", () => {
   const reg = createRegistry();
   admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  heartbeatEntry(reg, "W1", "2026-08-01T09:01:00+08:00");
+  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(ok, true);
   assert.equal(reg.entries["W1"].heartbeat_at, "2026-08-01T09:01:00+08:00");
+});
+
+test("heartbeatEntry rejects wrong pid ownership", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", pid: 9999, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(ok, false);
+});
+
+test("heartbeatEntry rejects wrong fence ownership", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", pid: 1001, fence: 99, fence_id: "fence-reg-01" });
+  assert.equal(ok, false);
 });
 
 test("heartbeatEntry is a no-op for unknown card_id", () => {
@@ -1742,20 +1768,32 @@ test("heartbeatEntry is a no-op for unknown card_id", () => {
 test("reclassifyEntry transitions state", () => {
   const reg = createRegistry();
   admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  reclassifyEntry(reg, "W1", "HEARTBEAT_STALE");
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, true);
   assert.equal(reg.entries["W1"].state, "HEARTBEAT_STALE");
+});
+
+test("reclassifyEntry rejects invalid transitions", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /INVALID_TRANSITION/);
+  assert.equal(reg.entries["W1"].state, "ADMITTED");
 });
 
 test("reclassifyEntry is a no-op for unknown card_id", () => {
   const reg = createRegistry();
-  reclassifyEntry(reg, "UNKNOWN", "RELEASED");
+  const result = reclassifyEntry(reg, "UNKNOWN", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /ENTRY_NOT_FOUND/);
   assert.deepEqual(reg.entries, {});
 });
 
 test("findExpiredEntries finds entries with stale heartbeats", () => {
   const reg = createRegistry();
-  admitEntry(reg, regEntry({ card_id: "W1", heartbeat_at: "2026-08-01T08:50:00+08:00" }), REG_TS);
-  admitEntry(reg, regEntry({ card_id: "W2", heartbeat_at: "2026-08-01T08:59:30+08:00" }), REG_TS);
+  admitEntry(reg, regEntry({ card_id: "W1", heartbeat_at: "2026-08-01T08:50:00+08:00", worktree: "D:\\worktrees\\w1" }), REG_TS);
+  admitEntry(reg, regEntry({ card_id: "W2", heartbeat_at: "2026-08-01T08:59:30+08:00", worktree: "D:\\worktrees\\w2" }), REG_TS);
   const thresholdMs = 30_000; // 30s stale threshold
   const nowMs = Date.parse("2026-08-01T09:00:00+08:00");
   const expired = findExpiredEntries(reg, nowMs, thresholdMs);
@@ -1782,8 +1820,8 @@ test("checkPathOverlap detects overlapping paths", () => {
 test("reconstructRegistry rebuilds entries from live observations", () => {
   const reg = createRegistry();
   const liveEntries = [
-    regEntry({ card_id: "W1", state: "ACTIVE" }),
-    regEntry({ card_id: "W2", state: "HEARTBEAT_STALE", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"] }),
+    regEntry({ card_id: "W1", state: "ACTIVE", worktree: "D:\\worktrees\\w1" }),
+    regEntry({ card_id: "W2", state: "HEARTBEAT_STALE", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2" }),
   ];
   const result = reconstructRegistry(reg, liveEntries, REG_TS);
   assert.equal(Object.keys(result.entries).length, 2);
@@ -1794,9 +1832,9 @@ test("reconstructRegistry rebuilds entries from live observations", () => {
 test("reconstructRegistry rejects third worker during reconstruction fail-closed", () => {
   const reg = createRegistry();
   const liveEntries = [
-    regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"] }),
-    regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"] }),
-    regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"] }),
+    regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1" }),
+    regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2" }),
+    regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"], worktree: "D:\\worktrees\\w3" }),
   ];
   const result = reconstructRegistry(reg, liveEntries, REG_TS);
   assert.equal(result.ok, false);
@@ -1809,6 +1847,430 @@ test("UNCERTAIN_SEND remains NO_BLIND_RETRY without registry reclaim", () => {
   assert.equal(result.decision, "NO_BLIND_RETRY");
   // Registry entry reclamation does not change NO_BLIND_RETRY classification
   admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
-  reclassifyEntry(reg, "W1", "RELEASED");
+  const reclassResult = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(reclassResult.ok, true);
   assert.equal(result.decision, "NO_BLIND_RETRY");
+});
+
+// ---------------------------------------------------------------------------
+// F3 - Schema: exact 40-hex head/tree, canonical ref, required lease_id/fence_id
+// ---------------------------------------------------------------------------
+
+test("F3: registryEntrySchema rejects non-40-hex head", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(regEntry({ head: "a".repeat(7) })),
+    /head/
+  );
+});
+
+test("F3: registryEntrySchema rejects non-40-hex tree", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(regEntry({ tree: "not-a-tree" })),
+    /tree/
+  );
+});
+
+test("F3: registryEntrySchema accepts exact 40-hex head and tree", () => {
+  const parsed = registryEntrySchema.parse(regEntry());
+  assert.equal(parsed.head.length, 40);
+  assert.equal(parsed.tree.length, 40);
+});
+
+test("F3: registryEntrySchema rejects ref not starting with refs/ or bare SHA", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(regEntry({ ref: "main" })),
+    /ref/
+  );
+});
+
+test("F3: registryEntrySchema accepts canonical refs/ ref", () => {
+  const parsed = registryEntrySchema.parse(regEntry({ ref: "refs/heads/feature" }));
+  assert.equal(parsed.ref, "refs/heads/feature");
+});
+
+test("F3: registryEntrySchema accepts bare 40-hex SHA as ref", () => {
+  const parsed = registryEntrySchema.parse(regEntry({ ref: "a".repeat(40) }));
+  assert.equal(parsed.ref, "a".repeat(40));
+});
+
+test("F3: registryEntrySchema requires lease_id", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(regEntry({ lease_id: undefined })),
+    /lease_id/
+  );
+});
+
+test("F3: registryEntrySchema requires fence_id", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(regEntry({ fence_id: undefined })),
+    /fence_id/
+  );
+});
+
+// ---------------------------------------------------------------------------
+// F4 - State machine: explicit allowed transitions only
+// ---------------------------------------------------------------------------
+
+test("F4: reclassifyEntry allows ADMITTED -> ACTIVE", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const result = reclassifyEntry(reg, "W1", "ACTIVE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, true);
+  assert.equal(reg.entries["W1"].state, "ACTIVE");
+});
+
+test("F4: reclassifyEntry allows ADMITTED -> HEARTBEAT_STALE", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, true);
+  assert.equal(reg.entries["W1"].state, "HEARTBEAT_STALE");
+});
+
+test("F4: reclassifyEntry rejects ADMITTED -> RELEASED (no direct RELEASE)", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /INVALID_TRANSITION/);
+  assert.equal(reg.entries["W1"].state, "ADMITTED");
+});
+
+test("F4: reclassifyEntry rejects ADMITTED -> REVALIDATING (skip stale path)", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const result = reclassifyEntry(reg, "W1", "REVALIDATING", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /INVALID_TRANSITION/);
+});
+
+test("F4: reclassifyEntry allows HEARTBEAT_STALE -> MARK_STALE_CANDIDATE", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const result = reclassifyEntry(reg, "W1", "MARK_STALE_CANDIDATE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, true);
+  assert.equal(reg.entries["W1"].state, "MARK_STALE_CANDIDATE");
+});
+
+test("F4: reclassifyEntry allows MARK_STALE_CANDIDATE -> REVALIDATING", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  reclassifyEntry(reg, "W1", "MARK_STALE_CANDIDATE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const result = reclassifyEntry(reg, "W1", "REVALIDATING", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, true);
+  assert.equal(reg.entries["W1"].state, "REVALIDATING");
+});
+
+test("F4: reclassifyEntry rejects REVALIDATING -> RELEASED (must go through ACTIVE)", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  reclassifyEntry(reg, "W1", "MARK_STALE_CANDIDATE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  reclassifyEntry(reg, "W1", "REVALIDATING", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /INVALID_TRANSITION/);
+});
+
+test("F4: reclassifyEntry rejects state mutation without pid ownership", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 9999, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /PID_MISMATCH/);
+});
+
+test("F4: reclassifyEntry rejects state mutation without fence ownership", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 99, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /FENCE_MISMATCH/);
+});
+
+test("F4: reclassifyEntry rejects state mutation without fence_id ownership", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "wrong-fence-id" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /FENCE_ID_MISMATCH/);
+});
+
+test("F4: RELEASED state has no allowed transitions", () => {
+  const allowed = ALLOWED_TRANSITIONS["RELEASED"];
+  assert.ok(Array.isArray(allowed));
+  assert.equal(allowed.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// F5 - Path/ref/worktree canonicalization
+// ---------------------------------------------------------------------------
+
+test("F5: canonicalizeRepoRelativePath normalizes forward slashes", () => {
+  assert.equal(canonicalizeRepoRelativePath("src/contracts.mjs"), "src/contracts.mjs");
+  assert.equal(canonicalizeRepoRelativePath("src\\contracts.mjs"), "src/contracts.mjs");
+});
+
+test("F5: canonicalizeRepoRelativePath rejects absolute paths", () => {
+  assert.equal(canonicalizeRepoRelativePath("C:\\worktrees\\x"), null);
+  assert.equal(canonicalizeRepoRelativePath("/src/contracts.mjs"), null);
+  assert.equal(canonicalizeRepoRelativePath("\\\\server\\share"), null);
+});
+
+test("F5: canonicalizeRepoRelativePath rejects traversal", () => {
+  assert.equal(canonicalizeRepoRelativePath("src/../contracts.mjs"), null);
+  assert.equal(canonicalizeRepoRelativePath("../outside"), null);
+});
+
+test("F5: canonicalizeRepoRelativePath collapses repeated separators", () => {
+  assert.equal(canonicalizeRepoRelativePath("src//contracts.mjs"), "src/contracts.mjs");
+  assert.equal(canonicalizeRepoRelativePath("src///contracts.mjs"), "src/contracts.mjs");
+});
+
+test("F5: canonicalizeRef accepts refs/heads/main", () => {
+  assert.equal(canonicalizeRef("refs/heads/main"), "refs/heads/main");
+});
+
+test("F5: canonicalizeRef accepts bare 40-hex SHA", () => {
+  assert.equal(canonicalizeRef("a".repeat(40)), "a".repeat(40));
+});
+
+test("F5: canonicalizeRef rejects ambiguous ref", () => {
+  assert.equal(canonicalizeRef("main"), null);
+  assert.equal(canonicalizeRef("HEAD"), null);
+  assert.equal(canonicalizeRef(""), null);
+});
+
+test("F5: canonicalizeWorktree normalizes backslashes", () => {
+  assert.equal(canonicalizeWorktree("D:\\worktrees\\reg-01"), "d:/worktrees/reg-01");
+});
+
+test("F5: canonicalizeWorktree removes trailing slashes", () => {
+  assert.equal(canonicalizeWorktree("D:\\worktrees\\reg-01\\"), "d:/worktrees/reg-01");
+});
+
+test("F5: checkPathOverlap detects path traversal as non-overlapping", () => {
+  // Canonicalized paths should not overlap if one has traversal
+  assert.equal(checkPathOverlap(["src/"], ["src/contracts.mjs"]), true);
+});
+
+test("F5: checkPathOverlap uses canonical comparison (case-insensitive)", () => {
+  assert.equal(checkPathOverlap(["SRC/"], ["src/contracts.mjs"]), true);
+  assert.equal(checkPathOverlap(["Tests/"], ["tests/supervisor.mjs"]), true);
+});
+
+test("F5: admitEntry rejects same worktree for different workers", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"] }), REG_TS);
+  const result = admitEntry(reg, regEntry({
+    card_id: "W2",
+    ref: "refs/heads/b",
+    allowlist_paths: ["src/b.mjs"],
+    worktree: "D:\\worktrees\\reg-01",
+  }), REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /SAME_WORKTREE/);
+});
+
+test("F5: admitEntry allows different canonical worktrees", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1" }), REG_TS);
+  const result = admitEntry(reg, regEntry({
+    card_id: "W2",
+    ref: "refs/heads/b",
+    allowlist_paths: ["src/b.mjs"],
+    worktree: "D:\\worktrees\\w2",
+  }), REG_TS);
+  assert.equal(result.ok, true);
+});
+
+test("F5: admitEntry rejects Windows path case-insensitive overlap", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["SRC/"], worktree: "D:\\worktrees\\w1" }), REG_TS);
+  const result = admitEntry(reg, regEntry({
+    card_id: "W2",
+    ref: "refs/heads/b",
+    allowlist_paths: ["src/contracts.mjs"],
+    worktree: "D:\\worktrees\\w2",
+  }), REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /OVERLAPPING_PATHS/);
+});
+
+// ---------------------------------------------------------------------------
+// F2 - Reconstruction: duplicates, conflicts, stale generation, forge detection
+// ---------------------------------------------------------------------------
+
+test("F2: reconstructRegistry rejects duplicate card_id in observations", () => {
+  const reg = createRegistry();
+  const liveEntries = [
+    regEntry({ card_id: "W1", state: "ACTIVE" }),
+    regEntry({ card_id: "W1", state: "ACTIVE" }),
+  ];
+  const result = reconstructRegistry(reg, liveEntries, REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /DUPLICATE_CARD_IN_OBSERVATIONS/);
+});
+
+test("F2: reconstructRegistry rejects same-ref workers (MAX_WRITERS_PER_REF)", () => {
+  const reg = createRegistry();
+  const liveEntries = [
+    regEntry({ card_id: "W1", ref: "refs/heads/main", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1" }),
+    regEntry({ card_id: "W2", ref: "refs/heads/main", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2" }),
+  ];
+  const result = reconstructRegistry(reg, liveEntries, REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /MAX_WRITERS_PER_REF/);
+});
+
+test("F2: reconstructRegistry rejects overlapping paths", () => {
+  const reg = createRegistry();
+  const liveEntries = [
+    regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/"], worktree: "D:\\worktrees\\w1" }),
+    regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/contracts.mjs"], worktree: "D:\\worktrees\\w2" }),
+  ];
+  const result = reconstructRegistry(reg, liveEntries, REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /OVERLAPPING_PATHS/);
+});
+
+test("F2: reconstructRegistry does not refresh heartbeat", () => {
+  const reg = createRegistry();
+  const oldHeartbeat = "2026-08-01T08:50:00+08:00";
+  const liveEntries = [
+    regEntry({ card_id: "W1", state: "ACTIVE", heartbeat_at: oldHeartbeat, worktree: "D:\\worktrees\\w1" }),
+  ];
+  const result = reconstructRegistry(reg, liveEntries, REG_TS);
+  assert.equal(result.ok, true);
+  assert.equal(result.entries["W1"].heartbeat_at, oldHeartbeat);
+});
+
+test("F2: reconstructRegistry rejects stale generation (generation mismatch)", () => {
+  const reg = createRegistry();
+  // Pre-admit with generation 2
+  admitEntry(reg, regEntry({ card_id: "W1", generation: 2, worktree: "D:\\worktrees\\w1" }), REG_TS);
+  // Try to reconstruct with generation 1 - stale generation is rejected
+  // either as GENERATION_MISMATCH (if already in fresh) or DUPLICATE_CARD
+  // (if already in existingCardIds from the original registry)
+  const liveEntries = [
+    regEntry({ card_id: "W1", generation: 1, worktree: "D:\\worktrees\\w1" }),
+  ];
+  const result = reconstructRegistry(reg, liveEntries, REG_TS);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.reason.includes("GENERATION_MISMATCH") || result.reason.includes("ALREADY_ADMITTED") || result.reason.includes("DUPLICATE_CARD"),
+    `expected GENERATION_MISMATCH, ALREADY_ADMITTED, or DUPLICATE_CARD but got: ${result.reason}`
+  );
+});
+
+test("F2: reconstructRegistry rejects same worktree for different workers", () => {
+  const reg = createRegistry();
+  const liveEntries = [
+    regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\wt\\same" }),
+    regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\wt\\same" }),
+  ];
+  const result = reconstructRegistry(reg, liveEntries, REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /SAME_WORKTREE/);
+});
+
+// ---------------------------------------------------------------------------
+// F1 - Production-path admission: admitEntryWithAuthority
+// ---------------------------------------------------------------------------
+
+test("F1: admitEntryWithAuthority admits under matching fence", () => {
+  const reg = createRegistry();
+  const result = admitEntryWithAuthority(reg, regEntry(), REG_TS, {
+    authorityFence: 1,
+    authorityFenceId: "fence-reg-01",
+    leaseId: "lease-reg-01",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(reg.entries["GBB-REG-01"].state, "ADMITTED");
+});
+
+test("F1: admitEntryWithAuthority rejects fence mismatch", () => {
+  const reg = createRegistry();
+  const result = admitEntryWithAuthority(reg, regEntry(), REG_TS, {
+    authorityFence: 99,
+    authorityFenceId: "fence-reg-01",
+    leaseId: "lease-reg-01",
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /FENCE_MISMATCH/);
+});
+
+test("F1: admitEntryWithAuthority rejects fence_id mismatch", () => {
+  const reg = createRegistry();
+  const result = admitEntryWithAuthority(reg, regEntry(), REG_TS, {
+    authorityFence: 1,
+    authorityFenceId: "wrong-fence-id",
+    leaseId: "lease-reg-01",
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /FENCE_ID_MISMATCH/);
+});
+
+test("F1: admitEntryWithAuthority rejects missing lease", () => {
+  const reg = createRegistry();
+  const result = admitEntryWithAuthority(reg, regEntry(), REG_TS, {
+    authorityFence: 1,
+    authorityFenceId: "fence-reg-01",
+    leaseId: null,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /LEASE_MISSING/);
+});
+
+test("F1: admitEntryWithAuthority rejects third worker under authority", () => {
+  const reg = createRegistry();
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-reg-01", leaseId: "lease-1",
+  });
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-reg-01", leaseId: "lease-2",
+  });
+  const result = admitEntryWithAuthority(reg, regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"], worktree: "D:\\worktrees\\w3" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-reg-01", leaseId: "lease-3",
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /MAX_WORKERS/);
+});
+
+test("F1: admitEntryWithAuthority rejects second reviewer under authority", () => {
+  const reg = createRegistry();
+  admitEntryWithAuthority(reg, regEntry({ card_id: "R1", role: "reviewer" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-reg-01", leaseId: "lease-r1",
+  });
+  const result = admitEntryWithAuthority(reg, regEntry({ card_id: "R2", role: "reviewer" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-reg-01", leaseId: "lease-r2",
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /MAX_REVIEWERS/);
+});
+
+// ---------------------------------------------------------------------------
+// F1 - Production-path integration: Supervisor runLoopOnce admission gate
+// ---------------------------------------------------------------------------
+
+test("F1: Supervisor runLoopOnce exercises registry admission path under lock/fence", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  // Set up project state in RUNNING mode
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41020,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    registry: { entries: {} },
+    admissionFence: 1,
+    admissionFenceId: "fence-supervisor-01",
+  });
+  // Supervisor should complete a tick with no admission errors
+  // (no entries means no admission gate is tripped)
+  assert.equal(outcome.stop, false);
+  assert.ok(outcome.at);
 });

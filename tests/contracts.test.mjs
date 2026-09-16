@@ -336,6 +336,7 @@ import {
 } from "../src/contracts.mjs";
 
 const regTs = "2026-08-01T09:00:00+08:00";
+const sha40 = "a".repeat(40);
 
 function validRegistryEntry(overrides = {}) {
   return {
@@ -343,12 +344,14 @@ function validRegistryEntry(overrides = {}) {
     generation: 1,
     role: "worker",
     ref: "refs/heads/main",
-    head: sha7,
-    tree: "tree-abc",
+    head: sha40,
+    tree: sha40,
     allowlist_paths: ["src/contracts.mjs"],
     worktree: "D:\\worktrees\\entry-01",
     process: { pid: 1001, started_at: regTs },
+    lease_id: "lease-entry-01",
     fence: 1,
+    fence_id: "fence-entry-01",
     heartbeat_at: regTs,
     state: "ADMITTED",
     admitted_at: regTs,
