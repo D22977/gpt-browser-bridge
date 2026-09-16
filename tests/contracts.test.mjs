@@ -322,6 +322,94 @@ test("agentReportSchema discriminates on role", () => {
   assert.equal(agentReportSchema.parse(reviewer).role, "reviewer");
 });
 
+// ---------------------------------------------------------------------------
+// Execution Registry / Admission contracts (GBB-001 §registry)
+// ---------------------------------------------------------------------------
+
+import {
+  registryEntrySchema,
+  registryEntryStateEnum,
+  processIdentitySchema,
+  MAX_WORKERS,
+  MAX_REVIEWERS,
+  MAX_WRITERS_PER_REF,
+} from "../src/contracts.mjs";
+
+const regTs = "2026-08-01T09:00:00+08:00";
+
+function validRegistryEntry(overrides = {}) {
+  return {
+    card_id: "GBB-REG-ENTRY-01",
+    generation: 1,
+    role: "worker",
+    ref: "refs/heads/main",
+    head: sha7,
+    tree: "tree-abc",
+    allowlist_paths: ["src/contracts.mjs"],
+    worktree: "D:\\worktrees\\entry-01",
+    process: { pid: 1001, started_at: regTs },
+    fence: 1,
+    heartbeat_at: regTs,
+    state: "ADMITTED",
+    admitted_at: regTs,
+    ...overrides,
+  };
+}
+
+test("registryEntrySchema accepts a valid worker entry", () => {
+  const parsed = registryEntrySchema.parse(validRegistryEntry());
+  assert.equal(parsed.card_id, "GBB-REG-ENTRY-01");
+  assert.equal(parsed.role, "worker");
+  assert.equal(parsed.state, "ADMITTED");
+});
+
+test("registryEntrySchema accepts a valid reviewer entry", () => {
+  const parsed = registryEntrySchema.parse(validRegistryEntry({ role: "reviewer", card_id: "GBB-REG-REV-01" }));
+  assert.equal(parsed.role, "reviewer");
+});
+
+test("registryEntrySchema rejects an invalid role", () => {
+  assert.throws(() => registryEntrySchema.parse(validRegistryEntry({ role: "sender" })), /role/);
+});
+
+test("registryEntryStateEnum contains exactly the expected states", () => {
+  const values = new Set(registryEntryStateEnum.options);
+  const expected = new Set(["ADMITTED", "ACTIVE", "HEARTBEAT_STALE", "MARK_STALE_CANDIDATE", "REVALIDATING", "RELEASED"]);
+  assert.equal(values.size, expected.size);
+  for (const v of expected) assert.ok(values.has(v), `missing state: ${v}`);
+});
+
+test("processIdentitySchema accepts valid pid and started_at", () => {
+  const parsed = processIdentitySchema.parse({ pid: 42, started_at: regTs });
+  assert.equal(parsed.pid, 42);
+});
+
+test("processIdentitySchema rejects zero or negative pid", () => {
+  assert.throws(() => processIdentitySchema.parse({ pid: 0, started_at: regTs }));
+  assert.throws(() => processIdentitySchema.parse({ pid: -1, started_at: regTs }));
+});
+
+test("MAX_WORKERS is 2, MAX_REVIEWERS is 1, MAX_WRITERS_PER_REF is 1", () => {
+  assert.equal(MAX_WORKERS, 2);
+  assert.equal(MAX_REVIEWERS, 1);
+  assert.equal(MAX_WRITERS_PER_REF, 1);
+});
+
+test("registryEntrySchema requires at least one allowlist_path", () => {
+  assert.throws(() => registryEntrySchema.parse(validRegistryEntry({ allowlist_paths: [] })), /allowlist_paths/);
+});
+
+test("registryEntrySchema rejects empty card_id", () => {
+  assert.throws(() => registryEntrySchema.parse(validRegistryEntry({ card_id: "" })), /card_id/);
+});
+
+test("registryEntrySchema requires process with positive pid", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(validRegistryEntry({ process: { pid: 0, started_at: regTs } })),
+    /pid/
+  );
+});
+
 test("Reviewer canary workflow is a static, read-only, fail-closed runner contract", async () => {
   const source = await readFile(
     new URL("../.github/workflows/reviewer-runner-canary.yml", import.meta.url),

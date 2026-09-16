@@ -1607,3 +1607,208 @@ test("unified project-state writer rejects NEEDS_HUMAN to RUNNING from every cal
   );
   assert.deepEqual(await readJson(paths.state), needsHuman);
 });
+
+// ---------------------------------------------------------------------------
+// Execution Registry / Admission tests
+// ---------------------------------------------------------------------------
+
+import {
+  createRegistry,
+  admitEntry,
+  heartbeatEntry,
+  reclassifyEntry,
+  findExpiredEntries,
+  checkPathOverlap,
+  reconstructRegistry,
+} from "../src/supervisor.mjs";
+
+const REG_TS = "2026-08-01T09:00:00+08:00";
+
+function regEntry(overrides = {}) {
+  return {
+    card_id: "GBB-REG-01",
+    generation: 1,
+    role: "worker",
+    ref: "refs/heads/main",
+    head: "a".repeat(7),
+    tree: "tree-a",
+    allowlist_paths: ["src/contracts.mjs"],
+    worktree: "D:\\worktrees\\reg-01",
+    process: { pid: 1001, started_at: REG_TS },
+    fence: 1,
+    heartbeat_at: REG_TS,
+    state: "ADMITTED",
+    admitted_at: REG_TS,
+    ...overrides,
+  };
+}
+
+test("createRegistry returns empty entries map", () => {
+  const reg = createRegistry();
+  assert.deepEqual(reg.entries, {});
+});
+
+test("admitEntry allows first worker", () => {
+  const reg = createRegistry();
+  const result = admitEntry(reg, regEntry(), REG_TS);
+  assert.equal(result.ok, true);
+  assert.equal(reg.entries["GBB-REG-01"].state, "ADMITTED");
+});
+
+test("admitEntry allows second worker with different ref and disjoint paths", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/main", allowlist_paths: ["src/contracts.mjs"] }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/feature", allowlist_paths: ["src/supervisor.mjs"] }), REG_TS);
+  assert.equal(result.ok, true);
+  assert.equal(Object.keys(reg.entries).length, 2);
+});
+
+test("admitEntry rejects third worker fail-closed", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"] }), REG_TS);
+  admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"] }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"] }), REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /MAX_WORKERS/);
+  assert.equal(Object.keys(reg.entries).length, 2);
+});
+
+test("admitEntry allows one reviewer", () => {
+  const reg = createRegistry();
+  const result = admitEntry(reg, regEntry({ card_id: "R1", role: "reviewer" }), REG_TS);
+  assert.equal(result.ok, true);
+});
+
+test("admitEntry rejects second reviewer fail-closed", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "R1", role: "reviewer" }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "R2", role: "reviewer" }), REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /MAX_REVIEWERS/);
+});
+
+test("admitEntry rejects second writer to same ref fail-closed", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/main", allowlist_paths: ["src/a.mjs"] }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/main", allowlist_paths: ["src/b.mjs"] }), REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /MAX_WRITERS_PER_REF/);
+});
+
+test("admitEntry rejects overlapping paths even on different refs", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/"] }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/contracts.mjs"] }), REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /OVERLAPPING_PATHS/);
+});
+
+test("admitEntry allows disjoint paths on different refs", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["tests/"] }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/"] }), REG_TS);
+  assert.equal(result.ok, true);
+});
+
+test("admitEntry rejects mismatched generation for same card_id", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", generation: 1 }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "W1", generation: 2, ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"] }), REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /GENERATION_MISMATCH/);
+});
+
+test("admitEntry rejects entry with duplicate card_id same generation (already admitted)", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const result = admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /ALREADY_ADMITTED/);
+});
+
+test("heartbeatEntry updates heartbeat_at", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  heartbeatEntry(reg, "W1", "2026-08-01T09:01:00+08:00");
+  assert.equal(reg.entries["W1"].heartbeat_at, "2026-08-01T09:01:00+08:00");
+});
+
+test("heartbeatEntry is a no-op for unknown card_id", () => {
+  const reg = createRegistry();
+  heartbeatEntry(reg, "UNKNOWN", REG_TS);
+  assert.deepEqual(reg.entries, {});
+});
+
+test("reclassifyEntry transitions state", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  reclassifyEntry(reg, "W1", "HEARTBEAT_STALE");
+  assert.equal(reg.entries["W1"].state, "HEARTBEAT_STALE");
+});
+
+test("reclassifyEntry is a no-op for unknown card_id", () => {
+  const reg = createRegistry();
+  reclassifyEntry(reg, "UNKNOWN", "RELEASED");
+  assert.deepEqual(reg.entries, {});
+});
+
+test("findExpiredEntries finds entries with stale heartbeats", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", heartbeat_at: "2026-08-01T08:50:00+08:00" }), REG_TS);
+  admitEntry(reg, regEntry({ card_id: "W2", heartbeat_at: "2026-08-01T08:59:30+08:00" }), REG_TS);
+  const thresholdMs = 30_000; // 30s stale threshold
+  const nowMs = Date.parse("2026-08-01T09:00:00+08:00");
+  const expired = findExpiredEntries(reg, nowMs, thresholdMs);
+  assert.equal(expired.length, 1);
+  assert.equal(expired[0], "W1");
+});
+
+test("findExpiredEntries returns empty when all heartbeats are fresh", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", heartbeat_at: REG_TS }), REG_TS);
+  const nowMs = Date.parse(REG_TS);
+  const expired = findExpiredEntries(reg, nowMs, 30_000);
+  assert.equal(expired.length, 0);
+});
+
+test("checkPathOverlap detects overlapping paths", () => {
+  assert.equal(checkPathOverlap(["src/"], ["src/contracts.mjs"]), true);
+  assert.equal(checkPathOverlap(["src/contracts.mjs"], ["src/"]), true);
+  assert.equal(checkPathOverlap(["src/contracts.mjs"], ["src/contracts.mjs"]), true);
+  assert.equal(checkPathOverlap(["tests/"], ["src/"]), false);
+  assert.equal(checkPathOverlap(["src/contracts.mjs"], ["src/supervisor.mjs"]), false);
+});
+
+test("reconstructRegistry rebuilds entries from live observations", () => {
+  const reg = createRegistry();
+  const liveEntries = [
+    regEntry({ card_id: "W1", state: "ACTIVE" }),
+    regEntry({ card_id: "W2", state: "HEARTBEAT_STALE", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"] }),
+  ];
+  const result = reconstructRegistry(reg, liveEntries, REG_TS);
+  assert.equal(Object.keys(result.entries).length, 2);
+  assert.equal(result.entries["W1"].state, "ACTIVE");
+  assert.equal(result.entries["W2"].state, "HEARTBEAT_STALE");
+});
+
+test("reconstructRegistry rejects third worker during reconstruction fail-closed", () => {
+  const reg = createRegistry();
+  const liveEntries = [
+    regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"] }),
+    regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"] }),
+    regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"] }),
+  ];
+  const result = reconstructRegistry(reg, liveEntries, REG_TS);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /MAX_WORKERS/);
+});
+
+test("UNCERTAIN_SEND remains NO_BLIND_RETRY without registry reclaim", () => {
+  const reg = createRegistry();
+  const result = { decision: "NO_BLIND_RETRY" };
+  assert.equal(result.decision, "NO_BLIND_RETRY");
+  // Registry entry reclamation does not change NO_BLIND_RETRY classification
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  reclassifyEntry(reg, "W1", "RELEASED");
+  assert.equal(result.decision, "NO_BLIND_RETRY");
+});

@@ -201,3 +201,51 @@ export const reviewerReportSchema = z.object({
 
 // Generic agent report union (used by adapters when persisting run artifacts).
 export const agentReportSchema = z.discriminatedUnion("role", [workerReportSchema, reviewerReportSchema]);
+
+// ---------------------------------------------------------------------------
+// Execution Registry / Admission model (non-authoritative over Supervisor)
+// ---------------------------------------------------------------------------
+// Fixed admission limits. Do not auto-scale from visible process counts.
+export const MAX_WORKERS = 2;
+export const MAX_REVIEWERS = 1;
+export const MAX_WRITERS_PER_REF = 1;
+
+// Process identity: stable binding to a specific OS process.
+export const processIdentitySchema = z.object({
+  pid: z.number().int().positive(),
+  started_at: z.string().datetime({ offset: true }),
+});
+
+// Registry entry lifecycle states.
+export const registryEntryStateEnum = z.enum([
+  "ADMITTED",      // entry validated and admitted, not yet confirmed active
+  "ACTIVE",        // entry confirmed alive (heartbeat within threshold)
+  "HEARTBEAT_STALE",  // heartbeat exceeded staleness threshold, candidate for revalidation
+  "MARK_STALE_CANDIDATE", // supervisor has marked as stale candidate
+  "REVALIDATING",  // liveness revalidation in progress (no side effects)
+  "RELEASED",      // slot released, entry no longer counted against limits
+]);
+
+// A single execution registry entry binding task/card id, generation, role,
+// exact ref/head/tree, allowlist identity, worktree, process identity,
+// session/pane identity, lease/fence, heartbeat, and state.
+export const registryEntrySchema = z.object({
+  card_id: z.string().min(1),
+  generation: z.number().int().positive(),
+  role: z.enum(["worker", "reviewer"]),
+  ref: z.string().min(1),
+  head: z.string().regex(/^[0-9a-f]{7,40}$/),
+  tree: z.string().min(1),
+  allowlist_paths: z.array(z.string().min(1)).min(1),
+  worktree: z.string().min(1),
+  process: processIdentitySchema,
+  session: z.object({
+    workspace_id: z.string().min(1).optional(),
+    pane_id: z.string().min(1).optional(),
+    agent_session: z.string().min(1).optional(),
+  }).optional(),
+  fence: z.number().int().positive(),
+  heartbeat_at: z.string().datetime({ offset: true }),
+  state: registryEntryStateEnum,
+  admitted_at: z.string().datetime({ offset: true }),
+});

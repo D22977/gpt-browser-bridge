@@ -1079,6 +1079,136 @@ async function maybeWriteMorningSummary(ctx, paths, { state, orcaStatus, recover
 }
 
 // ---------------------------------------------------------------------------
+// Execution Registry / Admission (non-authoritative layer over Supervisor)
+// ---------------------------------------------------------------------------
+
+import {
+  MAX_WORKERS,
+  MAX_REVIEWERS,
+  MAX_WRITERS_PER_REF,
+  registryEntrySchema,
+} from "./contracts.mjs";
+
+export function createRegistry() {
+  return { entries: {} };
+}
+
+// Check if two allowlist path sets have any overlapping entry. Two paths
+// overlap when either is a prefix of the other (normalized with trailing
+// slash) or they are equal.
+export function checkPathOverlap(pathsA, pathsB) {
+  for (const a of pathsA) {
+    const normA = a.endsWith("/") ? a : `${a}/`;
+    for (const b of pathsB) {
+      const normB = b.endsWith("/") ? b : `${b}/`;
+      if (a === b || normA.startsWith(normB) || normB.startsWith(normA)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Admission gate: validates slot limits, ref uniqueness, path disjointness,
+// generation binding, and duplicate card_id. Returns {ok, reason?}.
+export function admitEntry(registry, rawEntry, isoNow) {
+  const parsed = registryEntrySchema.parse(rawEntry);
+  const { card_id, role, ref, generation, allowlist_paths } = parsed;
+
+  if (registry.entries[card_id]) {
+    if (registry.entries[card_id].generation !== generation) {
+      return { ok: false, reason: `GENERATION_MISMATCH: ${card_id}` };
+    }
+    return { ok: false, reason: `ALREADY_ADMITTED: ${card_id}` };
+  }
+
+  // Count active slots (ADMITTED, ACTIVE, HEARTBEAT_STALE, MARK_STALE_CANDIDATE, REVALIDATING)
+  // RELEASED entries do not count against limits.
+  const activeEntries = Object.values(registry.entries).filter(
+    (e) => e.state !== "RELEASED"
+  );
+
+  if (role === "worker") {
+    const activeWorkers = activeEntries.filter((e) => e.role === "worker");
+    if (activeWorkers.length >= MAX_WORKERS) {
+      return { ok: false, reason: `MAX_WORKERS: limit ${MAX_WORKERS} reached` };
+    }
+    // Check same-ref writer limit
+    const sameRefWriters = activeWorkers.filter((e) => e.ref === ref);
+    if (sameRefWriters.length >= MAX_WRITERS_PER_REF) {
+      return { ok: false, reason: `MAX_WRITERS_PER_REF: ref ${ref} already has a writer` };
+    }
+    // Check path overlap with all other active workers (not just same ref)
+    for (const other of activeWorkers) {
+      if (other.ref === ref) continue; // already checked above
+      if (checkPathOverlap(allowlist_paths, other.allowlist_paths)) {
+        return { ok: false, reason: `OVERLAPPING_PATHS: ${card_id} overlaps with ${other.card_id}` };
+      }
+    }
+  } else if (role === "reviewer") {
+    const activeReviewers = activeEntries.filter((e) => e.role === "reviewer");
+    if (activeReviewers.length >= MAX_REVIEWERS) {
+      return { ok: false, reason: `MAX_REVIEWERS: limit ${MAX_REVIEWERS} reached` };
+    }
+  }
+
+  registry.entries[card_id] = { ...parsed, state: "ADMITTED", heartbeat_at: parsed.heartbeat_at || isoNow };
+  return { ok: true };
+}
+
+// Update heartbeat timestamp for an admitted entry.
+export function heartbeatEntry(registry, cardId, isoNow) {
+  if (!registry.entries[cardId]) return;
+  registry.entries[cardId] = { ...registry.entries[cardId], heartbeat_at: isoNow };
+}
+
+// Reclassify entry state (stale processing: OBSERVE -> MARK_STALE_CANDIDATE -> REVALIDATE).
+// No kill/remove/close side effects.
+export function reclassifyEntry(registry, cardId, newState) {
+  if (!registry.entries[cardId]) return;
+  registry.entries[cardId] = { ...registry.entries[cardId], state: newState };
+}
+
+// Find entries whose heartbeat is older than nowMs - staleThresholdMs.
+export function findExpiredEntries(registry, nowMs, staleThresholdMs) {
+  const expired = [];
+  for (const [cardId, entry] of Object.entries(registry.entries)) {
+    if (entry.state === "RELEASED") continue;
+    const heartbeatMs = Date.parse(entry.heartbeat_at);
+    if (Number.isFinite(heartbeatMs) && nowMs - heartbeatMs > staleThresholdMs) {
+      expired.push(cardId);
+    }
+  }
+  return expired;
+}
+
+// Rebuild registry from durable GitHub receipts plus live local identity
+// observations. Local registry state cannot create or supersede semantic tasks.
+export function reconstructRegistry(registry, liveEntries, isoNow) {
+  const fresh = createRegistry();
+  const activeEntries = [];
+  for (const entry of liveEntries) {
+    const parsed = registryEntrySchema.parse(entry);
+    activeEntries.push(parsed);
+  }
+
+  // Enforce limits during reconstruction
+  const workers = activeEntries.filter((e) => e.role === "worker");
+  const reviewers = activeEntries.filter((e) => e.role === "reviewer");
+  if (workers.length > MAX_WORKERS) {
+    return { ok: false, reason: `MAX_WORKERS: reconstruction has ${workers.length} workers, limit ${MAX_WORKERS}`, entries: fresh.entries };
+  }
+  if (reviewers.length > MAX_REVIEWERS) {
+    return { ok: false, reason: `MAX_REVIEWERS: reconstruction has ${reviewers.length} reviewers, limit ${MAX_REVIEWERS}`, entries: fresh.entries };
+  }
+
+  for (const entry of activeEntries) {
+    fresh.entries[entry.card_id] = { ...entry, heartbeat_at: isoNow };
+  }
+  return { ok: true, entries: fresh.entries };
+}
+
+// ---------------------------------------------------------------------------
 // Main loop (§15 "Supervisor loop", steps 1-12)
 // ---------------------------------------------------------------------------
 
