@@ -45,6 +45,7 @@ import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary
 
 const execFileAsync = promisify(execFile);
 const supervisorIdentitySourceCapabilities = new WeakSet();
+const testOnlyImport = new URL(import.meta.url).searchParams.get("testOnly") === "1";
 
 function deepFreeze(value) {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
@@ -52,7 +53,7 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-export function __testOnlyCreateSupervisorIdentitySource(authority, binding) {
+function createSupervisorIdentitySource(authority, binding) {
   const source = supervisorIdentitySourceSchema.parse({
     source: "SUPERVISOR_OWNED",
     authority,
@@ -62,6 +63,12 @@ export function __testOnlyCreateSupervisorIdentitySource(authority, binding) {
   supervisorIdentitySourceCapabilities.add(source);
   return source;
 }
+
+// The production module has no capability mint. Tests load this module with
+// ?testOnly=1 and use the explicitly test-only namespace to bind fixtures.
+export const __testOnly = Object.freeze(testOnlyImport ? {
+  createSupervisorIdentitySource,
+} : {});
 // ---------------------------------------------------------------------------
 // Constants (§15 retry policy)
 // ---------------------------------------------------------------------------

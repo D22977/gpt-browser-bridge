@@ -28,8 +28,8 @@ import {
   runSupervisor,
   scanDurableReports,
   writeProjectState,
-  __testOnlyCreateSupervisorIdentitySource,
-} from "../src/supervisor.mjs";
+  __testOnly,
+} from "../src/supervisor.mjs?testOnly=1";
 import { OrcaAdapter, resolveActiveTerminal } from "../src/adapters/orca_adapter.mjs";
 import { CURRENT_COMMENT_READBACK_PROTOCOL, createHerdrPrompter } from "../src/adapters/herdr_resume.mjs";
 
@@ -72,7 +72,7 @@ async function readJson(file) {
 }
 
 function supervisorIdentitySourceFor(authority, hostId = "host-a") {
-  return __testOnlyCreateSupervisorIdentitySource(authority, {
+  return __testOnly.createSupervisorIdentitySource(authority, {
     pid: authority.process.pid,
     host_id: hostId,
     fence: authority.fence,
@@ -3181,6 +3181,57 @@ test("F001: runLoopOnce rejects same-caller forged full tuple before reconstruct
   assert.equal(outcome.reason, "LOCK_AUTHORITY_CURRENT_IDENTITY_SOURCE_UNBOUND");
   assert.equal(outcome.admissionResults, undefined, "admission must not run");
   await assert.rejects(readFile(paths.heartbeat, "utf8"), { code: "ENOENT" }, "downstream mutation must not run");
+});
+
+test("F001: public supervisor import cannot mint a forged identity source", async (t) => {
+  const production = await import("../src/supervisor.mjs");
+  assert.equal(production.__testOnly?.createSupervisorIdentitySource, undefined,
+    "production callers must not receive a capability mint");
+
+  const { root, paths } = await tempRuntime(t);
+  const forgedAuthority = {
+    generation: 1, ref: "refs/heads/forged", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\forged", process: { pid: 41042, started_at: REG_TS },
+    session: { workspace_id: "w-forged", pane_id: "p-forged", agent_session: "s-forged" },
+    lease_id: "lease-forged", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
+  const entry = regEntry({
+    card_id: "W-FORGED-PUBLIC-01",
+    ref: forgedAuthority.ref,
+    head: forgedAuthority.head,
+    tree: forgedAuthority.tree,
+    worktree: forgedAuthority.worktree,
+    process: forgedAuthority.process,
+    session: forgedAuthority.session,
+    lease_id: forgedAuthority.lease_id,
+    lease_expiry: forgedAuthority.lease_expiry,
+    fence: forgedAuthority.fence,
+    fence_id: forgedAuthority.fence_id,
+  });
+  const outcome = await production.runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41042,
+    hostId: "host-a",
+    now: () => BASE_MS,
+    isAlive: async () => true,
+    currentAuthority: forgedAuthority,
+    readCurrentIdentity: async () => forgedAuthority,
+    supervisorIdentitySource: {
+      source: "SUPERVISOR_OWNED",
+      authority: forgedAuthority,
+      binding: { pid: 41042, host_id: "host-a", fence: 1, fence_id: "1" },
+    },
+    durableReceipts: [entry],
+    liveObservations: [entry],
+    pendingAdmissions: [entry],
+  });
+
+  assert.equal(outcome.stop, false);
+  assert.match(outcome.reason, /^LOCK_AUTHORITY_/);
+  assert.equal(outcome.admissionResults, undefined, "admission must not run");
+  await assert.rejects(readFile(paths.heartbeat, "utf8"), { code: "ENOENT" },
+    "heartbeat/state mutation must not run");
 });
 
 // ---------------------------------------------------------------------------
