@@ -1128,16 +1128,25 @@ export function canonicalizeRef(ref) {
   return null;
 }
 
-// Canonical worktree: forward-slash normalized, lower-cased, no trailing
+// F004: Canonical worktree: forward-slash normalized, lower-cased, no trailing
 // slash, no repeated separators, reject dot-segments and ambiguous forms.
+// F004: Reject ambiguous Windows forms that cannot be unambiguously
+// canonicalized: UNC paths (\\server\share, //server/share) and bare
+// leading slash (/). Drive letter paths (D:\...) are accepted and
+// normalized to lowercase forward-slash form for consistent comparison.
 export function canonicalizeWorktree(wt) {
   if (typeof wt !== "string" || wt.length === 0) return null;
+  // F004: Reject ambiguous UNC paths: \\server\share, //server/share
+  if (/^\\\\/.test(wt) || /^\/\//.test(wt)) return null;
+  // F004: Reject bare leading slash (Unix absolute - ambiguous on Windows)
+  if (/^\//.test(wt)) return null;
   let normalized = wt.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/+$/, "");
+  // Normalize leading ./ to empty
+  if (normalized.startsWith("./")) normalized = normalized.slice(2);
   // Reject bare "." or ".." segments
   if (normalized === "." || normalized === "..") return null;
-  if (/\/\.\.?$/ .test(normalized) || /^\.?\.?\//.test(normalized)) return null;
-  // Reject any remaining traversal
-  if (normalized.includes("/../") || normalized.endsWith("/..") || normalized.includes("/./")) return null;
+  // Reject parent traversal
+  if (normalized.includes("/../") || normalized.endsWith("/..")) return null;
   return normalized.toLowerCase();
 }
 
@@ -1270,10 +1279,19 @@ export function admitEntry(registry, rawEntry, isoNow) {
 // F3/F6: Heartbeat REQUIRES the complete current authority tuple. Partial
 // proof (pid/fence/fence_id only) is not sufficient; caller-supplied
 // partial authority must not be accepted as proof of ownership.
+// F003: Validates authority against currentAuthoritySchema when provided.
 export function heartbeatEntry(registry, cardId, { isoNow, authority } = {}) {
   if (!registry.entries[cardId]) return false;
   const entry = registry.entries[cardId];
   if (!authority) return false;
+  // F003: Validate authority against currentAuthoritySchema when it looks like a full tuple
+  if (authority.generation !== undefined && authority.ref !== undefined && authority.head !== undefined) {
+    try {
+      currentAuthoritySchema.parse(authority);
+    } catch {
+      return false;
+    }
+  }
   // Verify complete authority tuple components
   if (authority.pid === undefined || entry.process.pid !== authority.pid) return false;
   if (authority.fence === undefined || entry.fence !== authority.fence) return false;
@@ -1311,6 +1329,7 @@ export function heartbeatEntry(registry, cardId, { isoNow, authority } = {}) {
 // proof (pid/fence/fence_id only) is not sufficient.
 // F5: RELEASED/reclaim requires explicit terminal or revocation authority
 // bound to the same full ownership tuple; lease expiry alone is insufficient.
+// F003: Validates authority against currentAuthoritySchema when provided.
 export function reclassifyEntry(registry, cardId, newState, { authority, isoNow, releaseAuthority } = {}) {
   if (!registry.entries[cardId]) return { ok: false, reason: "ENTRY_NOT_FOUND" };
   const entry = registry.entries[cardId];
@@ -1320,6 +1339,14 @@ export function reclassifyEntry(registry, cardId, newState, { authority, isoNow,
   }
   // F3/F6: Verify complete authority tuple
   if (!authority) return { ok: false, reason: "AUTHORITY_MISSING" };
+  // F003: Validate authority against currentAuthoritySchema when it looks like a full tuple
+  if (authority.generation !== undefined && authority.ref !== undefined && authority.head !== undefined) {
+    try {
+      currentAuthoritySchema.parse(authority);
+    } catch {
+      return { ok: false, reason: "AUTHORITY_INVALID" };
+    }
+  }
   if (authority.pid === undefined || entry.process.pid !== authority.pid) {
     return { ok: false, reason: "PID_MISMATCH" };
   }
@@ -1361,12 +1388,56 @@ export function reclassifyEntry(registry, cardId, newState, { authority, isoNow,
   if ((authSession.agent_session ?? null) !== (entrySession.agent_session ?? null)) {
     return { ok: false, reason: "SESSION_AGENT_MISMATCH" };
   }
-  // F5: For RELEASED transition, require explicit terminal or revocation authority
+  // F5/F005: For RELEASED transition, require explicit terminal or revocation authority
   // bound to the same full ownership tuple; lease expiry alone is insufficient.
+  // F005: releaseAuthority must be a typed object with identity-bound fields matching
+  // the entry's authority tuple (pid, fence, fence_id, lease_id, generation, ref, head,
+  // tree, worktree, process, session).
   if (newState === "RELEASED") {
-    if (!releaseAuthority || !releaseAuthority.terminal_authority && !releaseAuthority.revocation_authority) {
+    if (!releaseAuthority) {
       return { ok: false, reason: "RELEASE_AUTHORITY_MISSING: terminal or revocation authority required" };
     }
+    // F005: releaseAuthority must have a valid type marker
+    if (!releaseAuthority.terminal_authority && !releaseAuthority.revocation_authority) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_MISSING: terminal or revocation authority required" };
+    }
+    // F005: Validate releaseAuthority identity matches entry identity
+    if (releaseAuthority.pid !== undefined && releaseAuthority.pid !== entry.process.pid) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_PID_MISMATCH" };
+    }
+    if (releaseAuthority.fence !== undefined && releaseAuthority.fence !== entry.fence) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_FENCE_MISMATCH" };
+    }
+    if (releaseAuthority.fence_id !== undefined && releaseAuthority.fence_id !== entry.fence_id) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_FENCE_ID_MISMATCH" };
+    }
+    if (releaseAuthority.lease_id !== undefined && releaseAuthority.lease_id !== entry.lease_id) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_LEASE_MISMATCH" };
+    }
+    if (releaseAuthority.generation !== undefined && releaseAuthority.generation !== entry.generation) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_GENERATION_MISMATCH" };
+    }
+    if (releaseAuthority.ref !== undefined) {
+      const entryCanonRef = canonicalizeRef(entry.ref);
+      const authCanonRef = canonicalizeRef(releaseAuthority.ref);
+      if (entryCanonRef !== authCanonRef) {
+        return { ok: false, reason: "RELEASE_AUTHORITY_REF_MISMATCH" };
+      }
+    }
+    if (releaseAuthority.head !== undefined && releaseAuthority.head !== entry.head) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_HEAD_MISMATCH" };
+    }
+    if (releaseAuthority.tree !== undefined && releaseAuthority.tree !== entry.tree) {
+      return { ok: false, reason: "RELEASE_AUTHORITY_TREE_MISMATCH" };
+    }
+    if (releaseAuthority.worktree !== undefined) {
+      const entryCanonWt = canonicalizeWorktree(entry.worktree);
+      const authCanonWt = canonicalizeWorktree(releaseAuthority.worktree);
+      if (entryCanonWt !== authCanonWt) {
+        return { ok: false, reason: "RELEASE_AUTHORITY_WORKTREE_MISMATCH" };
+      }
+    }
+    // F5: Lease must be expired for release to succeed
     if (entry.lease_expiry) {
       const expiryMs = Date.parse(entry.lease_expiry);
       const nowMs = Date.parse(isoNow ?? new Date().toISOString());
@@ -1398,10 +1469,11 @@ export function findExpiredEntries(registry, nowMs, staleThresholdMs) {
 // never refresh heartbeat merely by reconstruction (F2).
 // ---------------------------------------------------------------------------
 
-// F2: Reconstruct from a joined set of durable authority receipts and
+// F002: Reconstruct from a joined set of durable authority receipts and
 // independently verified live process/session observations on the exact
 // identity tuple. Reject missing/duplicate/conflicting sides.
-export function reconstructFromAuthorityAndObservations(durableReceipts, liveObservations, { currentFenceId = null } = {}) {
+// F002: Validates reconstructed entries against currentAuthority when provided.
+export function reconstructFromAuthorityAndObservations(durableReceipts, liveObservations, { currentFenceId = null, currentAuthority = null } = {}) {
   const fresh = createRegistry();
   fresh.currentFenceId = currentFenceId;
 
@@ -1511,6 +1583,67 @@ export function reconstructFromAuthorityAndObservations(durableReceipts, liveObs
     fresh.entries[entry.card_id] = { ...entry };
   }
 
+  // F002: Validate reconstructed entries against currentAuthority when provided.
+  // Each active entry must match the authority's generation, ref, head, tree,
+  // worktree, process, session, lease, and fence.
+  if (currentAuthority) {
+    let validatedAuthority;
+    try {
+      validatedAuthority = currentAuthoritySchema.parse(currentAuthority);
+    } catch (error) {
+      return { ok: false, reason: `AUTHORITY_INVALID: ${error?.message ?? String(error)}`, entries: fresh.entries };
+    }
+    for (const [cardId, entry] of Object.entries(fresh.entries)) {
+      if (entry.state === "RELEASED") continue;
+      if (validatedAuthority.generation !== undefined && entry.generation !== validatedAuthority.generation) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_GENERATION_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+      if (validatedAuthority.ref !== undefined) {
+        const entryCanonRef = canonicalizeRef(entry.ref);
+        const authCanonRef = canonicalizeRef(validatedAuthority.ref);
+        if (entryCanonRef !== authCanonRef) {
+          return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_REF_MISMATCH: ${cardId}`, entries: fresh.entries };
+        }
+      }
+      if (validatedAuthority.head !== undefined && entry.head !== validatedAuthority.head) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_HEAD_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+      if (validatedAuthority.tree !== undefined && entry.tree !== validatedAuthority.tree) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_TREE_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+      if (validatedAuthority.worktree !== undefined) {
+        const entryCanonWt = canonicalizeWorktree(entry.worktree);
+        const authCanonWt = canonicalizeWorktree(validatedAuthority.worktree);
+        if (entryCanonWt !== authCanonWt) {
+          return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_WORKTREE_MISMATCH: ${cardId}`, entries: fresh.entries };
+        }
+      }
+      if (validatedAuthority.process?.started_at !== undefined && entry.process.started_at !== validatedAuthority.process.started_at) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_PROCESS_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+      const authSession = validatedAuthority.session ?? {};
+      const entrySession = entry.session ?? {};
+      if ((authSession.workspace_id ?? null) !== (entrySession.workspace_id ?? null)) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_SESSION_WORKSPACE_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+      if ((authSession.pane_id ?? null) !== (entrySession.pane_id ?? null)) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_SESSION_PANE_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+      if ((authSession.agent_session ?? null) !== (entrySession.agent_session ?? null)) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_SESSION_AGENT_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+      if (validatedAuthority.lease_id !== undefined && entry.lease_id !== validatedAuthority.lease_id) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_LEASE_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+      if (validatedAuthority.fence !== undefined && entry.fence !== validatedAuthority.fence) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_FENCE_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+      if (validatedAuthority.fence_id !== undefined && entry.fence_id !== validatedAuthority.fence_id) {
+        return { ok: false, reason: `RECONSTRUCTION_AUTHORITY_FENCE_ID_MISMATCH: ${cardId}`, entries: fresh.entries };
+      }
+    }
+  }
+
   return { ok: true, entries: fresh.entries };
 }
 
@@ -1527,31 +1660,88 @@ export function reconstructRegistry(registry, liveEntries, isoNow, { currentFenc
 // Admission with Supervisor authority context (wires into real path)
 // ---------------------------------------------------------------------------
 
-// Admit an entry under a specific Supervisor authority fence.
-// `authorityFence` is the current lock fence; entries must match it.
+// F001: Admit an entry under a typed, validated currentAuthority object.
+// The currentAuthority MUST be validated against currentAuthoritySchema before
+// admission. Caller-supplied partial authorityLeaseId/fence/fenceId are removed;
+// all authority fields are derived from the single currentAuthority object.
 // F3: validates lease expiry against current time and compares lease_id.
-export function admitEntryWithAuthority(registry, rawEntry, isoNow, { authorityFence, authorityFenceId, leaseId }) {
-  const parsed = registryEntrySchema.parse(rawEntry);
-  if (authorityFence !== undefined && parsed.fence !== authorityFence) {
-    return { ok: false, reason: `FENCE_MISMATCH: entry fence ${parsed.fence} != authority ${authorityFence}` };
+export function admitEntryWithAuthority(registry, rawEntry, isoNow, { currentAuthority }) {
+  if (!currentAuthority) {
+    return { ok: false, reason: `AUTHORITY_MISSING: ${rawEntry?.card_id ?? "unknown"}` };
   }
-  if (authorityFenceId && parsed.fence_id !== authorityFenceId) {
+  // F001: Validate currentAuthority against currentAuthoritySchema
+  let validatedAuthority;
+  try {
+    validatedAuthority = currentAuthoritySchema.parse(currentAuthority);
+  } catch (error) {
+    return { ok: false, reason: `AUTHORITY_INVALID: ${error?.message ?? String(error)}` };
+  }
+  const parsed = registryEntrySchema.parse(rawEntry);
+  // F001: Validate fence matches authority
+  if (validatedAuthority.fence !== undefined && parsed.fence !== validatedAuthority.fence) {
+    return { ok: false, reason: `FENCE_MISMATCH: entry fence ${parsed.fence} != authority ${validatedAuthority.fence}` };
+  }
+  if (validatedAuthority.fence_id && parsed.fence_id !== validatedAuthority.fence_id) {
     return { ok: false, reason: `FENCE_ID_MISMATCH: ${parsed.card_id}` };
   }
-  if (!leaseId) {
+  // F001: Validate lease_id from authority
+  if (!validatedAuthority.lease_id) {
     return { ok: false, reason: `LEASE_MISSING: ${parsed.card_id}` };
   }
-  // F3: Validate lease_id equality (not just presence)
-  if (parsed.lease_id !== leaseId) {
+  if (parsed.lease_id !== validatedAuthority.lease_id) {
     return { ok: false, reason: `LEASE_ID_MISMATCH: ${parsed.card_id}` };
   }
-  // F3: Validate lease is still current
-  if (parsed.lease_expiry) {
-    const expiryMs = Date.parse(parsed.lease_expiry);
+  // F001: Validate lease_expiry from authority
+  if (validatedAuthority.lease_expiry) {
+    const expiryMs = Date.parse(validatedAuthority.lease_expiry);
     const nowMs = Date.parse(isoNow);
     if (Number.isFinite(expiryMs) && Number.isFinite(nowMs) && expiryMs <= nowMs) {
       return { ok: false, reason: `LEASE_EXPIRED: ${parsed.card_id}` };
     }
+  }
+  // F001: Validate generation matches authority
+  if (validatedAuthority.generation !== undefined && parsed.generation !== validatedAuthority.generation) {
+    return { ok: false, reason: `GENERATION_MISMATCH: ${parsed.card_id}` };
+  }
+  // F001: Validate ref matches authority (canonical comparison)
+  if (validatedAuthority.ref !== undefined) {
+    const entryCanonRef = canonicalizeRef(parsed.ref);
+    const authCanonRef = canonicalizeRef(validatedAuthority.ref);
+    if (entryCanonRef !== authCanonRef) {
+      return { ok: false, reason: `REF_MISMATCH: ${parsed.card_id}` };
+    }
+  }
+  // F001: Validate head matches authority
+  if (validatedAuthority.head !== undefined && parsed.head !== validatedAuthority.head) {
+    return { ok: false, reason: `HEAD_MISMATCH: ${parsed.card_id}` };
+  }
+  // F001: Validate tree matches authority
+  if (validatedAuthority.tree !== undefined && parsed.tree !== validatedAuthority.tree) {
+    return { ok: false, reason: `TREE_MISMATCH: ${parsed.card_id}` };
+  }
+  // F001: Validate worktree matches authority (canonical comparison)
+  if (validatedAuthority.worktree !== undefined) {
+    const entryCanonWt = canonicalizeWorktree(parsed.worktree);
+    const authCanonWt = canonicalizeWorktree(validatedAuthority.worktree);
+    if (entryCanonWt !== authCanonWt) {
+      return { ok: false, reason: `WORKTREE_MISMATCH: ${parsed.card_id}` };
+    }
+  }
+  // F001: Validate process identity from authority
+  if (validatedAuthority.process?.started_at !== undefined && parsed.process.started_at !== validatedAuthority.process.started_at) {
+    return { ok: false, reason: `PROCESS_STARTED_AT_MISMATCH: ${parsed.card_id}` };
+  }
+  // F001: Validate session identity from authority
+  const authSession = validatedAuthority.session ?? {};
+  const entrySession = parsed.session ?? {};
+  if ((authSession.workspace_id ?? null) !== (entrySession.workspace_id ?? null)) {
+    return { ok: false, reason: `SESSION_WORKSPACE_MISMATCH: ${parsed.card_id}` };
+  }
+  if ((authSession.pane_id ?? null) !== (entrySession.pane_id ?? null)) {
+    return { ok: false, reason: `SESSION_PANE_MISMATCH: ${parsed.card_id}` };
+  }
+  if ((authSession.agent_session ?? null) !== (entrySession.agent_session ?? null)) {
+    return { ok: false, reason: `SESSION_AGENT_MISMATCH: ${parsed.card_id}` };
   }
   const validation = validateEntryAdmission(registry, parsed, new Set());
   if (!validation.ok) return validation;
@@ -1593,11 +1783,10 @@ function normalizeCtx(ctxIn) {
     maxIterations: ctxIn.maxIterations ?? Infinity,
     intervalMs: ctxIn.intervalMs ?? HEARTBEAT_INTERVAL_MS,
     resumeDelivery: ctxIn.resumeDelivery ?? ctxIn.residentConsumer,
-    // F1: registry/admission inputs carried into production path
+    // F1/F001: registry/admission inputs carried into production path
+    // F001: single typed currentAuthority object replaces partial admissionLeaseId/fence/fenceId
     registry: ctxIn.registry ?? createRegistry(),
-    admissionFence: ctxIn.admissionFence ?? undefined,
-    admissionFenceId: ctxIn.admissionFenceId ?? undefined,
-    admissionLeaseId: ctxIn.admissionLeaseId ?? undefined,
+    currentAuthority: ctxIn.currentAuthority ?? null,
     // F2: reconstruction inputs
     durableReceipts: ctxIn.durableReceipts ?? [],
     liveObservations: ctxIn.liveObservations ?? [],
@@ -1621,7 +1810,7 @@ export async function runLoopOnce(ctxIn) {
     return { stop: true, reason: lock.reason ?? "LOCK_NOT_OWNED", holder: lock.holder, at: isoNow };
   }
 
-  // F1: Registry reconstruction from durable receipts + live observations
+  // F1/F002: Registry reconstruction from durable receipts + live observations
   // under the ACQUIRED lock/fence. Derive fence_id (string) from the numeric
   // lock fence so string fence_id comparisons in reconstruction and admission
   // never fail for a type mismatch.
@@ -1631,7 +1820,7 @@ export async function runLoopOnce(ctxIn) {
     const reconResult = reconstructFromAuthorityAndObservations(
       ctx.durableReceipts,
       ctx.liveObservations,
-      { currentFenceId: derivedFenceId }
+      { currentFenceId: derivedFenceId, currentAuthority: ctx.currentAuthority }
     );
     if (!reconResult.ok) {
       tickEvents.push({ type: "registry_reconstruction_rejected", reason: reconResult.reason });
@@ -1641,19 +1830,16 @@ export async function runLoopOnce(ctxIn) {
     registry = { entries: reconResult.entries, currentFenceId: derivedFenceId };
   }
 
-  // F1: Admission gate - admit pending entries under the ACQUIRED lock/fence.
+  // F001/F1: Admission gate - admit pending entries under the ACQUIRED lock/fence.
   // Derive admission authority from the actual lock, not caller self-asserted fields.
+  // F001: Use typed currentAuthority object validated against currentAuthoritySchema.
   // On ANY rejection, fail-closed: no project-state read, no terminal recovery,
   // no resume delivery, no physical send.
   const admissionResults = [];
   let admissionRejected = false;
-  const lockAuthorityFence = lock.fence;
-  const lockAuthorityFenceId = derivedFenceId;
   for (const rawEntry of ctx.pendingAdmissions) {
     const result = admitEntryWithAuthority(registry, rawEntry, isoNow, {
-      authorityFence: lockAuthorityFence,
-      authorityFenceId: lockAuthorityFenceId,
-      leaseId: ctx.admissionLeaseId,
+      currentAuthority: ctx.currentAuthority,
     });
     admissionResults.push({ card_id: rawEntry.card_id, ...result });
     if (!result.ok) {

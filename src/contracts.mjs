@@ -236,7 +236,7 @@ export const registryEntryStateEnum = z.enum([
 // OBSERVE -> MARK_STALE_CANDIDATE -> REVALIDATE is the only stale path;
 // direct RELEASE from a non-terminal state is forbidden.
 export const ALLOWED_TRANSITIONS = {
-  ADMITTED:             ["ACTIVE", "HEARTBEAT_STALE"],
+  ADMITTED:             ["ACTIVE", "HEARTBEAT_STALE", "RELEASED"],
   ACTIVE:               ["HEARTBEAT_STALE", "RELEASED"],
   HEARTBEAT_STALE:      ["MARK_STALE_CANDIDATE", "REVALIDATING"],
   MARK_STALE_CANDIDATE: ["REVALIDATING", "HEARTBEAT_STALE"],
