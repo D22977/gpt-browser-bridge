@@ -1088,6 +1088,7 @@ import {
   MAX_WRITERS_PER_REF,
   registryEntrySchema,
   ALLOWED_TRANSITIONS,
+  currentAuthoritySchema,
 } from "./contracts.mjs";
 
 export function createRegistry() {
@@ -1111,6 +1112,8 @@ export function canonicalizeRepoRelativePath(p) {
   normalized = normalized.replace(/^\.\//, "");
   // Reject any remaining traversal
   if (/\.\./.test(normalized)) return null;
+  // Reject bare "." which is not a valid allowlist path
+  if (normalized === ".") return null;
   // Remove trailing slash unless it's the root "."
   normalized = normalized.replace(/\/$/, "") || ".";
   return normalized.toLowerCase();
@@ -1134,9 +1137,12 @@ export function canonicalizeWorktree(wt) {
 // Check if two allowlist path sets have any overlapping entry.
 // Paths are first canonicalized. Two paths overlap when either is a
 // prefix of the other (normalized with trailing slash) or they are equal.
+// F5: fail-closed - reject any path that cannot be canonicalized.
 export function checkPathOverlap(pathsA, pathsB) {
-  const canonA = pathsA.map(canonicalizeRepoRelativePath).filter(Boolean);
-  const canonB = pathsB.map(canonicalizeRepoRelativePath).filter(Boolean);
+  const canonA = pathsA.map(canonicalizeRepoRelativePath);
+  const canonB = pathsB.map(canonicalizeRepoRelativePath);
+  // Fail-closed: if any path is invalid (null), treat as overlap
+  if (canonA.includes(null) || canonB.includes(null)) return true;
   for (const a of canonA) {
     const normA = a.endsWith("/") ? a : `${a}/`;
     for (const b of canonB) {
@@ -1180,18 +1186,22 @@ export function validateEntryAdmission(registry, entry, existingCardIds) {
     if (activeWorkers.length >= MAX_WORKERS) {
       return { ok: false, reason: `MAX_WORKERS: limit ${MAX_WORKERS} reached` };
     }
-    // Same-ref writer limit (canonical ref comparison)
-    const sameRefWriters = activeWorkers.filter((e) => e.ref === ref);
+    // Same-ref writer limit (canonical ref comparison - F5)
+    const canonRef = canonicalizeRef(ref);
+    if (!canonRef) {
+      return { ok: false, reason: `INVALID_REF: ${ref}` };
+    }
+    const sameRefWriters = activeWorkers.filter((e) => canonicalizeRef(e.ref) === canonRef);
     if (sameRefWriters.length >= MAX_WRITERS_PER_REF) {
       return { ok: false, reason: `MAX_WRITERS_PER_REF: ref ${ref} already has a writer` };
     }
-    // Distinct canonical worktrees required for workers
+    // Distinct canonical worktrees required for workers (F5)
     const canonWt = canonicalizeWorktree(worktree);
     if (!canonWt) {
       return { ok: false, reason: `INVALID_WORKTREE: ${worktree}` };
     }
     for (const other of activeWorkers) {
-      if (other.ref === ref) continue;
+      if (canonicalizeRef(other.ref) === canonRef) continue;
       const otherWt = canonicalizeWorktree(other.worktree);
       if (canonWt === otherWt) {
         return { ok: false, reason: `SAME_WORKTREE: ${card_id} shares worktree with ${other.card_id}` };
@@ -1234,16 +1244,22 @@ export function admitEntry(registry, rawEntry, isoNow) {
 }
 
 // ---------------------------------------------------------------------------
-// Heartbeat: bound to exact process/session/fence ownership proof
+// Heartbeat: bound to exact process/session/fence ownership proof (F3)
 // ---------------------------------------------------------------------------
 
 export function heartbeatEntry(registry, cardId, { isoNow, pid, fence, fence_id } = {}) {
   if (!registry.entries[cardId]) return false;
   const entry = registry.entries[cardId];
-  // Heartbeat requires exact process and fence ownership proof
-  if (pid !== undefined && entry.process.pid !== pid) return false;
-  if (fence !== undefined && entry.fence !== fence) return false;
-  if (fence_id !== undefined && entry.fence_id !== fence_id) return false;
+  // F3: Heartbeat REQUIRES exact process, fence, and fence_id ownership proof
+  if (pid === undefined || entry.process.pid !== pid) return false;
+  if (fence === undefined || entry.fence !== fence) return false;
+  if (fence_id === undefined || entry.fence_id !== fence_id) return false;
+  // F3: Validate lease is still current
+  if (entry.lease_expiry) {
+    const expiryMs = Date.parse(entry.lease_expiry);
+    const nowMs = Date.parse(isoNow);
+    if (Number.isFinite(expiryMs) && Number.isFinite(nowMs) && expiryMs <= nowMs) return false;
+  }
   registry.entries[cardId] = { ...entry, heartbeat_at: isoNow };
   return true;
 }
@@ -1254,22 +1270,33 @@ export function heartbeatEntry(registry, cardId, { isoNow, pid, fence, fence_id 
 
 // Reclassify entry state with explicit transition validation.
 // Only allowed transitions from ALLOWED_TRANSITIONS are accepted.
-export function reclassifyEntry(registry, cardId, newState, { pid, fence, fence_id } = {}) {
+// F3: State mutation REQUIRES exact process/fence/fence_id ownership proof.
+export function reclassifyEntry(registry, cardId, newState, { pid, fence, fence_id, isoNow } = {}) {
   if (!registry.entries[cardId]) return { ok: false, reason: "ENTRY_NOT_FOUND" };
   const entry = registry.entries[cardId];
   const allowed = ALLOWED_TRANSITIONS[entry.state];
   if (!allowed || !allowed.includes(newState)) {
     return { ok: false, reason: `INVALID_TRANSITION: ${entry.state} -> ${newState}` };
   }
-  // State mutation requires exact process/fence ownership proof
-  if (pid !== undefined && entry.process.pid !== pid) {
+  // F3: State mutation REQUIRES ownership proof - never optional
+  if (pid === undefined || entry.process.pid !== pid) {
     return { ok: false, reason: "PID_MISMATCH" };
   }
-  if (fence !== undefined && entry.fence !== fence) {
+  if (fence === undefined || entry.fence !== fence) {
     return { ok: false, reason: "FENCE_MISMATCH" };
   }
-  if (fence_id !== undefined && entry.fence_id !== fence_id) {
+  if (fence_id === undefined || entry.fence_id !== fence_id) {
     return { ok: false, reason: "FENCE_ID_MISMATCH" };
+  }
+  // For RELEASED transition, additionally validate lease expiry (F4)
+  if (newState === "RELEASED") {
+    if (entry.lease_expiry) {
+      const expiryMs = Date.parse(entry.lease_expiry);
+      const nowMs = Date.parse(isoNow ?? new Date().toISOString());
+      if (Number.isFinite(expiryMs) && Number.isFinite(nowMs) && expiryMs > nowMs) {
+        return { ok: false, reason: "LEASE_NOT_EXPIRED: cannot release before lease expiry" };
+      }
+    }
   }
   registry.entries[cardId] = { ...entry, state: newState };
   return { ok: true };
@@ -1294,6 +1321,115 @@ export function findExpiredEntries(registry, nowMs, staleThresholdMs) {
 // never refresh heartbeat merely by reconstruction (F2).
 // ---------------------------------------------------------------------------
 
+// F2: Reconstruct from a joined set of durable authority receipts and
+// independently verified live process/session observations on the exact
+// identity tuple. Reject missing/duplicate/conflicting sides.
+export function reconstructFromAuthorityAndObservations(durableReceipts, liveObservations, { currentFenceId = null } = {}) {
+  const fresh = createRegistry();
+  fresh.currentFenceId = currentFenceId;
+
+  // Index durable receipts by card_id
+  const receiptMap = new Map();
+  for (const receipt of durableReceipts) {
+    const parsed = registryEntrySchema.parse(receipt);
+    if (receiptMap.has(parsed.card_id)) {
+      return { ok: false, reason: `DUPLICATE_DURABLE_RECEIPT: ${parsed.card_id}`, entries: fresh.entries };
+    }
+    receiptMap.set(parsed.card_id, parsed);
+  }
+
+  // Index live observations by card_id
+  const liveMap = new Map();
+  for (const obs of liveObservations) {
+    const parsed = registryEntrySchema.parse(obs);
+    if (liveMap.has(parsed.card_id)) {
+      return { ok: false, reason: `DUPLICATE_LIVE_OBSERVATION: ${parsed.card_id}`, entries: fresh.entries };
+    }
+    liveMap.set(parsed.card_id, parsed);
+  }
+
+  // Join on exact identity tuple: card_id, generation, ref, head, tree,
+  // worktree, process.pid, process.started_at, session, lease_id, fence, fence_id
+  const joinedEntries = [];
+  const allCardIds = new Set([...receiptMap.keys(), ...liveMap.keys()]);
+
+  for (const cardId of allCardIds) {
+    const receipt = receiptMap.get(cardId);
+    const live = liveMap.get(cardId);
+
+    // F2: Both sides must be present - reject missing sides
+    if (!receipt) {
+      return { ok: false, reason: `MISSING_DURABLE_RECEIPT: ${cardId}`, entries: fresh.entries };
+    }
+    if (!live) {
+      return { ok: false, reason: `MISSING_LIVE_OBSERVATION: ${cardId}`, entries: fresh.entries };
+    }
+
+    // F2: Verify exact identity tuple match
+    if (receipt.generation !== live.generation) {
+      return { ok: false, reason: `GENERATION_MISMATCH: ${cardId} receipt=${receipt.generation} live=${live.generation}`, entries: fresh.entries };
+    }
+    if (canonicalizeRef(receipt.ref) !== canonicalizeRef(live.ref)) {
+      return { ok: false, reason: `REF_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+    if (receipt.head !== live.head) {
+      return { ok: false, reason: `HEAD_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+    if (receipt.tree !== live.tree) {
+      return { ok: false, reason: `TREE_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+    if (canonicalizeWorktree(receipt.worktree) !== canonicalizeWorktree(live.worktree)) {
+      return { ok: false, reason: `WORKTREE_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+    if (receipt.process.pid !== live.process.pid) {
+      return { ok: false, reason: `PID_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+    if (receipt.process.started_at !== live.process.started_at) {
+      return { ok: false, reason: `PROCESS_STARTED_AT_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+    if (receipt.lease_id !== live.lease_id) {
+      return { ok: false, reason: `LEASE_ID_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+    if (receipt.fence !== live.fence) {
+      return { ok: false, reason: `FENCE_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+    if (receipt.fence_id !== live.fence_id) {
+      return { ok: false, reason: `FENCE_ID_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+
+    // Session identity must match (where both have values)
+    const rSession = receipt.session ?? {};
+    const lSession = live.session ?? {};
+    if (rSession.workspace_id && lSession.workspace_id && rSession.workspace_id !== lSession.workspace_id) {
+      return { ok: false, reason: `SESSION_WORKSPACE_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+    if (rSession.pane_id && lSession.pane_id && rSession.pane_id !== lSession.pane_id) {
+      return { ok: false, reason: `SESSION_PANE_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+    if (rSession.agent_session && lSession.agent_session && rSession.agent_session !== lSession.agent_session) {
+      return { ok: false, reason: `SESSION_AGENT_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+
+    // Use the live observation as the source of truth for the reconstructed entry
+    // but preserve the receipt's admitted_at timestamp
+    joinedEntries.push({ ...live, admitted_at: receipt.admitted_at });
+  }
+
+  // Re-run the same canonical admission validator used for live admission
+  for (const entry of joinedEntries) {
+    const alreadyAdmitted = new Set(Object.keys(fresh.entries));
+    const validation = validateEntryAdmission(fresh, entry, alreadyAdmitted);
+    if (!validation.ok) {
+      return { ok: false, reason: validation.reason, entries: fresh.entries };
+    }
+    fresh.entries[entry.card_id] = { ...entry };
+  }
+
+  return { ok: true, entries: fresh.entries };
+}
+
+// Legacy reconstruction: rebuilds from live observations only (no durable
+// authority join). Used when no durable receipts are available.
 export function reconstructRegistry(registry, liveEntries, isoNow, { currentFenceId = null } = {}) {
   const fresh = createRegistry();
   fresh.currentFenceId = currentFenceId;
@@ -1344,6 +1480,7 @@ export function reconstructRegistry(registry, liveEntries, isoNow, { currentFenc
 
 // Admit an entry under a specific Supervisor authority fence.
 // `authorityFence` is the current lock fence; entries must match it.
+// F3: validates lease expiry against current time.
 export function admitEntryWithAuthority(registry, rawEntry, isoNow, { authorityFence, authorityFenceId, leaseId }) {
   const parsed = registryEntrySchema.parse(rawEntry);
   if (authorityFence !== undefined && parsed.fence !== authorityFence) {
@@ -1354,6 +1491,14 @@ export function admitEntryWithAuthority(registry, rawEntry, isoNow, { authorityF
   }
   if (!leaseId) {
     return { ok: false, reason: `LEASE_MISSING: ${parsed.card_id}` };
+  }
+  // F3: Validate lease is still current
+  if (parsed.lease_expiry) {
+    const expiryMs = Date.parse(parsed.lease_expiry);
+    const nowMs = Date.parse(isoNow);
+    if (Number.isFinite(expiryMs) && Number.isFinite(nowMs) && expiryMs <= nowMs) {
+      return { ok: false, reason: `LEASE_EXPIRED: ${parsed.card_id}` };
+    }
   }
   const validation = validateEntryAdmission(registry, parsed, new Set());
   if (!validation.ok) return validation;
@@ -1384,6 +1529,16 @@ function normalizeCtx(ctxIn) {
     maxIterations: ctxIn.maxIterations ?? Infinity,
     intervalMs: ctxIn.intervalMs ?? HEARTBEAT_INTERVAL_MS,
     resumeDelivery: ctxIn.resumeDelivery ?? ctxIn.residentConsumer,
+    // F1: registry/admission inputs carried into production path
+    registry: ctxIn.registry ?? createRegistry(),
+    admissionFence: ctxIn.admissionFence ?? undefined,
+    admissionFenceId: ctxIn.admissionFenceId ?? undefined,
+    admissionLeaseId: ctxIn.admissionLeaseId ?? undefined,
+    // F2: reconstruction inputs
+    durableReceipts: ctxIn.durableReceipts ?? [],
+    liveObservations: ctxIn.liveObservations ?? [],
+    // F1: pending admission entries injected by the resident consumer
+    pendingAdmissions: ctxIn.pendingAdmissions ?? [],
   };
 }
 
@@ -1400,6 +1555,39 @@ export async function runLoopOnce(ctxIn) {
   const lock = await acquireOrConfirmLock(paths, { pid: ctx.pid, hostId: ctx.hostId, authorizedHostIds: ctx.authorizedHostIds, handoffToken: ctx.handoffToken, isAlive: ctx.isAlive, isoNow });
   if (!lock.owned) {
     return { stop: true, reason: lock.reason ?? "LOCK_NOT_OWNED", holder: lock.holder, at: isoNow };
+  }
+
+  // F1: Registry reconstruction from durable receipts + live observations
+  // under the acquired lock/fence. This is the only reconstruction path.
+  let registry = ctx.registry;
+  if (ctx.durableReceipts.length > 0 || ctx.liveObservations.length > 0) {
+    const reconResult = reconstructFromAuthorityAndObservations(
+      ctx.durableReceipts,
+      ctx.liveObservations,
+      { currentFenceId: ctx.admissionFenceId ?? null }
+    );
+    if (!reconResult.ok) {
+      tickEvents.push({ type: "registry_reconstruction_rejected", reason: reconResult.reason });
+      await appendEvents(paths, tickEvents, isoNow);
+      return { stop: false, at: isoNow, reason: `REGISTRY_RECONSTRUCTION_REJECTED: ${reconResult.reason}` };
+    }
+    registry = { entries: reconResult.entries, currentFenceId: ctx.admissionFenceId ?? null };
+  }
+
+  // F1: Admission gate - admit pending entries under the current lock/fence.
+  // Each pending entry is validated against the registry, slot limits, ref
+  // uniqueness, path disjointness, and the current authority fence/lease.
+  const admissionResults = [];
+  for (const rawEntry of ctx.pendingAdmissions) {
+    const result = admitEntryWithAuthority(registry, rawEntry, isoNow, {
+      authorityFence: ctx.admissionFence,
+      authorityFenceId: ctx.admissionFenceId,
+      leaseId: ctx.admissionLeaseId,
+    });
+    admissionResults.push({ card_id: rawEntry.card_id, ...result });
+    if (!result.ok) {
+      tickEvents.push({ type: "registry_admission_rejected", card_id: rawEntry.card_id, reason: result.reason });
+    }
   }
 
   // Step 3: read project state.
@@ -1517,7 +1705,7 @@ export async function runLoopOnce(ctxIn) {
   await writeRecoveryState(paths, recoveryState);
   await appendEvents(paths, tickEvents, isoNow);
 
-  return { stop: false, at: isoNow, projectState: state.state, events: tickEvents };
+  return { stop: false, at: isoNow, projectState: state.state, events: tickEvents, registry, admissionResults };
 }
 
 // Step 12 lives in what this function does NOT do: no code edits, no

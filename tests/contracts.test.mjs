@@ -349,7 +349,9 @@ function validRegistryEntry(overrides = {}) {
     allowlist_paths: ["src/contracts.mjs"],
     worktree: "D:\\worktrees\\entry-01",
     process: { pid: 1001, started_at: regTs },
+    session: { workspace_id: "w-entry-01", pane_id: "p-entry-01", agent_session: "s-entry-01" },
     lease_id: "lease-entry-01",
+    lease_expiry: "2026-08-01T10:00:00+08:00",
     fence: 1,
     fence_id: "fence-entry-01",
     heartbeat_at: regTs,
@@ -437,4 +439,50 @@ test("Reviewer canary workflow is a static, read-only, fail-closed runner contra
   assert.doesNotMatch(source, /(^|[\s`])(?:git|gh)\s+(?:add|commit|push|fetch|checkout|api)\b/i);
   assert.doesNotMatch(source, /(?:Start-Process|&\s*)(?:opencode|chrome|msedge|node)\b/i);
   assert.doesNotMatch(source, /secrets\.|GITHUB_TOKEN/);
+});
+
+// ---------------------------------------------------------------------------
+// F3 - Schema: session required, lease_expiry required, authority tuple
+// ---------------------------------------------------------------------------
+
+test("F3: registryEntrySchema requires session with at least one identity", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(validRegistryEntry({ session: {} })),
+    /session/
+  );
+});
+
+test("F3: registryEntrySchema requires session (not optional)", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(validRegistryEntry({ session: undefined })),
+    /session/
+  );
+});
+
+test("F3: registryEntrySchema accepts session with only workspace_id", () => {
+  const parsed = registryEntrySchema.parse(validRegistryEntry({
+    session: { workspace_id: "w1" },
+  }));
+  assert.equal(parsed.session.workspace_id, "w1");
+});
+
+test("F3: registryEntrySchema accepts session with only pane_id", () => {
+  const parsed = registryEntrySchema.parse(validRegistryEntry({
+    session: { pane_id: "p1" },
+  }));
+  assert.equal(parsed.session.pane_id, "p1");
+});
+
+test("F3: registryEntrySchema requires lease_expiry", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(validRegistryEntry({ lease_expiry: undefined })),
+    /lease_expiry/
+  );
+});
+
+test("F3: registryEntrySchema rejects invalid lease_expiry format", () => {
+  assert.throws(
+    () => registryEntrySchema.parse(validRegistryEntry({ lease_expiry: "not-a-date" })),
+    /lease_expiry/
+  );
 });

@@ -237,16 +237,18 @@ export const registryEntryStateEnum = z.enum([
 // direct RELEASE from a non-terminal state is forbidden.
 export const ALLOWED_TRANSITIONS = {
   ADMITTED:             ["ACTIVE", "HEARTBEAT_STALE"],
-  ACTIVE:               ["HEARTBEAT_STALE"],
+  ACTIVE:               ["HEARTBEAT_STALE", "RELEASED"],
   HEARTBEAT_STALE:      ["MARK_STALE_CANDIDATE", "REVALIDATING"],
   MARK_STALE_CANDIDATE: ["REVALIDATING", "HEARTBEAT_STALE"],
-  REVALIDATING:         ["ACTIVE", "MARK_STALE_CANDIDATE", "HEARTBEAT_STALE"],
+  REVALIDATING:         ["ACTIVE", "MARK_STALE_CANDIDATE", "HEARTBEAT_STALE", "RELEASED"],
   RELEASED:             [],
 };
 
 // A single execution registry entry binding task/card id, generation, role,
 // exact ref/head/tree, allowlist identity, worktree, process identity,
 // session/pane identity, lease/fence, heartbeat, and state.
+// F3: session is required for workers (at least one identity member);
+// lease_expiry is required; process.started_at is mandatory.
 export const registryEntrySchema = z.object({
   card_id: z.string().min(1),
   generation: z.number().int().positive(),
@@ -261,11 +263,39 @@ export const registryEntrySchema = z.object({
     workspace_id: z.string().min(1).optional(),
     pane_id: z.string().min(1).optional(),
     agent_session: z.string().min(1).optional(),
-  }).optional(),
+  }).refine(
+    (s) => s.workspace_id || s.pane_id || s.agent_session,
+    { message: "session must have at least one of workspace_id, pane_id, or agent_session" }
+  ),
   lease_id: z.string().min(1),
+  lease_expiry: z.string().datetime({ offset: true }),
   fence: z.number().int().positive(),
   fence_id: z.string().min(1),
   heartbeat_at: z.string().datetime({ offset: true }),
   state: registryEntryStateEnum,
   admitted_at: z.string().datetime({ offset: true }),
+});
+
+// ---------------------------------------------------------------------------
+// Current authority tuple: exact identity binding for admission/heartbeat/state
+// mutation. Covers generation, ref, head, tree, worktree, process, session,
+// lease, and fence. Admission/heartbeat/state mutation must validate that the
+// exact tuple matches, not only card_id.
+// ---------------------------------------------------------------------------
+export const currentAuthoritySchema = z.object({
+  generation: z.number().int().positive(),
+  ref: z.string().regex(CANONICAL_REF),
+  head: z.string().regex(EXACT_40_HEX),
+  tree: z.string().regex(EXACT_40_HEX),
+  worktree: z.string().min(1),
+  process: processIdentitySchema,
+  session: z.object({
+    workspace_id: z.string().min(1).optional(),
+    pane_id: z.string().min(1).optional(),
+    agent_session: z.string().min(1).optional(),
+  }),
+  lease_id: z.string().min(1),
+  lease_expiry: z.string().datetime({ offset: true }),
+  fence: z.number().int().positive(),
+  fence_id: z.string().min(1),
 });

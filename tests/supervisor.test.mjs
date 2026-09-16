@@ -1621,6 +1621,7 @@ import {
   findExpiredEntries,
   checkPathOverlap,
   reconstructRegistry,
+  reconstructFromAuthorityAndObservations,
   canonicalizeRepoRelativePath,
   canonicalizeRef,
   canonicalizeWorktree,
@@ -1644,7 +1645,9 @@ function regEntry(overrides = {}) {
     allowlist_paths: ["src/contracts.mjs"],
     worktree: "D:\\worktrees\\reg-01",
     process: { pid: 1001, started_at: REG_TS },
+    session: { workspace_id: "w-reg-01", pane_id: "p-reg-01", agent_session: "s-reg-01" },
     lease_id: "lease-reg-01",
+    lease_expiry: "2026-08-01T10:00:00+08:00",
     fence: 1,
     fence_id: "fence-reg-01",
     heartbeat_at: REG_TS,
@@ -1963,15 +1966,16 @@ test("F4: reclassifyEntry allows MARK_STALE_CANDIDATE -> REVALIDATING", () => {
   assert.equal(reg.entries["W1"].state, "REVALIDATING");
 });
 
-test("F4: reclassifyEntry rejects REVALIDATING -> RELEASED (must go through ACTIVE)", () => {
+test("F4: reclassifyEntry allows REVALIDATING -> RELEASED (authorized terminal release)", () => {
   const reg = createRegistry();
   admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
   reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
   reclassifyEntry(reg, "W1", "MARK_STALE_CANDIDATE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
   reclassifyEntry(reg, "W1", "REVALIDATING", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
-  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
-  assert.equal(result.ok, false);
-  assert.match(result.reason, /INVALID_TRANSITION/);
+  // Lease must be expired for release to succeed
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01", isoNow: "2026-08-01T11:00:00+08:00" });
+  assert.equal(result.ok, true);
+  assert.equal(reg.entries["W1"].state, "RELEASED");
 });
 
 test("F4: reclassifyEntry rejects state mutation without pid ownership", () => {
@@ -2257,20 +2261,377 @@ test("F1: admitEntryWithAuthority rejects second reviewer under authority", () =
 
 test("F1: Supervisor runLoopOnce exercises registry admission path under lock/fence", async (t) => {
   const { root, paths } = await tempRuntime(t);
-  // Set up project state in RUNNING mode
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  const pendingEntry = regEntry({ card_id: "W-PROD-01", ref: "refs/heads/prod", allowlist_paths: ["src/prod.mjs"], worktree: "D:\\worktrees\\prod", fence_id: "fence-supervisor-01" });
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
     pid: 41020,
     now: () => BASE_MS,
     isAlive: async () => false,
-    registry: { entries: {} },
+    registry: createRegistry(),
     admissionFence: 1,
     admissionFenceId: "fence-supervisor-01",
+    admissionLeaseId: "lease-supervisor-01",
+    pendingAdmissions: [pendingEntry],
   });
-  // Supervisor should complete a tick with no admission errors
-  // (no entries means no admission gate is tripped)
   assert.equal(outcome.stop, false);
   assert.ok(outcome.at);
+  // The entry should be admitted into the registry
+  assert.equal(Object.keys(outcome.registry.entries).length, 1);
+  assert.equal(outcome.registry.entries["W-PROD-01"].state, "ADMITTED");
+  assert.equal(outcome.admissionResults.length, 1);
+  assert.equal(outcome.admissionResults[0].ok, true);
+});
+
+// ---------------------------------------------------------------------------
+// F6 - Non-vacuous production-path tests for all F1-F6 bypasses
+// ---------------------------------------------------------------------------
+
+// F1: Production-path admission rejects third worker through runLoopOnce
+test("F6-F1: Supervisor runLoopOnce rejects third worker through real admission gate", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  const reg = createRegistry();
+  // Pre-admit two workers into the registry
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", fence_id: "fence-01" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-1",
+  });
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "fence-01" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-2",
+  });
+  // Try to admit a third worker - should be rejected
+  const pendingEntry = regEntry({ card_id: "W3", ref: "refs/heads/c", allowlist_paths: ["src/c.mjs"], worktree: "D:\\worktrees\\w3", fence_id: "fence-01" });
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41030,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    registry: reg,
+    admissionFence: 1,
+    admissionFenceId: "fence-01",
+    admissionLeaseId: "lease-3",
+    pendingAdmissions: [pendingEntry],
+  });
+  assert.equal(outcome.stop, false);
+  assert.equal(outcome.admissionResults.length, 1);
+  assert.equal(outcome.admissionResults[0].ok, false);
+  assert.match(outcome.admissionResults[0].reason, /MAX_WORKERS/);
+  assert.equal(Object.keys(outcome.registry.entries).length, 2);
+});
+
+// F1: Production-path admission rejects second reviewer
+test("F6-F1: Supervisor runLoopOnce rejects second reviewer through real admission gate", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  const reg = createRegistry();
+  admitEntryWithAuthority(reg, regEntry({ card_id: "R1", role: "reviewer", fence_id: "fence-01" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-r1",
+  });
+  const pendingEntry = regEntry({ card_id: "R2", role: "reviewer", fence_id: "fence-01" });
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41031,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    registry: reg,
+    admissionFence: 1,
+    admissionFenceId: "fence-01",
+    admissionLeaseId: "lease-r2",
+    pendingAdmissions: [pendingEntry],
+  });
+  assert.equal(outcome.admissionResults[0].ok, false);
+  assert.match(outcome.admissionResults[0].reason, /MAX_REVIEWERS/);
+});
+
+// F1: Production-path admission rejects same ref writer
+test("F6-F1: Supervisor runLoopOnce rejects same ref writer through real admission gate", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  const reg = createRegistry();
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/main", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1", fence_id: "fence-01" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-1",
+  });
+  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/main", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "fence-01" });
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41032,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    registry: reg,
+    admissionFence: 1,
+    admissionFenceId: "fence-01",
+    admissionLeaseId: "lease-2",
+    pendingAdmissions: [pendingEntry],
+  });
+  assert.equal(outcome.admissionResults[0].ok, false);
+  assert.match(outcome.admissionResults[0].reason, /MAX_WRITERS_PER_REF/);
+});
+
+// F1: Production-path admission rejects overlapping paths
+test("F6-F1: Supervisor runLoopOnce rejects overlapping paths through real admission gate", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  const reg = createRegistry();
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/"], worktree: "D:\\worktrees\\w1", fence_id: "fence-01" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-1",
+  });
+  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/contracts.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "fence-01" });
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41033,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    registry: reg,
+    admissionFence: 1,
+    admissionFenceId: "fence-01",
+    admissionLeaseId: "lease-2",
+    pendingAdmissions: [pendingEntry],
+  });
+  assert.equal(outcome.admissionResults[0].ok, false);
+  assert.match(outcome.admissionResults[0].reason, /OVERLAPPING_PATHS/);
+});
+
+// F1: Production-path admission rejects same worktree alias (Windows case)
+test("F6-F1: Supervisor runLoopOnce rejects same worktree alias through real admission gate", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  const reg = createRegistry();
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", ref: "refs/heads/a", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\same", fence_id: "fence-01" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-1",
+  });
+  // Different case, same canonical path
+  const pendingEntry = regEntry({ card_id: "W2", ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "d:\\Worktrees\\SAME", fence_id: "fence-01" });
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41034,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    registry: reg,
+    admissionFence: 1,
+    admissionFenceId: "fence-01",
+    admissionLeaseId: "lease-2",
+    pendingAdmissions: [pendingEntry],
+  });
+  assert.equal(outcome.admissionResults[0].ok, false);
+  assert.match(outcome.admissionResults[0].reason, /SAME_WORKTREE/);
+});
+
+// F1: Production-path admission rejects stale generation
+test("F6-F1: Supervisor runLoopOnce rejects stale generation through real admission gate", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  const reg = createRegistry();
+  admitEntryWithAuthority(reg, regEntry({ card_id: "W1", generation: 2, fence_id: "fence-01" }), REG_TS, {
+    authorityFence: 1, authorityFenceId: "fence-01", leaseId: "lease-1",
+  });
+  // Try to admit same card_id with stale generation
+  const pendingEntry = regEntry({ card_id: "W1", generation: 1, ref: "refs/heads/b", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2", fence_id: "fence-01" });
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41035,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    registry: reg,
+    admissionFence: 1,
+    admissionFenceId: "fence-01",
+    admissionLeaseId: "lease-2",
+    pendingAdmissions: [pendingEntry],
+  });
+  assert.equal(outcome.admissionResults[0].ok, false);
+  assert.ok(outcome.admissionResults[0].reason.includes("GENERATION_MISMATCH") || outcome.admissionResults[0].reason.includes("ALREADY_ADMITTED"));
+});
+
+// F3: Production-path admission rejects expired lease
+test("F6-F3: Supervisor runLoopOnce rejects expired lease through real admission gate", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
+  const pendingEntry = regEntry({
+    card_id: "W-EXPIRED",
+    ref: "refs/heads/expired",
+    allowlist_paths: ["src/expired.mjs"],
+    worktree: "D:\\worktrees\\expired",
+    lease_expiry: "2026-08-01T08:00:00+08:00", // expired before REG_TS
+    fence_id: "fence-01",
+  });
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41036,
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    registry: createRegistry(),
+    admissionFence: 1,
+    admissionFenceId: "fence-01",
+    admissionLeaseId: "lease-expired",
+    pendingAdmissions: [pendingEntry],
+  });
+  assert.equal(outcome.admissionResults[0].ok, false);
+  assert.match(outcome.admissionResults[0].reason, /LEASE_EXPIRED/);
+});
+
+// F3: heartbeatEntry requires mandatory ownership tuple
+test("F6-F3: heartbeatEntry rejects heartbeat without pid ownership", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00" });
+  assert.equal(ok, false);
+});
+
+test("F6-F3: heartbeatEntry rejects expired lease", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", lease_expiry: "2026-08-01T08:00:00+08:00" }), REG_TS);
+  const ok = heartbeatEntry(reg, "W1", { isoNow: "2026-08-01T09:01:00+08:00", pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(ok, false);
+});
+
+// F3: reclassifyEntry requires mandatory ownership tuple
+test("F6-F3: reclassifyEntry rejects state mutation without pid", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { fence: 1, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /PID_MISMATCH/);
+});
+
+test("F6-F3: reclassifyEntry rejects state mutation without fence", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1" }), REG_TS);
+  const result = reclassifyEntry(reg, "W1", "HEARTBEAT_STALE", { pid: 1001, fence_id: "fence-reg-01" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /FENCE_MISMATCH/);
+});
+
+// F4: ACTIVE -> RELEASED authorized release path
+test("F6-F4: reclassifyEntry allows ACTIVE -> RELEASED with expired lease", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", lease_expiry: "2026-08-01T08:00:00+08:00" }), REG_TS);
+  reclassifyEntry(reg, "W1", "ACTIVE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01", isoNow: REG_TS });
+  assert.equal(result.ok, true);
+  assert.equal(reg.entries["W1"].state, "RELEASED");
+});
+
+// F4: Release before lease expiry rejected
+test("F6-F4: reclassifyEntry rejects ACTIVE -> RELEASED when lease not expired", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", lease_expiry: "2099-01-01T00:00:00+08:00" }), REG_TS);
+  reclassifyEntry(reg, "W1", "ACTIVE", { pid: 1001, fence: 1, fence_id: "fence-reg-01" });
+  const result = reclassifyEntry(reg, "W1", "RELEASED", { pid: 1001, fence: 1, fence_id: "fence-reg-01", isoNow: REG_TS });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /LEASE_NOT_EXPIRED/);
+});
+
+// F5: canonicalizeRepoRelativePath rejects bare "."
+test("F6-F5: canonicalizeRepoRelativePath rejects bare dot", () => {
+  assert.equal(canonicalizeRepoRelativePath("."), null);
+});
+
+// F5: checkPathOverlap fails closed on invalid path
+test("F6-F5: checkPathOverlap fails closed on invalid allowlist path", () => {
+  assert.equal(checkPathOverlap(["C:\\absolute\\path"], ["src/contracts.mjs"]), true);
+  assert.equal(checkPathOverlap(["src/contracts.mjs"], ["../traversal"]), true);
+});
+
+// F5: validateEntryAdmission rejects invalid ref
+test("F6-F5: validateEntryAdmission rejects invalid ref", () => {
+  const reg = createRegistry();
+  const entry = regEntry({ ref: "main" }); // invalid ref
+  const result = validateEntryAdmission(reg, entry, new Set());
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /INVALID_REF/);
+});
+
+// F5: validateEntryAdmission uses canonical ref comparison
+test("F6-F5: validateEntryAdmission detects same ref with different case", () => {
+  const reg = createRegistry();
+  admitEntry(reg, regEntry({ card_id: "W1", ref: "refs/heads/Main", allowlist_paths: ["src/a.mjs"], worktree: "D:\\worktrees\\w1" }), REG_TS);
+  const entry = regEntry({ card_id: "W2", ref: "refs/heads/main", allowlist_paths: ["src/b.mjs"], worktree: "D:\\worktrees\\w2" });
+  const result = validateEntryAdmission(reg, entry, new Set());
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /MAX_WRITERS_PER_REF/);
+});
+
+// F2: reconstructFromAuthorityAndObservations joins durable + live
+test("F6-F2: reconstructFromAuthorityAndObservations joins durable receipt and live observation", () => {
+  const receipt = regEntry({ card_id: "W1", state: "ADMITTED", fence_id: "fence-01" });
+  const live = regEntry({ card_id: "W1", state: "ACTIVE", fence_id: "fence-01" });
+  const result = reconstructFromAuthorityAndObservations([receipt], [live], { currentFenceId: "fence-01" });
+  assert.equal(result.ok, true);
+  assert.equal(result.entries["W1"].state, "ACTIVE");
+  assert.equal(result.entries["W1"].admitted_at, receipt.admitted_at);
+});
+
+// F2: reconstructFromAuthorityAndObservations rejects missing durable receipt
+test("F6-F2: reconstructFromAuthorityAndObservations rejects missing durable receipt", () => {
+  const live = regEntry({ card_id: "W1", state: "ACTIVE" });
+  const result = reconstructFromAuthorityAndObservations([], [live], {});
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /MISSING_DURABLE_RECEIPT/);
+});
+
+// F2: reconstructFromAuthorityAndObservations rejects missing live observation
+test("F6-F2: reconstructFromAuthorityAndObservations rejects missing live observation", () => {
+  const receipt = regEntry({ card_id: "W1", state: "ADMITTED" });
+  const result = reconstructFromAuthorityAndObservations([receipt], [], {});
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /MISSING_LIVE_OBSERVATION/);
+});
+
+// F2: reconstructFromAuthorityAndObservations rejects duplicate durable receipt
+test("F6-F2: reconstructFromAuthorityAndObservations rejects duplicate durable receipt", () => {
+  const r1 = regEntry({ card_id: "W1" });
+  const r2 = regEntry({ card_id: "W1" });
+  const live = regEntry({ card_id: "W1" });
+  const result = reconstructFromAuthorityAndObservations([r1, r2], [live], {});
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /DUPLICATE_DURABLE_RECEIPT/);
+});
+
+// F2: reconstructFromAuthorityAndObservations rejects head mismatch
+test("F6-F2: reconstructFromAuthorityAndObservations rejects head mismatch between receipt and live", () => {
+  const receipt = regEntry({ card_id: "W1", head: "a".repeat(40) });
+  const live = regEntry({ card_id: "W1", head: "b".repeat(40) });
+  const result = reconstructFromAuthorityAndObservations([receipt], [live], {});
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /HEAD_MISMATCH/);
+});
+
+// F2: reconstructFromAuthorityAndObservations rejects generation mismatch
+test("F6-F2: reconstructFromAuthorityAndObservations rejects generation mismatch", () => {
+  const receipt = regEntry({ card_id: "W1", generation: 1 });
+  const live = regEntry({ card_id: "W1", generation: 2 });
+  const result = reconstructFromAuthorityAndObservations([receipt], [live], {});
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /GENERATION_MISMATCH/);
+});
+
+// F2: reconstructFromAuthorityAndObservations rejects duplicate live observations
+test("F6-F2: reconstructFromAuthorityAndObservations rejects duplicate live observations", () => {
+  const receipt = regEntry({ card_id: "W1" });
+  const live1 = regEntry({ card_id: "W1" });
+  const live2 = regEntry({ card_id: "W1" });
+  const result = reconstructFromAuthorityAndObservations([receipt], [live1, live2], {});
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /DUPLICATE_LIVE_OBSERVATION/);
+});
+
+// F6: UNCERTAIN_SEND production-path no-blind-retry
+test("F6: physical send lease blocks second prompt for same logical key", async (t) => {
+  const { paths } = await tempRuntime(t);
+  await mkdir(path.dirname(paths.lock), { recursive: true });
+  await writeFile(paths.lock, JSON.stringify({ pid: 111, host_id: "host-a", at: "2026-08-01T09:00:00+08:00", fence: 1 }));
+  const first = await claimPhysicalSendLease(paths, { pid: 111, hostId: "host-a", fence: 1, logicalKey: "event-uncertain", nowMs: BASE_MS });
+  assert.equal(first.allow, true);
+  // Second claim for same logical key should be rejected (uncertain send)
+  const second = await claimPhysicalSendLease(paths, { pid: 111, hostId: "host-a", fence: 1, logicalKey: "event-uncertain", nowMs: BASE_MS });
+  assert.equal(second.allow, false);
+  assert.equal(second.decision, "CONTROL_REQUIRED");
+  assert.match(second.reason, /PHYSICAL_SEND_LEASE_HELD/);
 });
