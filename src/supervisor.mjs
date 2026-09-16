@@ -45,7 +45,6 @@ import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary
 
 const execFileAsync = promisify(execFile);
 const supervisorIdentitySourceCapabilities = new WeakSet();
-const testOnlyImport = new URL(import.meta.url).searchParams.get("testOnly") === "1";
 
 function deepFreeze(value) {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
@@ -53,22 +52,12 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-function createSupervisorIdentitySource(authority, binding) {
-  const source = supervisorIdentitySourceSchema.parse({
-    source: "SUPERVISOR_OWNED",
-    authority,
-    binding,
-  });
+function bindSupervisorIdentitySource(rawSource) {
+  const source = supervisorIdentitySourceSchema.parse(rawSource);
   deepFreeze(source);
   supervisorIdentitySourceCapabilities.add(source);
   return source;
 }
-
-// The production module has no capability mint. Tests load this module with
-// ?testOnly=1 and use the explicitly test-only namespace to bind fixtures.
-export const __testOnly = Object.freeze(testOnlyImport ? {
-  createSupervisorIdentitySource,
-} : {});
 // ---------------------------------------------------------------------------
 // Constants (§15 retry policy)
 // ---------------------------------------------------------------------------
@@ -96,6 +85,7 @@ export function resolveRuntimePaths(runtimeRoot) {
     root,
     state: path.join(root, "state", "project_state.json"),
     heartbeat: path.join(root, "state", "heartbeat.json"),
+    supervisorIdentity: path.join(root, "state", "supervisor_identity.json"),
     summary: path.join(root, "state", "morning_summary.md"),
     recoveryState: path.join(root, "state", "recovery_state.json"),
     reportCursor: path.join(root, "state", "report_cursor.json"),
@@ -1866,9 +1856,11 @@ export function admitEntryWithAuthority(registry, rawEntry, isoNow, { currentAut
 function normalizeCtx(ctxIn) {
   const runtimeRoot = ctxIn.runtimeRoot;
   const livenessExec = ctxIn.livenessExec ?? execFileAsync;
+  const suppliedPaths = ctxIn.paths ?? resolveRuntimePaths(runtimeRoot);
+  const runtimePaths = resolveRuntimePaths(runtimeRoot);
   return {
     runtimeRoot,
-    paths: ctxIn.paths ?? resolveRuntimePaths(runtimeRoot),
+    paths: { ...suppliedPaths, supervisorIdentity: runtimePaths.supervisorIdentity },
     orca: ctxIn.orca,
     pid: ctxIn.pid ?? process.pid,
     hostId: ctxIn.hostId ?? null,
@@ -1885,10 +1877,8 @@ function normalizeCtx(ctxIn) {
     // F001: single typed currentAuthority object replaces partial admissionLeaseId/fence/fenceId
     registry: ctxIn.registry ?? createRegistry(),
     currentAuthority: ctxIn.currentAuthority ?? null,
-    // F001: the candidate authority is never sufficient by itself. The
-    // Supervisor-owned post-lock source is a separate bound snapshot; the
-    // legacy caller-provided reader is intentionally ignored.
-    supervisorIdentitySource: ctxIn.supervisorIdentitySource ?? null,
+    // F001: the Supervisor reads its post-lock source from the runtime-owned
+    // snapshot path. Caller-provided readers and source objects are ignored.
     // F2: reconstruction inputs
     durableReceipts: ctxIn.durableReceipts ?? [],
     liveObservations: ctxIn.liveObservations ?? [],
@@ -1918,19 +1908,32 @@ function authorityTupleDifference(candidate, observed) {
   return null;
 }
 
-async function readAndVerifyCurrentAuthority(ctx, lock, isoNow) {
-  if (!ctx.supervisorIdentitySource) {
-    return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_MISSING" };
-  }
-  if (!supervisorIdentitySourceCapabilities.has(ctx.supervisorIdentitySource)) {
-    return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_UNBOUND" };
+async function readSupervisorIdentitySource(paths) {
+  const sourcePath = paths.supervisorIdentity ?? path.join(paths.root, "state", "supervisor_identity.json");
+  let rawSource;
+  try {
+    rawSource = JSON.parse(await readFile(sourcePath, "utf8"));
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error?.code === "ENOENT"
+        ? "CURRENT_IDENTITY_SOURCE_MISSING"
+        : "CURRENT_IDENTITY_SOURCE_UNREADABLE",
+    };
   }
   let source;
   try {
-    source = supervisorIdentitySourceSchema.parse(ctx.supervisorIdentitySource);
+    source = bindSupervisorIdentitySource(rawSource);
   } catch (error) {
     return { ok: false, reason: `CURRENT_IDENTITY_SOURCE_INVALID: ${error?.message ?? String(error)}` };
   }
+  return { ok: true, source };
+}
+
+async function readAndVerifyCurrentAuthority(paths, lock) {
+  const sourceResult = await readSupervisorIdentitySource(paths);
+  if (!sourceResult.ok) return sourceResult;
+  const source = sourceResult.source;
   const lockHostId = lock.host_id ?? null;
   if (source.binding.host_id !== lockHostId) return { ok: false, reason: "CURRENT_IDENTITY_HOST_MISMATCH" };
   if (source.binding.pid !== lock.pid) return { ok: false, reason: "CURRENT_IDENTITY_PID_MISMATCH" };
@@ -2001,7 +2004,7 @@ export async function runLoopOnce(ctxIn) {
       await appendEvents(paths, tickEvents, isoNow);
       return { stop: false, at: isoNow, reason: "LOCK_AUTHORITY_HOST_MISMATCH" };
     }
-    const identityResult = await readAndVerifyCurrentAuthority(ctx, lock, isoNow);
+    const identityResult = await readAndVerifyCurrentAuthority(paths, lock);
     if (!identityResult.ok) {
       const reason = identityResult.reason === "CURRENT_IDENTITY_PID_MISMATCH"
         ? "LOCK_AUTHORITY_PID_MISMATCH"
