@@ -327,3 +327,17 @@ export const currentAuthoritySchema = z.object({
   fence: z.number().int().positive(),
   fence_id: z.string().min(1),
 });
+
+// Supervisor-owned post-lock identity snapshot. The source binding is kept
+// separate from the durable candidate so a caller cannot satisfy both sides
+// with a caller-provided reader.
+export const supervisorIdentitySourceSchema = z.object({
+  source: z.literal("SUPERVISOR_OWNED"),
+  authority: currentAuthoritySchema,
+  binding: z.object({
+    pid: z.number().int().positive(),
+    host_id: z.string().min(1),
+    fence: z.number().int().positive(),
+    fence_id: z.string().min(1),
+  }),
+});

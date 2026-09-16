@@ -27,7 +27,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
 import writeFileAtomic from "write-file-atomic";
 
-import { projectStateSchema } from "./contracts.mjs";
+import { projectStateSchema, supervisorIdentitySourceSchema } from "./contracts.mjs";
 import { OrcaAdapter, resolveOrcaCli, resolveActiveTerminal } from "./adapters/orca_adapter.mjs";
 import {
   buildLogicalEventKey,
@@ -44,6 +44,24 @@ import {
 import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary.mjs";
 
 const execFileAsync = promisify(execFile);
+const supervisorIdentitySourceCapabilities = new WeakSet();
+
+function deepFreeze(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
+}
+
+export function __testOnlyCreateSupervisorIdentitySource(authority, binding) {
+  const source = supervisorIdentitySourceSchema.parse({
+    source: "SUPERVISOR_OWNED",
+    authority,
+    binding,
+  });
+  deepFreeze(source);
+  supervisorIdentitySourceCapabilities.add(source);
+  return source;
+}
 // ---------------------------------------------------------------------------
 // Constants (§15 retry policy)
 // ---------------------------------------------------------------------------
@@ -1861,9 +1879,9 @@ function normalizeCtx(ctxIn) {
     registry: ctxIn.registry ?? createRegistry(),
     currentAuthority: ctxIn.currentAuthority ?? null,
     // F001: the candidate authority is never sufficient by itself. The
-    // caller must provide a fresh trusted identity read after lock acquire;
-    // the complete typed tuple is compared before any downstream mutation.
-    readCurrentIdentity: ctxIn.readCurrentIdentity ?? null,
+    // Supervisor-owned post-lock source is a separate bound snapshot; the
+    // legacy caller-provided reader is intentionally ignored.
+    supervisorIdentitySource: ctxIn.supervisorIdentitySource ?? null,
     // F2: reconstruction inputs
     durableReceipts: ctxIn.durableReceipts ?? [],
     liveObservations: ctxIn.liveObservations ?? [],
@@ -1894,29 +1912,27 @@ function authorityTupleDifference(candidate, observed) {
 }
 
 async function readAndVerifyCurrentAuthority(ctx, lock, isoNow) {
-  if (typeof ctx.readCurrentIdentity !== "function") {
-    return { ok: false, reason: "CURRENT_IDENTITY_READER_MISSING" };
+  if (!ctx.supervisorIdentitySource) {
+    return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_MISSING" };
   }
-  let raw;
-  try {
-    raw = await ctx.readCurrentIdentity({ phase: "after_lock", lock, isoNow });
-  } catch (error) {
-    return { ok: false, reason: "CURRENT_IDENTITY_READ_FAILED", error: String(error?.message ?? error) };
+  if (!supervisorIdentitySourceCapabilities.has(ctx.supervisorIdentitySource)) {
+    return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_UNBOUND" };
   }
-  const observedInput = raw?.value ?? raw;
-  let observed;
+  let source;
   try {
-    observed = currentAuthoritySchema.parse(observedInput);
+    source = supervisorIdentitySourceSchema.parse(ctx.supervisorIdentitySource);
   } catch (error) {
-    return { ok: false, reason: `CURRENT_IDENTITY_INVALID: ${error?.message ?? String(error)}` };
+    return { ok: false, reason: `CURRENT_IDENTITY_SOURCE_INVALID: ${error?.message ?? String(error)}` };
   }
   const lockHostId = lock.host_id ?? null;
-  const observedHostId = observedInput?.host_id ?? lockHostId;
-  if (observedHostId !== lockHostId) return { ok: false, reason: "CURRENT_IDENTITY_HOST_MISMATCH" };
-  if (observed.process.pid !== lock.pid) return { ok: false, reason: "CURRENT_IDENTITY_PID_MISMATCH" };
-  if (observed.fence !== lock.fence) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_MISMATCH" };
-  if (observed.fence_id !== String(lock.fence)) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_ID_MISMATCH" };
-  return { ok: true, authority: { ...observed, host_id: lockHostId } };
+  if (source.binding.host_id !== lockHostId) return { ok: false, reason: "CURRENT_IDENTITY_HOST_MISMATCH" };
+  if (source.binding.pid !== lock.pid) return { ok: false, reason: "CURRENT_IDENTITY_PID_MISMATCH" };
+  if (source.binding.fence !== lock.fence) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_MISMATCH" };
+  if (source.binding.fence_id !== String(lock.fence)) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_ID_MISMATCH" };
+  if (source.authority.process.pid !== lock.pid) return { ok: false, reason: "CURRENT_IDENTITY_PID_MISMATCH" };
+  if (source.authority.fence !== lock.fence) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_MISMATCH" };
+  if (source.authority.fence_id !== String(lock.fence)) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_ID_MISMATCH" };
+  return { ok: true, authority: source.authority };
 }
 
 export async function runLoopOnce(ctxIn) {
@@ -1988,7 +2004,7 @@ export async function runLoopOnce(ctxIn) {
             ? "LOCK_AUTHORITY_FENCE_MISMATCH"
             : identityResult.reason === "CURRENT_IDENTITY_FENCE_ID_MISMATCH"
               ? "LOCK_AUTHORITY_FENCE_ID_MISMATCH"
-              : `LOCK_AUTHORITY_${identityResult.reason}`;
+            : `LOCK_AUTHORITY_${identityResult.reason}`;
       tickEvents.push({ type: "lock_authority_rejected", reason });
       await appendEvents(paths, tickEvents, isoNow);
       return { stop: false, at: isoNow, reason };

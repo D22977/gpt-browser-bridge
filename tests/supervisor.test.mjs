@@ -28,6 +28,7 @@ import {
   runSupervisor,
   scanDurableReports,
   writeProjectState,
+  __testOnlyCreateSupervisorIdentitySource,
 } from "../src/supervisor.mjs";
 import { OrcaAdapter, resolveActiveTerminal } from "../src/adapters/orca_adapter.mjs";
 import { CURRENT_COMMENT_READBACK_PROTOCOL, createHerdrPrompter } from "../src/adapters/herdr_resume.mjs";
@@ -68,6 +69,15 @@ async function tempRuntime(t) {
 
 async function readJson(file) {
   return JSON.parse(await readFile(file, "utf8"));
+}
+
+function supervisorIdentitySourceFor(authority, hostId = "host-a") {
+  return __testOnlyCreateSupervisorIdentitySource(authority, {
+    pid: authority.process.pid,
+    host_id: hostId,
+    fence: authority.fence,
+    fence_id: String(authority.fence),
+  });
 }
 
 async function readFixture(name) {
@@ -2447,7 +2457,7 @@ test("F1: Supervisor runLoopOnce exercises registry admission path under lock/fe
     admissionLeaseId: "lease-supervisor-01",
     pendingAdmissions: [pendingEntry],
     currentAuthority: authority,
-    readCurrentIdentity: async () => authority,
+    supervisorIdentitySource: supervisorIdentitySourceFor(authority),
   });
   assert.equal(outcome.stop, false);
   assert.ok(outcome.at);
@@ -2503,7 +2513,7 @@ test("F6-F1: Supervisor runLoopOnce rejects third worker through real admission 
     isAlive: async () => false,
     registry: reg,
     currentAuthority: authority,
-    readCurrentIdentity: async () => authority,
+    supervisorIdentitySource: supervisorIdentitySourceFor(authority),
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.stop, false);
@@ -2543,7 +2553,7 @@ test("F6-F1: Supervisor runLoopOnce rejects second reviewer through real admissi
     isAlive: async () => false,
     registry: reg,
     currentAuthority: authority,
-    readCurrentIdentity: async () => authority,
+    supervisorIdentitySource: supervisorIdentitySourceFor(authority),
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.admissionResults[0].ok, false);
@@ -2580,7 +2590,7 @@ test("F6-F1: Supervisor runLoopOnce rejects same ref writer through real admissi
     isAlive: async () => false,
     registry: reg,
     currentAuthority: authority,
-    readCurrentIdentity: async () => authority,
+    supervisorIdentitySource: supervisorIdentitySourceFor(authority),
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.admissionResults[0].ok, false);
@@ -2617,7 +2627,7 @@ test("F6-F1: Supervisor runLoopOnce rejects overlapping paths through real admis
     isAlive: async () => false,
     registry: reg,
     currentAuthority: authority,
-    readCurrentIdentity: async () => authority,
+    supervisorIdentitySource: supervisorIdentitySourceFor(authority),
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.admissionResults[0].ok, false);
@@ -2655,7 +2665,7 @@ test("F6-F1: Supervisor runLoopOnce rejects same worktree alias through real adm
     isAlive: async () => false,
     registry: reg,
     currentAuthority: authority,
-    readCurrentIdentity: async () => authority,
+    supervisorIdentitySource: supervisorIdentitySourceFor(authority),
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.admissionResults[0].ok, false);
@@ -2693,7 +2703,7 @@ test("F6-F1: Supervisor runLoopOnce rejects stale generation through real admiss
     isAlive: async () => false,
     registry: reg,
     currentAuthority: authority,
-    readCurrentIdentity: async () => authority,
+    supervisorIdentitySource: supervisorIdentitySourceFor(authority),
     pendingAdmissions: [pendingEntry],
   });
   assert.equal(outcome.admissionResults[0].ok, false);
@@ -2737,7 +2747,7 @@ test("F6-F3: Supervisor runLoopOnce rejects expired lease through real admission
     admissionLeaseId: "lease-expired",
     pendingAdmissions: [pendingEntry],
     currentAuthority: authority,
-    readCurrentIdentity: async () => authority,
+    supervisorIdentitySource: supervisorIdentitySourceFor(authority),
   });
   assert.equal(outcome.admissionResults[0].ok, false);
   assert.match(outcome.admissionResults[0].reason, /LEASE_EXPIRED/);
@@ -3005,7 +3015,7 @@ test("F001: runLoopOnce derives string fence_id from numeric lock fence for reco
     durableReceipts: [receipt],
     liveObservations: [live],
     currentAuthority: authority,
-    readCurrentIdentity: async () => authority,
+    supervisorIdentitySource: supervisorIdentitySourceFor(authority),
   });
   // The reconstruction should succeed because fence_id is derived as String(lock.fence) = "1"
   assert.equal(outcome.stop, false);
@@ -3090,7 +3100,7 @@ test("F001: runLoopOnce rejects same-fence forged pid (authority pid != current 
       session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
       lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
     },
-    readCurrentIdentity: async () => observedAuthority,
+    supervisorIdentitySource: supervisorIdentitySourceFor(observedAuthority),
   });
   assert.equal(outcome.stop, false);
   assert.equal(outcome.reason, "LOCK_AUTHORITY_PID_MISMATCH");
@@ -3120,12 +3130,58 @@ for (const [label, forge, expectedReason] of [
       now: () => BASE_MS,
       isAlive: async () => true,
       currentAuthority: forge(observedAuthority),
-      readCurrentIdentity: async () => observedAuthority,
+      supervisorIdentitySource: supervisorIdentitySourceFor(observedAuthority),
     });
     assert.equal(outcome.stop, false);
     assert.equal(outcome.reason, expectedReason);
   });
 }
+
+test("F001: runLoopOnce rejects same-caller forged full tuple before reconstruction, admission, or mutation", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const forgedAuthority = {
+    generation: 1, ref: "refs/heads/forged", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\forged", process: { pid: 41041, started_at: REG_TS },
+    session: { workspace_id: "w-forged", pane_id: "p-forged", agent_session: "s-forged" },
+    lease_id: "lease-forged", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
+  const entry = regEntry({
+    card_id: "W-FORGED-01",
+    ref: forgedAuthority.ref,
+    head: forgedAuthority.head,
+    tree: forgedAuthority.tree,
+    worktree: forgedAuthority.worktree,
+    process: forgedAuthority.process,
+    session: forgedAuthority.session,
+    lease_id: forgedAuthority.lease_id,
+    lease_expiry: forgedAuthority.lease_expiry,
+    fence: forgedAuthority.fence,
+    fence_id: forgedAuthority.fence_id,
+  });
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: 41041,
+    hostId: "host-a",
+    now: () => BASE_MS,
+    isAlive: async () => true,
+    currentAuthority: forgedAuthority,
+    readCurrentIdentity: async () => forgedAuthority,
+    supervisorIdentitySource: {
+      source: "SUPERVISOR_OWNED",
+      authority: forgedAuthority,
+      binding: { pid: 41041, host_id: "host-a", fence: 1, fence_id: "1" },
+    },
+    durableReceipts: [entry],
+    liveObservations: [entry],
+    pendingAdmissions: [entry],
+  });
+
+  assert.equal(outcome.stop, false);
+  assert.equal(outcome.reason, "LOCK_AUTHORITY_CURRENT_IDENTITY_SOURCE_UNBOUND");
+  assert.equal(outcome.admissionResults, undefined, "admission must not run");
+  await assert.rejects(readFile(paths.heartbeat, "utf8"), { code: "ENOENT" }, "downstream mutation must not run");
+});
 
 // ---------------------------------------------------------------------------
 // F002: reconstructFromAuthorityAndObservations validates authority fields
@@ -3514,7 +3570,7 @@ for (const [label, invalidWt] of INVALID_WORKTREE_CASES) {
       isAlive: async () => true,
       pendingAdmissions: [entry],
       currentAuthority: authority,
-      readCurrentIdentity: async () => authority,
+      supervisorIdentitySource: supervisorIdentitySourceFor(authority),
     });
     assert.equal(outcome.stop, false);
     assert.equal(outcome.reason, "REGISTRY_ADMISSION_REJECTED",
@@ -3565,7 +3621,7 @@ for (const [label, invalidWt] of INVALID_WORKTREE_CASES) {
       durableReceipts: [receipt],
       liveObservations: [live],
       currentAuthority: authority,
-      readCurrentIdentity: async () => authority,
+      supervisorIdentitySource: supervisorIdentitySourceFor(authority),
     });
     assert.equal(outcome.stop, false);
     assert.match(outcome.reason, /^REGISTRY_RECONSTRUCTION_REJECTED/,
