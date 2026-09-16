@@ -1128,10 +1128,10 @@ export function canonicalizeRef(ref) {
   return null;
 }
 
-// Canonical worktree: forward-slash normalized, lower-cased, no trailing slash.
+// Canonical worktree: forward-slash normalized, lower-cased, no trailing slash, no repeated separators.
 export function canonicalizeWorktree(wt) {
   if (typeof wt !== "string" || wt.length === 0) return null;
-  return wt.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return wt.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
 // Check if two allowlist path sets have any overlapping entry.
@@ -1397,17 +1397,21 @@ export function reconstructFromAuthorityAndObservations(durableReceipts, liveObs
       return { ok: false, reason: `FENCE_ID_MISMATCH: ${cardId}`, entries: fresh.entries };
     }
 
-    // Session identity must match (where both have values)
+    // F2: Full session identity must match (exact tuple, not conditional)
     const rSession = receipt.session ?? {};
     const lSession = live.session ?? {};
-    if (rSession.workspace_id && lSession.workspace_id && rSession.workspace_id !== lSession.workspace_id) {
+    if ((rSession.workspace_id ?? null) !== (lSession.workspace_id ?? null)) {
       return { ok: false, reason: `SESSION_WORKSPACE_MISMATCH: ${cardId}`, entries: fresh.entries };
     }
-    if (rSession.pane_id && lSession.pane_id && rSession.pane_id !== lSession.pane_id) {
+    if ((rSession.pane_id ?? null) !== (lSession.pane_id ?? null)) {
       return { ok: false, reason: `SESSION_PANE_MISMATCH: ${cardId}`, entries: fresh.entries };
     }
-    if (rSession.agent_session && lSession.agent_session && rSession.agent_session !== lSession.agent_session) {
+    if ((rSession.agent_session ?? null) !== (lSession.agent_session ?? null)) {
       return { ok: false, reason: `SESSION_AGENT_MISMATCH: ${cardId}`, entries: fresh.entries };
+    }
+    // F2: Lease expiry must match
+    if (receipt.lease_expiry !== live.lease_expiry) {
+      return { ok: false, reason: `LEASE_EXPIRY_MISMATCH: ${cardId}`, entries: fresh.entries };
     }
 
     // Use the live observation as the source of truth for the reconstructed entry
@@ -1428,50 +1432,13 @@ export function reconstructFromAuthorityAndObservations(durableReceipts, liveObs
   return { ok: true, entries: fresh.entries };
 }
 
-// Legacy reconstruction: rebuilds from live observations only (no durable
-// authority join). Used when no durable receipts are available.
+// Legacy reconstruction: DEPRECATED - rebuilds from live observations only
+// (no durable authority join). This bypass is no longer safe because it
+// accepts self-asserted live records without proving a matching durable
+// authority record. Use reconstructFromAuthorityAndObservations instead.
+// Throws on invocation to prevent accidental use in production paths.
 export function reconstructRegistry(registry, liveEntries, isoNow, { currentFenceId = null } = {}) {
-  const fresh = createRegistry();
-  fresh.currentFenceId = currentFenceId;
-  const seenCardIds = new Set();
-  const activeEntries = [];
-
-  for (const entry of liveEntries) {
-    const parsed = registryEntrySchema.parse(entry);
-    // Reject duplicate card_ids within the observation set
-    if (seenCardIds.has(parsed.card_id)) {
-      return { ok: false, reason: `DUPLICATE_CARD_IN_OBSERVATIONS: ${parsed.card_id}`, entries: fresh.entries };
-    }
-    seenCardIds.add(parsed.card_id);
-    activeEntries.push(parsed);
-  }
-
-  // Enforce limits during reconstruction
-  const workers = activeEntries.filter((e) => e.role === "worker");
-  const reviewers = activeEntries.filter((e) => e.role === "reviewer");
-  if (workers.length > MAX_WORKERS) {
-    return { ok: false, reason: `MAX_WORKERS: reconstruction has ${workers.length} workers, limit ${MAX_WORKERS}`, entries: fresh.entries };
-  }
-  if (reviewers.length > MAX_REVIEWERS) {
-    return { ok: false, reason: `MAX_REVIEWERS: reconstruction has ${reviewers.length} reviewers, limit ${MAX_REVIEWERS}`, entries: fresh.entries };
-  }
-
-  // Re-run the same canonical admission validator used for live admission.
-  // Check against entries already admitted into fresh AND entries in the
-  // original registry (for stale generation detection).
-  for (const entry of activeEntries) {
-    const alreadyAdmitted = new Set([
-      ...Object.keys(fresh.entries),
-      ...Object.keys(registry.entries),
-    ]);
-    const validation = validateEntryAdmission(fresh, entry, alreadyAdmitted);
-    if (!validation.ok) {
-      return { ok: false, reason: validation.reason, entries: fresh.entries };
-    }
-    // Admit into fresh so subsequent entries see this one
-    fresh.entries[entry.card_id] = { ...entry };
-  }
-  return { ok: true, entries: fresh.entries };
+  throw new Error("DEPRECATED: reconstructRegistry is no longer safe. Use reconstructFromAuthorityAndObservations with durable receipts + verified observations.");
 }
 
 // ---------------------------------------------------------------------------
@@ -1480,7 +1447,7 @@ export function reconstructRegistry(registry, liveEntries, isoNow, { currentFenc
 
 // Admit an entry under a specific Supervisor authority fence.
 // `authorityFence` is the current lock fence; entries must match it.
-// F3: validates lease expiry against current time.
+// F3: validates lease expiry against current time and compares lease_id.
 export function admitEntryWithAuthority(registry, rawEntry, isoNow, { authorityFence, authorityFenceId, leaseId }) {
   const parsed = registryEntrySchema.parse(rawEntry);
   if (authorityFence !== undefined && parsed.fence !== authorityFence) {
@@ -1491,6 +1458,10 @@ export function admitEntryWithAuthority(registry, rawEntry, isoNow, { authorityF
   }
   if (!leaseId) {
     return { ok: false, reason: `LEASE_MISSING: ${parsed.card_id}` };
+  }
+  // F3: Validate lease_id equality (not just presence)
+  if (parsed.lease_id !== leaseId) {
+    return { ok: false, reason: `LEASE_ID_MISMATCH: ${parsed.card_id}` };
   }
   // F3: Validate lease is still current
   if (parsed.lease_expiry) {
@@ -1558,36 +1529,47 @@ export async function runLoopOnce(ctxIn) {
   }
 
   // F1: Registry reconstruction from durable receipts + live observations
-  // under the acquired lock/fence. This is the only reconstruction path.
+  // under the ACQUIRED lock/fence. Derive fence from lock, not caller context.
   let registry = ctx.registry;
   if (ctx.durableReceipts.length > 0 || ctx.liveObservations.length > 0) {
     const reconResult = reconstructFromAuthorityAndObservations(
       ctx.durableReceipts,
       ctx.liveObservations,
-      { currentFenceId: ctx.admissionFenceId ?? null }
+      { currentFenceId: lock.fence ?? null }
     );
     if (!reconResult.ok) {
       tickEvents.push({ type: "registry_reconstruction_rejected", reason: reconResult.reason });
       await appendEvents(paths, tickEvents, isoNow);
       return { stop: false, at: isoNow, reason: `REGISTRY_RECONSTRUCTION_REJECTED: ${reconResult.reason}` };
     }
-    registry = { entries: reconResult.entries, currentFenceId: ctx.admissionFenceId ?? null };
+    registry = { entries: reconResult.entries, currentFenceId: lock.fence ?? null };
   }
 
-  // F1: Admission gate - admit pending entries under the current lock/fence.
-  // Each pending entry is validated against the registry, slot limits, ref
-  // uniqueness, path disjointness, and the current authority fence/lease.
+  // F1: Admission gate - admit pending entries under the ACQUIRED lock/fence.
+  // Derive admission authority from the actual lock, not caller self-asserted fields.
+  // On ANY rejection, fail-closed: no project-state read, no terminal recovery,
+  // no resume delivery, no physical send.
   const admissionResults = [];
+  let admissionRejected = false;
+  const lockAuthorityFence = lock.fence;
+  const lockAuthorityFenceId = ctx.admissionFenceId;
   for (const rawEntry of ctx.pendingAdmissions) {
     const result = admitEntryWithAuthority(registry, rawEntry, isoNow, {
-      authorityFence: ctx.admissionFence,
-      authorityFenceId: ctx.admissionFenceId,
+      authorityFence: lockAuthorityFence,
+      authorityFenceId: lockAuthorityFenceId,
       leaseId: ctx.admissionLeaseId,
     });
     admissionResults.push({ card_id: rawEntry.card_id, ...result });
     if (!result.ok) {
       tickEvents.push({ type: "registry_admission_rejected", card_id: rawEntry.card_id, reason: result.reason });
+      admissionRejected = true;
     }
+  }
+
+  // F1: If any admission was rejected, fail-closed before any downstream work.
+  if (admissionRejected) {
+    await appendEvents(paths, tickEvents, isoNow);
+    return { stop: false, at: isoNow, reason: "REGISTRY_ADMISSION_REJECTED", events: tickEvents, registry, admissionResults };
   }
 
   // Step 3: read project state.
