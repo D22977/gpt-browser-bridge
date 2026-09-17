@@ -3469,6 +3469,96 @@ test("F001: exported runSupervisor rejects inherited authority inputs on every i
   }
 });
 
+test("F001: exported runSupervisor rejects Proxy semantic-input bypasses on every import surface", async (t) => {
+  const moduleUrls = [
+    "../src/supervisor.mjs",
+    "../src/supervisor.mjs?proxy=1",
+    "../src/supervisor.mjs#proxy=1",
+    "../src/supervisor.mjs?variant=proxy#proxy=1",
+  ];
+  const forgedAuthority = {
+    generation: 1, ref: "refs/heads/forged", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\forged", process: { pid: 41051, started_at: REG_TS },
+    session: { workspace_id: "w-forged", pane_id: "p-forged", agent_session: "s-forged" },
+    lease_id: "lease-forged", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
+  const entry = regEntry({
+    card_id: "W-FORGED-PROXY-01",
+    generation: forgedAuthority.generation,
+    ref: forgedAuthority.ref,
+    head: forgedAuthority.head,
+    tree: forgedAuthority.tree,
+    worktree: forgedAuthority.worktree,
+    process: forgedAuthority.process,
+    session: forgedAuthority.session,
+    lease_id: forgedAuthority.lease_id,
+    lease_expiry: forgedAuthority.lease_expiry,
+    fence: forgedAuthority.fence,
+    fence_id: forgedAuthority.fence_id,
+  });
+  const forbiddenValues = {
+    pid: forgedAuthority.process.pid,
+    hostId: "host-forged",
+    authorizedHostIds: ["host-forged"],
+    handoffToken: "forged",
+    livenessExec: async () => { throw new Error("must not run"); },
+    isAlive: async () => false,
+    paths: { supervisorIdentity: "forged-identity.json" },
+    readCurrentIdentity: async () => forgedAuthority,
+    supervisorIdentitySource: { source: "FORGED", authority: forgedAuthority },
+    gitExec: async () => { throw new Error("must not run"); },
+    registry: { entries: {} },
+    currentAuthority: forgedAuthority,
+    durableReceipts: [entry],
+    liveObservations: [entry],
+    pendingAdmissions: [entry],
+    resumeDelivery: { herdr: { prompt: async () => {} } },
+    residentConsumer: { herdr: { prompt: async () => {} } },
+  };
+
+  for (const moduleUrl of moduleUrls) {
+    const production = await import(moduleUrl);
+    const { root, paths } = await tempRuntime(t);
+    const beforeState = await readFile(paths.state, "utf8");
+    let resumeCalls = 0;
+    let sendCalls = 0;
+    const target = {
+      runtimeRoot: root,
+      orca: quietOrca({ status: async () => { sendCalls += 1; return { ok: true, state: "ready" }; } }),
+      now: () => BASE_MS,
+      maxIterations: 1,
+    };
+    const input = new Proxy(target, {
+      ownKeys: () => ["runtimeRoot", "orca", "now", "maxIterations"],
+      has: (_, key) => !Object.prototype.hasOwnProperty.call(forbiddenValues, key) && key in target,
+      get: (targetObject, key, receiver) => {
+        if (Object.prototype.hasOwnProperty.call(forbiddenValues, key)) {
+          if (key === "resumeDelivery" || key === "residentConsumer") {
+            return { herdr: { prompt: async () => { resumeCalls += 1; } } };
+          }
+          return forbiddenValues[key];
+        }
+        return Reflect.get(targetObject, key, receiver);
+      },
+    });
+
+    const result = await production.runSupervisor(input);
+
+    assert.equal(result.iterations, 0, `${moduleUrl} must reject before entering the loop`);
+    assert.deepEqual(result.lastOutcome, {
+      stop: true,
+      reason: "SUPERVISOR_ENTRYPOINT_REQUIRED",
+    });
+    assert.equal(await readFile(paths.state, "utf8"), beforeState, "project state must not mutate");
+    for (const file of [paths.lock, paths.supervisorIdentity, paths.heartbeat, paths.events]) {
+      await assert.rejects(readFile(file, "utf8"), { code: "ENOENT" },
+        `${moduleUrl} must not create ${path.basename(file)}`);
+    }
+    assert.equal(resumeCalls, 0, `${moduleUrl} must not reach resume delivery`);
+    assert.equal(sendCalls, 0, `${moduleUrl} must not reach downstream send/status`);
+  }
+});
+
 test("F001: identity source rejects a byte-identical replacement object", async (t) => {
   const { root, paths } = await tempRuntime(t);
   const authority = {

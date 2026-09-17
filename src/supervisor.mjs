@@ -21,7 +21,7 @@
 
 import { readFile, appendFile, mkdir, stat, lstat, readdir, open } from "node:fs/promises";
 import { execFile, execFileSync } from "node:child_process";
-import { promisify } from "node:util";
+import { promisify, types as utilTypes } from "node:util";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -2302,17 +2302,39 @@ const PUBLIC_SUPERVISOR_FORBIDDEN_INPUTS = new Set([
   "resumeDelivery", "residentConsumer",
 ]);
 
+function snapshotPublicSupervisorInput(ctxIn) {
+  if (!ctxIn || typeof ctxIn !== "object") return null;
+  try {
+    if (utilTypes.isProxy(ctxIn)) return null;
+    const prototype = Object.getPrototypeOf(ctxIn);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(ctxIn);
+    if (Reflect.ownKeys(descriptors).some((key) =>
+      typeof key !== "string" || !PUBLIC_SUPERVISOR_INPUTS.has(key))) return null;
+    if ([...PUBLIC_SUPERVISOR_FORBIDDEN_INPUTS].some((key) => key in ctxIn)) return null;
+
+    const snapshot = Object.create(null);
+    for (const key of PUBLIC_SUPERVISOR_INPUTS) {
+      const descriptor = descriptors[key];
+      if (!descriptor) continue;
+      if (!Object.prototype.hasOwnProperty.call(descriptor, "value")) return null;
+      snapshot[key] = descriptor.value;
+    }
+    return snapshot;
+  } catch {
+    return null;
+  }
+}
+
 export async function runSupervisor(ctxIn) {
-  if (!ctxIn || typeof ctxIn !== "object"
-    || Reflect.ownKeys(ctxIn).some((key) => typeof key !== "string" || !PUBLIC_SUPERVISOR_INPUTS.has(key))
-    || [...PUBLIC_SUPERVISOR_FORBIDDEN_INPUTS].some((key) =>
-      key in ctxIn && !Object.prototype.hasOwnProperty.call(ctxIn, key))) {
+  const snapshot = snapshotPublicSupervisorInput(ctxIn);
+  if (!snapshot) {
     return {
       iterations: 0,
       lastOutcome: { stop: true, reason: "SUPERVISOR_ENTRYPOINT_REQUIRED" },
     };
   }
-  return runSupervisorLoop(ctxIn);
+  return runSupervisorLoop(snapshot);
 }
 
 // ---------------------------------------------------------------------------
