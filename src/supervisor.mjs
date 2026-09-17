@@ -2295,10 +2295,18 @@ async function runSupervisorTrusted(ctxIn) {
 }
 
 const PUBLIC_SUPERVISOR_INPUTS = new Set(["runtimeRoot", "orca", "now", "sleep", "maxIterations", "intervalMs"]);
+const PUBLIC_SUPERVISOR_FORBIDDEN_INPUTS = new Set([
+  "pid", "hostId", "authorizedHostIds", "handoffToken", "livenessExec", "isAlive",
+  "paths", "readCurrentIdentity", "supervisorIdentitySource", "gitExec", "registry",
+  "currentAuthority", "durableReceipts", "liveObservations", "pendingAdmissions",
+  "resumeDelivery", "residentConsumer",
+]);
 
 export async function runSupervisor(ctxIn) {
   if (!ctxIn || typeof ctxIn !== "object"
-    || Reflect.ownKeys(ctxIn).some((key) => typeof key !== "string" || !PUBLIC_SUPERVISOR_INPUTS.has(key))) {
+    || Reflect.ownKeys(ctxIn).some((key) => typeof key !== "string" || !PUBLIC_SUPERVISOR_INPUTS.has(key))
+    || [...PUBLIC_SUPERVISOR_FORBIDDEN_INPUTS].some((key) =>
+      key in ctxIn && !Object.prototype.hasOwnProperty.call(ctxIn, key))) {
     return {
       iterations: 0,
       lastOutcome: { stop: true, reason: "SUPERVISOR_ENTRYPOINT_REQUIRED" },

@@ -3377,6 +3377,98 @@ test("F001: exported runSupervisor rejects caller-selected authority inputs on e
   }
 });
 
+test("F001: exported runSupervisor rejects inherited authority inputs on every import surface", async (t) => {
+  const moduleUrls = [
+    "../src/supervisor.mjs",
+    "../src/supervisor.mjs?inherited=1",
+    "../src/supervisor.mjs#inherited=1",
+    "../src/supervisor.mjs?variant=inherited#inherited=1",
+  ];
+  const forgedAuthority = {
+    generation: 1, ref: "refs/heads/forged", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\forged", process: { pid: 41050, started_at: REG_TS },
+    session: { workspace_id: "w-forged", pane_id: "p-forged", agent_session: "s-forged" },
+    lease_id: "lease-forged", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
+  const entry = regEntry({
+    card_id: "W-FORGED-INHERITED-01",
+    generation: forgedAuthority.generation,
+    ref: forgedAuthority.ref,
+    head: forgedAuthority.head,
+    tree: forgedAuthority.tree,
+    worktree: forgedAuthority.worktree,
+    process: forgedAuthority.process,
+    session: forgedAuthority.session,
+    lease_id: forgedAuthority.lease_id,
+    lease_expiry: forgedAuthority.lease_expiry,
+    fence: forgedAuthority.fence,
+    fence_id: forgedAuthority.fence_id,
+  });
+
+  async function assertRejected(production, prototype, label) {
+    const { root, paths } = await tempRuntime(t);
+    const beforeState = await readFile(paths.state, "utf8");
+    let resumeCalls = 0;
+    let sendCalls = 0;
+    const input = Object.create({
+      ...prototype,
+      paths: { supervisorIdentity: path.join(root, "forged-identity.json") },
+      pid: forgedAuthority.process.pid,
+      hostId: "host-forged",
+      authorizedHostIds: ["host-forged"],
+      handoffToken: "forged",
+      livenessExec: async () => { throw new Error("must not run"); },
+      isAlive: async () => false,
+      gitExec: async () => { throw new Error("must not run"); },
+      registry: { entries: {} },
+      currentAuthority: forgedAuthority,
+      durableReceipts: [entry],
+      liveObservations: [entry],
+      pendingAdmissions: [entry],
+      resumeDelivery: { herdr: { prompt: async () => { resumeCalls += 1; } } },
+      residentConsumer: { herdr: { prompt: async () => { resumeCalls += 1; } } },
+      readCurrentIdentity: async () => forgedAuthority,
+      supervisorIdentitySource: { source: "FORGED", authority: forgedAuthority },
+    });
+    Object.assign(input, {
+      runtimeRoot: root,
+      orca: quietOrca({ status: async () => { sendCalls += 1; return { ok: true, state: "ready" }; } }),
+      now: () => BASE_MS,
+      maxIterations: 1,
+    });
+
+    const result = await production.runSupervisor(input);
+    assert.equal(result.iterations, 0, `${label} must reject before entering the loop`);
+    assert.deepEqual(result.lastOutcome, {
+      stop: true,
+      reason: "SUPERVISOR_ENTRYPOINT_REQUIRED",
+    });
+    assert.equal(await readFile(paths.state, "utf8"), beforeState, "project state must not mutate");
+    for (const file of [paths.lock, paths.supervisorIdentity, paths.heartbeat, paths.events]) {
+      await assert.rejects(readFile(file, "utf8"), { code: "ENOENT" },
+        `${label} must not create ${path.basename(file)}`);
+    }
+    assert.equal(resumeCalls, 0, `${label} must not reach resume delivery`);
+    assert.equal(sendCalls, 0, `${label} must not reach downstream send/status`);
+  }
+
+  for (const moduleUrl of moduleUrls) {
+    const production = await import(moduleUrl);
+    await assertRejected(production, { currentAuthority: forgedAuthority }, moduleUrl);
+  }
+
+  const pollutedKey = "resumeDelivery";
+  const hadPreviousPollution = Object.prototype.hasOwnProperty.call(Object.prototype, pollutedKey);
+  const previousPollution = Object.prototype[pollutedKey];
+  Object.prototype[pollutedKey] = { herdr: { prompt: async () => {} } };
+  try {
+    await assertRejected(await import("../src/supervisor.mjs?object-prototype-pollution=1"), {}, "Object.prototype pollution");
+  } finally {
+    if (hadPreviousPollution) Object.prototype[pollutedKey] = previousPollution;
+    else delete Object.prototype[pollutedKey];
+  }
+});
+
 test("F001: identity source rejects a byte-identical replacement object", async (t) => {
   const { root, paths } = await tempRuntime(t);
   const authority = {
