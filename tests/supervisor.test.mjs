@@ -23,7 +23,7 @@ import {
   readRecoveryState,
   recoverActiveTerminal,
   resolveRuntimePaths,
-  runLoopOnce,
+  runLoopOnce as runLoopOnceDirect,
   runResumeDeliveryCheck,
   runSupervisor,
   scanDurableReports,
@@ -83,8 +83,8 @@ function supervisorIdentitySourceFor(authority, hostId = "host-a") {
   };
 }
 
-async function writeSupervisorIdentity(paths, authority, hostId = "host-a") {
-  await writeFile(paths.supervisorIdentity, JSON.stringify(supervisorIdentitySourceFor(authority, hostId)));
+async function runLoopOnce(ctx) {
+  return (await runSupervisor({ ...ctx, maxIterations: 1 })).lastOutcome;
 }
 
 async function readFixture(name) {
@@ -2453,7 +2453,6 @@ test("F1: Supervisor runLoopOnce exercises registry admission path under lock/fe
     session: { workspace_id: "w-prod", pane_id: "p-prod", agent_session: "s-prod" },
     lease_id: "lease-supervisor-01", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  await writeSupervisorIdentity(paths, authority);
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2511,7 +2510,6 @@ test("F6-F1: Supervisor runLoopOnce rejects third worker through real admission 
     session: { workspace_id: "w3", pane_id: "p3", agent_session: "s3" },
     lease_id: "lease-3", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  await writeSupervisorIdentity(paths, authority);
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2551,7 +2549,6 @@ test("F6-F1: Supervisor runLoopOnce rejects second reviewer through real admissi
     session: { workspace_id: "w-reg-01", pane_id: "p-reg-01", agent_session: "s-reg-01" },
     lease_id: "lease-r2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  await writeSupervisorIdentity(paths, authority);
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2588,7 +2585,6 @@ test("F6-F1: Supervisor runLoopOnce rejects same ref writer through real admissi
     session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
     lease_id: "lease-2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  await writeSupervisorIdentity(paths, authority);
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2625,7 +2621,6 @@ test("F6-F1: Supervisor runLoopOnce rejects overlapping paths through real admis
     session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
     lease_id: "lease-2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  await writeSupervisorIdentity(paths, authority);
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2663,7 +2658,6 @@ test("F6-F1: Supervisor runLoopOnce rejects same worktree alias through real adm
     session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
     lease_id: "lease-2", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  await writeSupervisorIdentity(paths, authority);
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2701,7 +2695,6 @@ test("F6-F1: Supervisor runLoopOnce rejects stale generation through real admiss
     session: { workspace_id: "w2", pane_id: "p2", agent_session: "s2" },
     lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  await writeSupervisorIdentity(paths, authority);
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -2743,7 +2736,6 @@ test("F6-F3: Supervisor runLoopOnce rejects expired lease through real admission
     fence: 1,
     fence_id: "1",
   };
-  await writeSupervisorIdentity(paths, authority);
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -3012,7 +3004,6 @@ test("F001: runLoopOnce derives string fence_id from numeric lock fence for reco
     session: { workspace_id: "w-recon", pane_id: "p-recon", agent_session: "s-recon" },
     lease_id: "lease-recon", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  await writeSupervisorIdentity(paths, authority);
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -3094,7 +3085,6 @@ test("F001: runLoopOnce rejects same-fence forged pid (authority pid != current 
     session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
     lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
   };
-  await writeSupervisorIdentity(paths, observedAuthority);
   const outcome = await runLoopOnce({
     runtimeRoot: root,
     orca: quietOrca(),
@@ -3115,8 +3105,8 @@ test("F001: runLoopOnce rejects same-fence forged pid (authority pid != current 
 
 for (const [label, forge, expectedReason] of [
   ["host", (authority) => ({ ...authority, host_id: "host-forged" }), "LOCK_AUTHORITY_HOST_MISMATCH"],
-  ["head", (authority) => ({ ...authority, head: "c".repeat(40) }), "LOCK_AUTHORITY_HEAD_MISMATCH"],
-  ["session", (authority) => ({ ...authority, session: { ...authority.session, pane_id: "p-forged" } }), "LOCK_AUTHORITY_SESSION_PANE_ID_MISMATCH"],
+  ["head", (authority) => ({ ...authority, head: "c".repeat(40) }), "LOCK_AUTHORITY_CURRENT_IDENTITY_SOURCE_PREEXISTING"],
+  ["session", (authority) => ({ ...authority, session: { ...authority.session, pane_id: "p-forged" } }), "LOCK_AUTHORITY_CURRENT_IDENTITY_SOURCE_PREEXISTING"],
 ]) {
   test(`F001: runLoopOnce rejects same-fence forged ${label} against fresh identity`, async (t) => {
     const { root, paths } = await tempRuntime(t);
@@ -3129,7 +3119,7 @@ for (const [label, forge, expectedReason] of [
       session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
       lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1", host_id: "host-a",
     };
-    await writeSupervisorIdentity(paths, observedAuthority);
+    await writeFile(paths.supervisorIdentity, JSON.stringify(supervisorIdentitySourceFor(observedAuthority)));
     const outcome = await runLoopOnce({
       runtimeRoot: root,
       orca: quietOrca(),
@@ -3188,6 +3178,89 @@ test("F001: runLoopOnce rejects same-caller forged full tuple before reconstruct
   assert.equal(outcome.reason, "LOCK_AUTHORITY_CURRENT_IDENTITY_SOURCE_MISSING");
   assert.equal(outcome.admissionResults, undefined, "admission must not run");
   await assert.rejects(readFile(paths.heartbeat, "utf8"), { code: "ENOENT" }, "downstream mutation must not run");
+});
+
+test("F001: runLoopOnce rejects a caller-prewritten canonical identity before reconstruction or side effects", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const forgedAuthority = {
+    generation: 1, ref: "refs/heads/forged", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\forged", process: { pid: 41044, started_at: REG_TS },
+    session: { workspace_id: "w-forged", pane_id: "p-forged", agent_session: "s-forged" },
+    lease_id: "lease-forged", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
+  const entry = regEntry({
+    card_id: "W-FORGED-CANONICAL-01",
+    generation: forgedAuthority.generation,
+    ref: forgedAuthority.ref,
+    head: forgedAuthority.head,
+    tree: forgedAuthority.tree,
+    worktree: forgedAuthority.worktree,
+    process: forgedAuthority.process,
+    session: forgedAuthority.session,
+    lease_id: forgedAuthority.lease_id,
+    lease_expiry: forgedAuthority.lease_expiry,
+    fence: forgedAuthority.fence,
+    fence_id: forgedAuthority.fence_id,
+  });
+  await writeFile(paths.supervisorIdentity, JSON.stringify(supervisorIdentitySourceFor(forgedAuthority)));
+  let reconstructionCalls = 0;
+  let admissionCalls = 0;
+  let heartbeatCalls = 0;
+  let resumeCalls = 0;
+  let physicalSendCalls = 0;
+  const outcome = await runLoopOnceDirect({
+    runtimeRoot: root,
+    paths: { ...paths, supervisorIdentity: path.join(root, "caller-selected-alternate-identity.json") },
+    orca: quietOrca({ status: async () => { physicalSendCalls += 1; return { ok: true, state: "ready" }; } }),
+    pid: forgedAuthority.process.pid,
+    hostId: "host-a",
+    now: () => BASE_MS,
+    isAlive: async () => true,
+    currentAuthority: forgedAuthority,
+    readCurrentIdentity: async () => { reconstructionCalls += 1; return forgedAuthority; },
+    supervisorIdentitySource: forgedAuthority,
+    durableReceipts: [entry],
+    liveObservations: [entry],
+    pendingAdmissions: [{ ...entry, card_id: "W-FORGED-CANONICAL-ADMISSION-01" }],
+    resumeDelivery: { herdr: { prompt: async () => { resumeCalls += 1; } } },
+    writeHeartbeat: async () => { heartbeatCalls += 1; },
+    admitEntry: async () => { admissionCalls += 1; },
+  });
+
+  assert.equal(outcome.stop, false);
+  assert.equal(outcome.reason, "LOCK_AUTHORITY_CURRENT_IDENTITY_SOURCE_PREEXISTING");
+  assert.equal(reconstructionCalls, 0, "forged legacy reader must not run");
+  assert.equal(admissionCalls, 0, "admission must not run");
+  assert.equal(heartbeatCalls, 0, "heartbeat must not run");
+  assert.equal(resumeCalls, 0, "resume must not run");
+  assert.equal(physicalSendCalls, 0, "physical send must not run");
+  assert.deepEqual(await readJson(paths.state), projectState(), "project state must not mutate");
+});
+
+test("F001: Supervisor creates and binds the canonical identity after lock acquisition", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const authority = {
+    generation: 1, ref: "refs/heads/supervisor", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\supervisor", process: { pid: 41045, started_at: REG_TS },
+    session: { workspace_id: "w-supervisor", pane_id: "p-supervisor", agent_session: "s-supervisor" },
+    lease_id: "lease-supervisor", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: authority.process.pid,
+    hostId: "host-a",
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    currentAuthority: authority,
+    pendingAdmissions: [],
+  });
+  assert.equal(outcome.stop, false);
+  assert.deepEqual(await readJson(paths.supervisorIdentity), {
+    source: "SUPERVISOR_OWNED",
+    authority,
+    binding: { pid: authority.process.pid, host_id: "host-a", fence: 1, fence_id: "1" },
+  });
 });
 
 test("F001: public supervisor import cannot mint a forged identity source", async (t) => {
@@ -3694,7 +3767,6 @@ for (const [label, invalidWt] of INVALID_WORKTREE_CASES) {
       session: { workspace_id: "w1", pane_id: "p1", agent_session: "s1" },
       lease_id: "lease-1", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
     };
-    await writeSupervisorIdentity(paths, authority);
     const outcome = await runLoopOnce({
       runtimeRoot: root,
       orca: quietOrca(),
@@ -3744,7 +3816,6 @@ for (const [label, invalidWt] of INVALID_WORKTREE_CASES) {
       session: { workspace_id: "w-recon", pane_id: "p-recon", agent_session: "s-recon" },
       lease_id: "lease-recon", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
     };
-    await writeSupervisorIdentity(paths, authority);
     const outcome = await runLoopOnce({
       runtimeRoot: root,
       orca: quietOrca(),

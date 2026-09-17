@@ -45,6 +45,8 @@ import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary
 
 const execFileAsync = promisify(execFile);
 const supervisorIdentitySourceCapabilities = new WeakSet();
+const supervisorIdentitySourceOwnership = new Map();
+const SUPERVISOR_ENTRYPOINT = Symbol("supervisor-entrypoint");
 
 function deepFreeze(value) {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
@@ -1856,11 +1858,17 @@ export function admitEntryWithAuthority(registry, rawEntry, isoNow, { currentAut
 function normalizeCtx(ctxIn) {
   const runtimeRoot = ctxIn.runtimeRoot;
   const livenessExec = ctxIn.livenessExec ?? execFileAsync;
-  const suppliedPaths = ctxIn.paths ?? resolveRuntimePaths(runtimeRoot);
   const runtimePaths = resolveRuntimePaths(runtimeRoot);
   return {
     runtimeRoot,
-    paths: { ...suppliedPaths, supervisorIdentity: runtimePaths.supervisorIdentity },
+    // The Supervisor owns every runtime path. In particular, an injected
+    // `paths.supervisorIdentity` must not redirect the provenance check.
+    paths: runtimePaths,
+    callerIdentityInputs: Boolean(
+      ctxIn.paths?.supervisorIdentity
+      || Object.prototype.hasOwnProperty.call(ctxIn, "readCurrentIdentity")
+      || Object.prototype.hasOwnProperty.call(ctxIn, "supervisorIdentitySource")
+    ),
     orca: ctxIn.orca,
     pid: ctxIn.pid ?? process.pid,
     hostId: ctxIn.hostId ?? null,
@@ -1908,45 +1916,83 @@ function authorityTupleDifference(candidate, observed) {
   return null;
 }
 
-async function readSupervisorIdentitySource(paths) {
-  const sourcePath = paths.supervisorIdentity ?? path.join(paths.root, "state", "supervisor_identity.json");
-  let rawSource;
+function identitySourcePath(paths) {
+  return path.resolve(paths.supervisorIdentity);
+}
+
+function identitySourceLockDifference(source, lock) {
+  if (source.binding.host_id !== lock.host_id) return "CURRENT_IDENTITY_HOST_MISMATCH";
+  if (source.binding.pid !== lock.pid || source.authority.process.pid !== lock.pid) return "CURRENT_IDENTITY_PID_MISMATCH";
+  if (source.binding.fence !== lock.fence || source.authority.fence !== lock.fence) return "CURRENT_IDENTITY_FENCE_MISMATCH";
+  if (source.binding.fence_id !== String(lock.fence) || source.authority.fence_id !== String(lock.fence)) return "CURRENT_IDENTITY_FENCE_ID_MISMATCH";
+  return null;
+}
+
+async function establishSupervisorIdentitySource(paths, lock, candidateAuthority, callerIdentityInputs, supervisorOwnedEntrypoint) {
+  const sourcePath = identitySourcePath(paths);
+  const ownershipKey = sourcePath;
+  const ownedRaw = supervisorIdentitySourceOwnership.get(ownershipKey);
+  let raw;
   try {
-    rawSource = JSON.parse(await readFile(sourcePath, "utf8"));
+    raw = await readFile(sourcePath, "utf8");
   } catch (error) {
-    return {
-      ok: false,
-      reason: error?.code === "ENOENT"
-        ? "CURRENT_IDENTITY_SOURCE_MISSING"
-        : "CURRENT_IDENTITY_SOURCE_UNREADABLE",
+    if (error?.code !== "ENOENT") return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_UNREADABLE" };
+    if (callerIdentityInputs || !supervisorOwnedEntrypoint) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_MISSING" };
+    if (!candidateAuthority) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_MISSING" };
+    let authority;
+    try {
+      authority = currentAuthoritySchema.parse(candidateAuthority);
+    } catch (parseError) {
+      return { ok: false, reason: `CURRENT_IDENTITY_SOURCE_INVALID: ${parseError?.message ?? String(parseError)}` };
+    }
+    const source = {
+      source: "SUPERVISOR_OWNED",
+      authority,
+      binding: {
+        pid: lock.pid,
+        host_id: lock.host_id ?? "",
+        fence: lock.fence,
+        fence_id: String(lock.fence),
+      },
     };
+    const lockDifference = identitySourceLockDifference(source, lock);
+    if (lockDifference) return { ok: false, reason: lockDifference };
+    const serialized = JSON.stringify(source);
+    const created = await createExclusiveJson(sourcePath, source);
+    if (created.error) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_UNREADABLE" };
+    if (!created.created) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_PREEXISTING" };
+    supervisorIdentitySourceOwnership.set(ownershipKey, serialized);
+    return { ok: true, source: bindSupervisorIdentitySource(source) };
   }
+
+  if (!ownedRaw) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_PREEXISTING" };
+  if (raw !== ownedRaw) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_REPLACED" };
   let source;
   try {
-    source = bindSupervisorIdentitySource(rawSource);
+    source = bindSupervisorIdentitySource(JSON.parse(raw));
   } catch (error) {
     return { ok: false, reason: `CURRENT_IDENTITY_SOURCE_INVALID: ${error?.message ?? String(error)}` };
   }
+  const lockDifference = identitySourceLockDifference(source, lock);
+  if (lockDifference) return { ok: false, reason: lockDifference };
   return { ok: true, source };
 }
 
-async function readAndVerifyCurrentAuthority(paths, lock) {
-  const sourceResult = await readSupervisorIdentitySource(paths);
+async function readAndVerifyCurrentAuthority(paths, lock, candidateAuthority, callerIdentityInputs, supervisorOwnedEntrypoint) {
+  const sourceResult = await establishSupervisorIdentitySource(
+    paths,
+    lock,
+    candidateAuthority,
+    callerIdentityInputs,
+    supervisorOwnedEntrypoint,
+  );
   if (!sourceResult.ok) return sourceResult;
   const source = sourceResult.source;
-  const lockHostId = lock.host_id ?? null;
-  if (source.binding.host_id !== lockHostId) return { ok: false, reason: "CURRENT_IDENTITY_HOST_MISMATCH" };
-  if (source.binding.pid !== lock.pid) return { ok: false, reason: "CURRENT_IDENTITY_PID_MISMATCH" };
-  if (source.binding.fence !== lock.fence) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_MISMATCH" };
-  if (source.binding.fence_id !== String(lock.fence)) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_ID_MISMATCH" };
-  if (source.authority.process.pid !== lock.pid) return { ok: false, reason: "CURRENT_IDENTITY_PID_MISMATCH" };
-  if (source.authority.fence !== lock.fence) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_MISMATCH" };
-  if (source.authority.fence_id !== String(lock.fence)) return { ok: false, reason: "CURRENT_IDENTITY_FENCE_ID_MISMATCH" };
   return { ok: true, authority: source.authority };
 }
 
-export async function runLoopOnce(ctxIn) {
-  const ctx = normalizeCtx(ctxIn);
+async function runLoopOnceInternal(ctxIn, supervisorOwnedEntrypoint, alreadyNormalized = false) {
+  const ctx = alreadyNormalized ? ctxIn : normalizeCtx(ctxIn);
   const { paths } = ctx;
   await ensureRuntimeDirs(paths);
   const nowMs = ctx.now();
@@ -2004,7 +2050,13 @@ export async function runLoopOnce(ctxIn) {
       await appendEvents(paths, tickEvents, isoNow);
       return { stop: false, at: isoNow, reason: "LOCK_AUTHORITY_HOST_MISMATCH" };
     }
-    const identityResult = await readAndVerifyCurrentAuthority(paths, lock);
+    const identityResult = await readAndVerifyCurrentAuthority(
+      paths,
+      lock,
+      ctx.currentAuthority,
+      ctx.callerIdentityInputs,
+      supervisorOwnedEntrypoint === SUPERVISOR_ENTRYPOINT,
+    );
     if (!identityResult.ok) {
       const reason = identityResult.reason === "CURRENT_IDENTITY_PID_MISMATCH"
         ? "LOCK_AUTHORITY_PID_MISMATCH"
@@ -2202,6 +2254,10 @@ export async function runLoopOnce(ctxIn) {
   return { stop: false, at: isoNow, projectState: state.state, events: tickEvents, registry, admissionResults };
 }
 
+export async function runLoopOnce(ctxIn) {
+  return runLoopOnceInternal(ctxIn, null);
+}
+
 // Step 12 lives in what this function does NOT do: no code edits, no
 // pass/rework verdicts. Drives runLoopOnce on an injectable interval;
 // `maxIterations` lets tests run a bounded number of ticks with an instant
@@ -2211,7 +2267,7 @@ export async function runSupervisor(ctxIn) {
   let i = 0;
   let lastOutcome = null;
   while (i < ctx.maxIterations) {
-    lastOutcome = await runLoopOnce(ctx);
+    lastOutcome = await runLoopOnceInternal(ctx, SUPERVISOR_ENTRYPOINT, true);
     i += 1;
     if (lastOutcome.stop) break;
     if (i < ctx.maxIterations) await ctx.sleep(ctx.intervalMs);
