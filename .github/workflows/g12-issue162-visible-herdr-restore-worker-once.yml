@@ -176,7 +176,7 @@ jobs:
           $listRaw=(& $h agent list 2>&1|Out-String)
           if($LASTEXITCODE-ne0){throw 'HERDR_AGENT_LIST_FAILED'}
           $agents=@(($listRaw|ConvertFrom-Json).result.agents)
-          $matches=@()
+          $waitingTargets=@()
           foreach($a in $agents){
             if([string]$a.agent -ne 'codex'){continue}
             $pane=[string]$a.pane_id
@@ -186,18 +186,18 @@ jobs:
             if($LASTEXITCODE-ne0){continue}
             $bound=($read-match[regex]::Escape($request)) -or ($read-match[regex]::Escape($marker)) -or ($read-match'GBB_G13_CONTROL_TOWER_013_NEXT_RECOMMENDATIONS')
             $waiting=$read-match'(?i)(wait|waiting|await|monitor|webgpt|recommendations|5714750641|5715087486)'
-            if($bound -and $waiting){$matches+=[pscustomobject]@{pane=$pane;session=$session;status=[string]$a.agent_status;name=[string]$a.name;cwd=[string]$a.cwd}}
+            if($bound -and $waiting){$waitingTargets+=[pscustomobject]@{pane=$pane;session=$session;status=[string]$a.agent_status;name=[string]$a.name;cwd=[string]$a.cwd}}
           }
 
-          if($matches.Count-ne1){
-            $summary=($matches|ForEach-Object{"pane=$($_.pane),session=$($_.session),status=$($_.status),name=$($_.name),cwd=$($_.cwd)"})-join';'
+          if($waitingTargets.Count-ne1){
+            $summary=($waitingTargets|ForEach-Object{"pane=$($_.pane),session=$($_.session),status=$($_.status),name=$($_.name),cwd=$($_.cwd)"})-join';'
             if(!$summary){$summary='NONE'}
-            $body=@('GBB_G13_HERDR_RESULT_RETURN_DOORBELL_RECEIPT_V1','state: BLOCKED_AMBIGUOUS_TARGET',"source_wake_receipt: $wake","source_result_receipt: $result","candidate_count: $($matches.Count)","candidate_summary: $summary",'physical_prompt_count: 0','blind_retry_performed: false',"workflow_run_id: $env:GITHUB_RUN_ID",'user_relay_count: 0','readback_verified: true')-join"`n"
+            $body=@('GBB_G13_HERDR_RESULT_RETURN_DOORBELL_RECEIPT_V1','state: BLOCKED_AMBIGUOUS_TARGET',"source_wake_receipt: $wake","source_result_receipt: $result","candidate_count: $($waitingTargets.Count)","candidate_summary: $summary",'physical_prompt_count: 0','blind_retry_performed: false',"workflow_run_id: $env:GITHUB_RUN_ID",'user_relay_count: 0','readback_verified: true')-join"`n"
             $null=Publish $body
-            throw "HERDR_WAITING_TARGET_COUNT_$($matches.Count)"
+            throw "HERDR_WAITING_TARGET_COUNT_$($waitingTargets.Count)"
           }
 
-          $t=$matches[0]
+          $t=$waitingTargets[0]
           $prompt="WebGPT Control Tower-013 result is durably available. Do not wait for or resend the previously typed ChatGPT-Web prompt. Exact-GET D22977/gpt-browser-bridge Issue #162 comments $result, $return, and $authority. Consume $marker from result $result. Treat prior browser send as NOT_DELIVERED and do not perform a second browser send. Close only the pending recommendations wait/monitor state. Then stop at the required Repair-15 fresh independent exact-head GPT-5.6 Sol High review gate for 3aa61ea6c742e3d659e82c44775257e2418e5e54; do not activate Rank 1/2/3 before review and Control adoption. Publish and exact-read-back one GBB_G13_HERDR_RESULT_RETURN_CONSUMED_ACK_V1 to Issue #162 with state CONSUMED, source_result_receipt $result, source_wake_receipt $wake, target_pane $($t.pane), target_session $($t.session), user_relay_count 0. No merge/release/workflow dispatch/product mutation from this prompt."
           $out=(& $h agent prompt $t.pane $prompt 2>&1|Out-String)
           if($LASTEXITCODE-ne0){
