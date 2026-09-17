@@ -1,0 +1,218 @@
+name: G13 Issue162 Result Return Doorbell Once
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: g13-issue162-result-return-doorbell
+  cancel-in-progress: false
+
+jobs:
+  deliver:
+    if: >-
+      github.event.issue.number == 162 &&
+      github.event.comment.user.login == 'D22977' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, 'GBB_G13_HERDR_RESULT_RETURN_DOORBELL_WAKE_V1')
+    runs-on: [self-hosted, Windows, GBB-REVIEWER]
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh -NoProfile -File {0}
+    steps:
+      - name: Validate source result, identify unique waiting Herdr pane, deliver once, and receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $repo = 'D22977/gpt-browser-bridge'
+          $issue = 162
+          $sourceRequest = '5714750641'
+          $sourceResult = '5715087486'
+          $sourceReturn = '5715176746'
+          $authority = '5715246241'
+          $expectedMarker = 'GBB_G13_CONTROL_TOWER_013_NEXT_RECOMMENDATIONS_RESULT_V1'
+          $herdr = 'C:\Users\Lupun\AppData\Local\Programs\Herdr\bin\herdr.exe'
+          $api = "https://api.github.com/repos/$repo"
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'g13-result-return-doorbell'; Accept = 'application/vnd.github+json' }
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $wakeId = [string]$event.comment.id
+          $wakeBody = [string]$event.comment.body
+
+          function Get-Comment([string]$id) {
+            return Invoke-RestMethod "$api/issues/comments/$id" -Headers $headers -Method Get -TimeoutSec 30
+          }
+          function Publish([string]$body) {
+            $payload = @{ body = $body } | ConvertTo-Json -Compress
+            $posted = Invoke-RestMethod "$api/issues/$issue/comments" -Headers $headers -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 30
+            $readback = Get-Comment ([string]$posted.id)
+            if ([string]$readback.body -cne $body) { throw "RECEIPT_READBACK_MISMATCH_$($posted.id)" }
+            return [string]$posted.id
+          }
+          function Need([string]$pattern, [string]$name) {
+            $m = [regex]::Match($wakeBody, $pattern)
+            if (-not $m.Success) { throw "MALFORMED_WAKE_$name" }
+            return $m.Groups[1].Value
+          }
+
+          $wakeResult = Need '(?m)^source_result_receipt:\s*(\d+)\s*$' 'source_result_receipt'
+          $wakeReturn = Need '(?m)^source_return_receipt:\s*(\d+)\s*$' 'source_return_receipt'
+          $wakeAuthority = Need '(?m)^authority_receipt:\s*(\d+)\s*$' 'authority_receipt'
+          $idem = Need '(?m)^idempotency_key:\s*([A-Za-z0-9._:-]+)\s*$' 'idempotency_key'
+          if ($wakeResult -cne $sourceResult -or $wakeReturn -cne $sourceReturn -or $wakeAuthority -cne $authority) { throw 'WAKE_BINDING_MISMATCH' }
+
+          $result = Get-Comment $sourceResult
+          $ret = Get-Comment $sourceReturn
+          $auth = Get-Comment $authority
+          foreach ($c in @($result,$ret,$auth)) {
+            if ([string]$c.issue_url -cne "$api/issues/$issue") { throw 'SOURCE_COMMENT_WRONG_ISSUE' }
+            if ([string]$c.user.login -cne 'D22977' -or [string]$c.author_association -cne 'OWNER') { throw 'SOURCE_COMMENT_WRONG_AUTHOR' }
+          }
+          if (-not ([string]$result.body).StartsWith($expectedMarker)) { throw 'RESULT_MARKER_MISMATCH' }
+          if ([string]$result.body -notmatch '(?m)^decision:\s*RECOMMENDATIONS_READY\s*$') { throw 'RESULT_NOT_READY' }
+          if (-not ([string]$ret.body).StartsWith('CONTROL_G13_CONTROL_TOWER_013_WEBGPT_RESULT_RETURN_V1')) { throw 'RETURN_MARKER_MISMATCH' }
+          if ([string]$ret.body -notmatch '(?m)^state:\s*RESULT_AVAILABLE_CONSUME_NOW\s*$') { throw 'RETURN_NOT_CONSUMABLE' }
+          if (-not ([string]$auth.body).StartsWith('GBB_G13_HERDR_RESULT_RETURN_DOORBELL_REPAIR_AUTHORITY_V1')) { throw 'AUTHORITY_MARKER_MISMATCH' }
+
+          $prior = @()
+          for ($page=1; $page -le 30; $page++) {
+            $rows = @(Invoke-RestMethod "$api/issues/$issue/comments?per_page=100&page=$page" -Headers $headers -Method Get -TimeoutSec 30)
+            $prior += $rows
+            if ($rows.Count -lt 100) { break }
+          }
+          $delivered = @($prior | Where-Object {
+            ([string]$_.body).StartsWith('GBB_G13_HERDR_RESULT_RETURN_DOORBELL_RECEIPT_V1') -and
+            [string]$_.body -match "(?m)^source_result_receipt:\s*$sourceResult\s*$" -and
+            [string]$_.body -match '(?m)^state:\s*DELIVERED\s*$'
+          })
+          if ($delivered.Count -gt 0) {
+            $body = @(
+              'GBB_G13_HERDR_RESULT_RETURN_DOORBELL_RECEIPT_V1',
+              'state: NO_OP_DUPLICATE',
+              "source_wake_receipt: $wakeId",
+              "source_result_receipt: $sourceResult",
+              'second_physical_prompt: false',
+              "workflow_run_id: $env:GITHUB_RUN_ID",
+              'user_relay_count: 0',
+              'readback_verified: true'
+            ) -join "`n"
+            $null = Publish $body
+            exit 0
+          }
+
+          if (-not (Test-Path -LiteralPath $herdr -PathType Leaf)) {
+            $body = @('GBB_G13_HERDR_RESULT_RETURN_DOORBELL_RECEIPT_V1','state: BLOCKED_RUNTIME_UNAVAILABLE',"source_wake_receipt: $wakeId",'first_missing_capability: HERDR_EXE_MISSING','physical_prompt_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'user_relay_count: 0','readback_verified: true') -join "`n"
+            $null = Publish $body
+            throw 'HERDR_EXE_MISSING'
+          }
+          $status = (& $herdr status server 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $status -notmatch '(?m)^status:\s*running\s*$') {
+            $body = @('GBB_G13_HERDR_RESULT_RETURN_DOORBELL_RECEIPT_V1','state: BLOCKED_RUNTIME_UNAVAILABLE',"source_wake_receipt: $wakeId",'first_missing_capability: HERDR_SERVER_NOT_RUNNING','physical_prompt_count: 0',"workflow_run_id: $env:GITHUB_RUN_ID",'user_relay_count: 0','readback_verified: true') -join "`n"
+            $null = Publish $body
+            throw 'HERDR_SERVER_NOT_RUNNING'
+          }
+
+          $listRaw = (& $herdr agent list 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "HERDR_AGENT_LIST_FAILED $listRaw" }
+          $agents = @(($listRaw | ConvertFrom-Json).result.agents)
+          $matches = @()
+          foreach ($agent in $agents) {
+            if ([string]$agent.agent -ne 'codex') { continue }
+            if ([string]$agent.agent_status -notin @('idle','done','working')) { continue }
+            $pane = [string]$agent.pane_id
+            $session = [string]$agent.agent_session.value
+            if ([string]::IsNullOrWhiteSpace($pane) -or [string]::IsNullOrWhiteSpace($session)) { continue }
+            $read = (& $herdr agent read $pane --source recent-unwrapped --lines 220 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) { continue }
+            $bound = $read -match [regex]::Escape($sourceRequest) -or $read -match [regex]::Escape($expectedMarker) -or $read -match 'GBB_G13_CONTROL_TOWER_013_NEXT_RECOMMENDATIONS'
+            $waiting = $read -match '(?i)(wait|waiting|await|monitor|WebGPT|recommendations|5714750641|5715087486)'
+            if ($bound -and $waiting) {
+              $matches += [pscustomobject]@{ pane=$pane; session=$session; status=[string]$agent.agent_status; cwd=[string]$agent.cwd; name=[string]$agent.name }
+            }
+          }
+
+          if ($matches.Count -ne 1) {
+            $summary = ($matches | ForEach-Object { "pane=$($_.pane),session=$($_.session),status=$($_.status),name=$($_.name),cwd=$($_.cwd)" }) -join ';'
+            if ([string]::IsNullOrWhiteSpace($summary)) { $summary = 'NONE' }
+            $body = @(
+              'GBB_G13_HERDR_RESULT_RETURN_DOORBELL_RECEIPT_V1',
+              'state: BLOCKED_AMBIGUOUS_TARGET',
+              "source_wake_receipt: $wakeId",
+              "source_result_receipt: $sourceResult",
+              "candidate_count: $($matches.Count)",
+              "candidate_summary: $summary",
+              'physical_prompt_count: 0',
+              'blind_retry_performed: false',
+              "workflow_run_id: $env:GITHUB_RUN_ID",
+              'user_relay_count: 0',
+              'readback_verified: true'
+            ) -join "`n"
+            $null = Publish $body
+            throw "HERDR_WAITING_TARGET_COUNT_$($matches.Count)"
+          }
+
+          $target = $matches[0]
+          $prompt = @"
+WebGPT Control Tower-013 result is now durably available. Do not wait for or resend the previously typed ChatGPT-Web prompt. Exact-GET Issue #162 comment $sourceResult and consume marker $expectedMarker; exact-GET return receipt $sourceReturn and authority $authority. Treat the prior browser send as not delivered. Do not perform a second browser send. Close only the pending recommendations wait/monitor state. Then stop at the already-required Repair-15 fresh independent exact-head GPT-5.6 Sol High review gate for candidate 3aa61ea6c742e3d659e82c44775257e2418e5e54; do not activate Rank 1/2/3 before that review and Control adoption. Publish/read-back one Herdr consume ACK to Issue #162 bound to source_result_receipt $sourceResult, this wake $wakeId, pane $($target.pane), and session $($target.session). No merge/release/workflow dispatch/product mutation from this prompt.
+"@
+
+          $send = (& $herdr agent prompt $target.pane $prompt 2>&1 | Out-String)
+          $sendExit = $LASTEXITCODE
+          if ($sendExit -ne 0) {
+            $body = @(
+              'GBB_G13_HERDR_RESULT_RETURN_DOORBELL_RECEIPT_V1',
+              'state: UNCERTAIN_SEND',
+              "source_wake_receipt: $wakeId",
+              "source_result_receipt: $sourceResult",
+              "target_pane: $($target.pane)",
+              "target_session: $($target.session)",
+              'physical_prompt_invoked: true',
+              'physical_prompt_count: 1',
+              'post_prompt_working_observed: false',
+              'blind_retry_performed: false',
+              "workflow_run_id: $env:GITHUB_RUN_ID",
+              'user_relay_count: 0',
+              'readback_verified: true'
+            ) -join "`n"
+            $null = Publish $body
+            throw "HERDR_PROMPT_EXIT_$sendExit"
+          }
+
+          $working = $false
+          for ($i=0; $i -lt 20; $i++) {
+            Start-Sleep -Seconds 1
+            $nowRaw = (& $herdr agent list 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) { continue }
+            $now = @(($nowRaw | ConvertFrom-Json).result.agents | Where-Object { [string]$_.pane_id -eq $target.pane -and [string]$_.agent_session.value -eq $target.session })
+            if ($now.Count -eq 1 -and [string]$now[0].agent_status -eq 'working') { $working = $true; break }
+          }
+
+          $state = if ($working) { 'DELIVERED' } else { 'UNCERTAIN_SEND' }
+          $body = @(
+            'GBB_G13_HERDR_RESULT_RETURN_DOORBELL_RECEIPT_V1',
+            "state: $state",
+            "source_wake_receipt: $wakeId",
+            "source_result_receipt: $sourceResult",
+            "source_return_receipt: $sourceReturn",
+            "authority_receipt: $authority",
+            "target_pane: $($target.pane)",
+            "target_session: $($target.session)",
+            "target_status_before: $($target.status)",
+            'physical_prompt_invoked: true',
+            'physical_prompt_count: 1',
+            "post_prompt_working_observed: $($working.ToString().ToLowerInvariant())",
+            'second_physical_prompt: false',
+            'blind_retry_performed: false',
+            "workflow_run_id: $env:GITHUB_RUN_ID",
+            'user_relay_count: 0',
+            'readback_verified: true'
+          ) -join "`n"
+          $receipt = Publish $body
+          Write-Output "G13 result-return doorbell state=$state receipt=$receipt target=$($target.pane)"
+          if (-not $working) { throw 'POST_PROMPT_WORKING_NOT_OBSERVED_NO_RETRY' }
