@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -35,6 +35,20 @@ import { CURRENT_COMMENT_READBACK_PROTOCOL, createHerdrPrompter } from "../src/a
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE_ROOT = path.join(REPO_ROOT, "fixtures", "orca");
 const BASE_MS = Date.parse("2026-08-01T01:00:00.000Z");
+
+async function loadTrustedSupervisorForTests() {
+  let source = await readFile(path.join(REPO_ROOT, "src", "supervisor.mjs"), "utf8");
+  for (const relativePath of ["contracts.mjs", "adapters/orca_adapter.mjs", "adapters/herdr_resume.mjs", "morning_summary.mjs"]) {
+    const absolutePath = pathToFileURL(path.join(REPO_ROOT, "src", relativePath)).href;
+    source = source.replaceAll(`from "./${relativePath}"`, `from ${JSON.stringify(absolutePath)}`);
+  }
+  for (const [specifier, relativePath] of [["zod", "node_modules/zod/index.js"], ["write-file-atomic", "node_modules/write-file-atomic/lib/index.js"]]) {
+    source = source.replaceAll(`from "${specifier}"`, `from ${JSON.stringify(pathToFileURL(path.join(REPO_ROOT, relativePath)).href)}`);
+  }
+  return import(`data:text/javascript,${encodeURIComponent(`${source}\nexport { runSupervisorTrusted as runSupervisorTrustedForTests };`)}`);
+}
+
+const trustedSupervisorForTests = await loadTrustedSupervisorForTests();
 
 function projectState(overrides = {}) {
   return {
@@ -84,7 +98,7 @@ function supervisorIdentitySourceFor(authority, hostId = "host-a") {
 }
 
 async function runLoopOnce(ctx) {
-  return (await runSupervisor({ ...ctx, maxIterations: 1 })).lastOutcome;
+  return (await trustedSupervisorForTests.runSupervisorTrustedForTests({ ...ctx, maxIterations: 1 })).lastOutcome;
 }
 
 async function readFixture(name) {
@@ -264,7 +278,6 @@ test("runSupervisor writes and refreshes heartbeat without a real interval", asy
   const result = await runSupervisor({
     runtimeRoot: root,
     orca: quietOrca(),
-    pid: 41004,
     now: () => nowMs,
     sleep: async (ms) => {
       sleeps.push(ms);
@@ -272,15 +285,27 @@ test("runSupervisor writes and refreshes heartbeat without a real interval", asy
     },
     maxIterations: 2,
     intervalMs: 15_000,
-    isAlive: async () => false,
   });
 
   const heartbeat = await readJson(paths.heartbeat);
   assert.equal(result.iterations, 2);
   assert.deepEqual(sleeps, [15_000]);
-  assert.equal(heartbeat.pid, 41004);
+  assert.equal(heartbeat.pid, process.pid);
   assert.equal(Date.parse(heartbeat.at) - Date.parse("2026-08-01T09:00:00+08:00"), 15_000);
   assert.equal(heartbeat.state, "RUNNING");
+  assert.deepEqual(result.lastOutcome.registry.entries, {},
+    "allowed-shape public calls must not reconstruct trusted registry entries");
+  assert.deepEqual(result.lastOutcome.admissionResults, [],
+    "allowed-shape public calls must not reach trusted admission effects");
+  await assert.rejects(readFile(paths.supervisorIdentity, "utf8"), { code: "ENOENT" },
+    "allowed-shape public calls must not create a Supervisor-owned identity source");
+  const supervisorSource = await readFile(path.join(REPO_ROOT, "src", "supervisor.mjs"), "utf8");
+  const publicStart = supervisorSource.indexOf("export async function runSupervisor(ctxIn)");
+  const publicEnd = supervisorSource.indexOf("// ---------------------------------------------------------------------------", publicStart);
+  assert.ok(publicStart >= 0 && publicEnd > publicStart);
+  const publicBody = supervisorSource.slice(publicStart, publicEnd);
+  assert.doesNotMatch(publicBody, /runSupervisorTrusted|runLoopOnceInternal|SUPERVISOR_ENTRYPOINT\s*[,)\]]/,
+    "public runSupervisor must not reach the trusted Supervisor producer");
 });
 
 test("resident GitHub consumer is polled by Supervisor and persists idempotency across ticks", async (t) => {
@@ -3074,7 +3099,7 @@ test("F001: runLoopOnce rejects currentAuthority fence_id mismatch with derived 
 // F001: Same-fence forged pid must be rejected. Acquired lock has fence=1,
 // caller supplies currentAuthority with fence=1 but forged pid; must fail
 // before downstream work.
-test("F001: runLoopOnce rejects same-fence forged pid (authority pid != current process pid)", async (t) => {
+test("F001: runLoopOnce rejects same-fence forged pid before identity-source minting", async (t) => {
   const { root, paths } = await tempRuntime(t);
   await writeFile(paths.state, JSON.stringify(projectState({ state: "RUNNING" })));
   await mkdir(path.dirname(paths.lock), { recursive: true });
@@ -3237,32 +3262,6 @@ test("F001: runLoopOnce rejects a caller-prewritten canonical identity before re
   assert.deepEqual(await readJson(paths.state), projectState(), "project state must not mutate");
 });
 
-test("F001: Supervisor creates and binds the canonical identity after lock acquisition", async (t) => {
-  const { root, paths } = await tempRuntime(t);
-  const authority = {
-    generation: 1, ref: "refs/heads/supervisor", head: "a".repeat(40), tree: "b".repeat(40),
-    worktree: "D:\\worktrees\\supervisor", process: { pid: 41045, started_at: REG_TS },
-    session: { workspace_id: "w-supervisor", pane_id: "p-supervisor", agent_session: "s-supervisor" },
-    lease_id: "lease-supervisor", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
-  };
-  const outcome = await runLoopOnce({
-    runtimeRoot: root,
-    orca: quietOrca(),
-    pid: authority.process.pid,
-    hostId: "host-a",
-    now: () => BASE_MS,
-    isAlive: async () => false,
-    currentAuthority: authority,
-    pendingAdmissions: [],
-  });
-  assert.equal(outcome.stop, false);
-  assert.deepEqual(await readJson(paths.supervisorIdentity), {
-    source: "SUPERVISOR_OWNED",
-    authority,
-    binding: { pid: authority.process.pid, host_id: "host-a", fence: 1, fence_id: "1" },
-  });
-});
-
 test("F001: public supervisor import cannot mint a forged identity source", async (t) => {
   const production = await import("../src/supervisor.mjs");
   assert.equal(production.__testOnly?.createSupervisorIdentitySource, undefined,
@@ -3312,6 +3311,176 @@ test("F001: public supervisor import cannot mint a forged identity source", asyn
   assert.equal(outcome.admissionResults, undefined, "admission must not run");
   await assert.rejects(readFile(paths.heartbeat, "utf8"), { code: "ENOENT" },
     "heartbeat/state mutation must not run");
+});
+
+test("F001: exported runSupervisor rejects caller-selected authority inputs on every import surface", async (t) => {
+  const moduleUrls = [
+    "../src/supervisor.mjs",
+    "../src/supervisor.mjs?testOnly=1",
+    "../src/supervisor.mjs#testOnly=1",
+    "../src/supervisor.mjs?variant=1#testOnly=1",
+  ];
+  const forgedAuthority = {
+    generation: 1, ref: "refs/heads/forged", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\forged", process: { pid: 41046, started_at: REG_TS },
+    session: { workspace_id: "w-forged", pane_id: "p-forged", agent_session: "s-forged" },
+    lease_id: "lease-forged", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
+  const entry = regEntry({
+    card_id: "W-FORGED-RUN-SUPERVISOR-01",
+    generation: forgedAuthority.generation,
+    ref: forgedAuthority.ref,
+    head: forgedAuthority.head,
+    tree: forgedAuthority.tree,
+    worktree: forgedAuthority.worktree,
+    process: forgedAuthority.process,
+    session: forgedAuthority.session,
+    lease_id: forgedAuthority.lease_id,
+    lease_expiry: forgedAuthority.lease_expiry,
+    fence: forgedAuthority.fence,
+    fence_id: forgedAuthority.fence_id,
+  });
+
+  for (const moduleUrl of moduleUrls) {
+    const production = await import(moduleUrl);
+    const { root, paths } = await tempRuntime(t);
+    const beforeState = await readFile(paths.state, "utf8");
+    let resumeCalls = 0;
+    let sendCalls = 0;
+    const result = await production.runSupervisor({
+      runtimeRoot: root,
+      orca: quietOrca({ status: async () => { sendCalls += 1; return { ok: true, state: "ready" }; } }),
+      pid: forgedAuthority.process.pid,
+      hostId: "host-forged",
+      now: () => BASE_MS,
+      isAlive: async () => false,
+      currentAuthority: forgedAuthority,
+      durableReceipts: [entry],
+      liveObservations: [entry],
+      pendingAdmissions: [entry],
+      resumeDelivery: { herdr: { prompt: async () => { resumeCalls += 1; } } },
+      maxIterations: 1,
+    });
+
+    assert.equal(result.iterations, 0, `${moduleUrl} must reject before entering the loop`);
+    assert.deepEqual(result.lastOutcome, {
+      stop: true,
+      reason: "SUPERVISOR_ENTRYPOINT_REQUIRED",
+    });
+    assert.equal(await readFile(paths.state, "utf8"), beforeState, "project state must not mutate");
+    for (const file of [paths.lock, paths.supervisorIdentity, paths.heartbeat, paths.events]) {
+      await assert.rejects(readFile(file, "utf8"), { code: "ENOENT" },
+        `${moduleUrl} must not create ${path.basename(file)}`);
+    }
+    assert.equal(resumeCalls, 0, "forged input must not reach resume delivery");
+    assert.equal(sendCalls, 0, "forged input must not reach downstream send/status");
+  }
+});
+
+test("F001: identity source rejects a byte-identical replacement object", async (t) => {
+  const { root, paths } = await tempRuntime(t);
+  const authority = {
+    generation: 1, ref: "refs/heads/identity", head: "a".repeat(40), tree: "b".repeat(40),
+    worktree: "D:\\worktrees\\identity", process: { pid: 41047, started_at: REG_TS },
+    session: { workspace_id: "w-identity", pane_id: "p-identity", agent_session: "s-identity" },
+    lease_id: "lease-identity", lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+  };
+  const first = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca(),
+    pid: authority.process.pid,
+    hostId: "host-a",
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    currentAuthority: authority,
+  });
+  assert.equal(first.stop, false);
+
+  const originalPath = path.join(root, "state", "supervisor_identity.original.json");
+  const raw = await readFile(paths.supervisorIdentity, "utf8");
+  await rename(paths.supervisorIdentity, originalPath);
+  await writeFile(paths.supervisorIdentity, raw);
+  const beforeHeartbeat = await readFile(paths.heartbeat, "utf8");
+  const beforeState = await readFile(paths.state, "utf8");
+  let resumeCalls = 0;
+  let sendCalls = 0;
+
+  const outcome = await runLoopOnce({
+    runtimeRoot: root,
+    orca: quietOrca({ status: async () => { sendCalls += 1; return { ok: true, state: "ready" }; } }),
+    pid: authority.process.pid,
+    hostId: "host-a",
+    now: () => BASE_MS,
+    isAlive: async () => false,
+    currentAuthority: authority,
+    resumeDelivery: { herdr: { prompt: async () => { resumeCalls += 1; } } },
+  });
+  assert.equal(outcome.stop, false);
+  assert.equal(outcome.reason, "LOCK_AUTHORITY_CURRENT_IDENTITY_SOURCE_REPLACED");
+  assert.equal(await readFile(paths.heartbeat, "utf8"), beforeHeartbeat);
+  assert.equal(await readFile(paths.state, "utf8"), beforeState);
+  assert.equal(resumeCalls, 0);
+  assert.equal(sendCalls, 0);
+});
+
+test("F001: identity source rejects symlink and junction redirection", async (t) => {
+  for (const [kind, linkType] of [["symlink", "file"], ["junction", "junction"]]) {
+    const { root, paths } = await tempRuntime(t);
+    const authority = {
+      generation: 1, ref: `refs/heads/identity-${kind}`, head: "a".repeat(40), tree: "b".repeat(40),
+      worktree: `D:\\worktrees\\identity-${kind}`, process: { pid: kind === "symlink" ? 41048 : 41049, started_at: REG_TS },
+      session: { workspace_id: `w-${kind}`, pane_id: `p-${kind}`, agent_session: `s-${kind}` },
+      lease_id: `lease-${kind}`, lease_expiry: "2026-08-01T10:00:00+08:00", fence: 1, fence_id: "1",
+    };
+    const first = await runLoopOnce({
+      runtimeRoot: root,
+      orca: quietOrca(),
+      pid: authority.process.pid,
+      hostId: "host-a",
+      now: () => BASE_MS,
+      isAlive: async () => false,
+      currentAuthority: authority,
+    });
+    assert.equal(first.stop, false);
+    const raw = await readFile(paths.supervisorIdentity, "utf8");
+    const originalPath = path.join(root, `state/supervisor_identity.${kind}.json`);
+    await rename(paths.supervisorIdentity, originalPath);
+    const target = linkType === "junction" ? path.join(root, `${kind}-target`) : originalPath;
+    if (linkType === "junction") {
+      await mkdir(target);
+      await writeFile(path.join(target, "identity.json"), raw);
+    }
+    try {
+      await symlink(target, paths.supervisorIdentity, linkType);
+    } catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes(error?.code)) {
+        t.diagnostic(`${kind} unsupported: ${error.code}: ${error.message}`);
+        continue;
+      }
+      throw error;
+    }
+
+    const beforeHeartbeat = await readFile(paths.heartbeat, "utf8");
+    const beforeState = await readFile(paths.state, "utf8");
+    let resumeCalls = 0;
+    let sendCalls = 0;
+    const outcome = await runLoopOnce({
+      runtimeRoot: root,
+      orca: quietOrca({ status: async () => { sendCalls += 1; return { ok: true, state: "ready" }; } }),
+      pid: authority.process.pid,
+      hostId: "host-a",
+      now: () => BASE_MS,
+      isAlive: async () => false,
+      currentAuthority: authority,
+      resumeDelivery: { herdr: { prompt: async () => { resumeCalls += 1; } } },
+    });
+    assert.equal(outcome.stop, false);
+    assert.match(outcome.reason, /^LOCK_AUTHORITY_CURRENT_IDENTITY_SOURCE_(?:REPLACED|UNREADABLE)$/);
+    assert.equal(await readFile(paths.heartbeat, "utf8"), beforeHeartbeat);
+    assert.equal(await readFile(paths.state, "utf8"), beforeState);
+    assert.equal(resumeCalls, 0);
+    assert.equal(sendCalls, 0);
+  }
 });
 
 test("F001: every caller-accessible supervisor module surface rejects forged identity provenance", async (t) => {

@@ -19,7 +19,7 @@
 // Agent-task rework counting (§15 "Agent 任務失敗") stays the Control
 // Tower's call per §6.2; Supervisor only forwards the events it needs to see.
 
-import { readFile, appendFile, mkdir, stat, readdir, open } from "node:fs/promises";
+import { readFile, appendFile, mkdir, stat, lstat, readdir, open } from "node:fs/promises";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -263,13 +263,13 @@ async function readLockRecord(lockPath) {
   }
 }
 
-async function createExclusiveJson(filePath, value) {
+async function createExclusiveJson(filePath, value, { retainHandle = false } = {}) {
   let handle;
   try {
     handle = await open(filePath, "wx");
     await handle.writeFile(JSON.stringify(value));
-    await handle.close();
-    return { created: true };
+    if (!retainHandle) await handle.close();
+    return { created: true, handle: retainHandle ? handle : undefined };
   } catch (error) {
     try { await handle?.close(); } catch { /* preserve the original result */ }
     if (error?.code === "EEXIST") return { created: false };
@@ -1931,12 +1931,13 @@ function identitySourceLockDifference(source, lock) {
 async function establishSupervisorIdentitySource(paths, lock, candidateAuthority, callerIdentityInputs, supervisorOwnedEntrypoint) {
   const sourcePath = identitySourcePath(paths);
   const ownershipKey = sourcePath;
-  const ownedRaw = supervisorIdentitySourceOwnership.get(ownershipKey);
+  const owned = supervisorIdentitySourceOwnership.get(ownershipKey);
   let raw;
   try {
     raw = await readFile(sourcePath, "utf8");
   } catch (error) {
     if (error?.code !== "ENOENT") return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_UNREADABLE" };
+    if (owned) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_REPLACED" };
     if (callerIdentityInputs || !supervisorOwnedEntrypoint) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_MISSING" };
     if (!candidateAuthority) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_MISSING" };
     let authority;
@@ -1958,15 +1959,29 @@ async function establishSupervisorIdentitySource(paths, lock, candidateAuthority
     const lockDifference = identitySourceLockDifference(source, lock);
     if (lockDifference) return { ok: false, reason: lockDifference };
     const serialized = JSON.stringify(source);
-    const created = await createExclusiveJson(sourcePath, source);
+    const created = await createExclusiveJson(sourcePath, source, { retainHandle: true });
     if (created.error) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_UNREADABLE" };
     if (!created.created) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_PREEXISTING" };
-    supervisorIdentitySourceOwnership.set(ownershipKey, serialized);
+    supervisorIdentitySourceOwnership.set(ownershipKey, { raw: serialized, handle: created.handle });
     return { ok: true, source: bindSupervisorIdentitySource(source) };
   }
 
-  if (!ownedRaw) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_PREEXISTING" };
-  if (raw !== ownedRaw) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_REPLACED" };
+  if (!owned) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_PREEXISTING" };
+  if (raw !== owned.raw) return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_REPLACED" };
+  let createdStats;
+  let currentStats;
+  try {
+    createdStats = await owned.handle.stat();
+    currentStats = await lstat(sourcePath);
+  } catch {
+    return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_REPLACED" };
+  }
+  if (!createdStats.isFile() || !currentStats.isFile()
+    || createdStats.dev !== currentStats.dev
+    || createdStats.ino !== currentStats.ino
+    || createdStats.birthtimeNs !== currentStats.birthtimeNs) {
+    return { ok: false, reason: "CURRENT_IDENTITY_SOURCE_REPLACED" };
+  }
   let source;
   try {
     source = bindSupervisorIdentitySource(JSON.parse(raw));
@@ -2262,17 +2277,34 @@ export async function runLoopOnce(ctxIn) {
 // pass/rework verdicts. Drives runLoopOnce on an injectable interval;
 // `maxIterations` lets tests run a bounded number of ticks with an instant
 // fake `sleep` instead of a real 15s wait.
-export async function runSupervisor(ctxIn) {
+async function runSupervisorLoop(ctxIn, supervisorOwnedEntrypoint = null) {
   const ctx = normalizeCtx(ctxIn);
   let i = 0;
   let lastOutcome = null;
   while (i < ctx.maxIterations) {
-    lastOutcome = await runLoopOnceInternal(ctx, SUPERVISOR_ENTRYPOINT, true);
+    lastOutcome = await runLoopOnceInternal(ctx, supervisorOwnedEntrypoint, true);
     i += 1;
     if (lastOutcome.stop) break;
     if (i < ctx.maxIterations) await ctx.sleep(ctx.intervalMs);
   }
   return { iterations: i, lastOutcome };
+}
+
+async function runSupervisorTrusted(ctxIn) {
+  return runSupervisorLoop(ctxIn, SUPERVISOR_ENTRYPOINT);
+}
+
+const PUBLIC_SUPERVISOR_INPUTS = new Set(["runtimeRoot", "orca", "now", "sleep", "maxIterations", "intervalMs"]);
+
+export async function runSupervisor(ctxIn) {
+  if (!ctxIn || typeof ctxIn !== "object"
+    || Reflect.ownKeys(ctxIn).some((key) => typeof key !== "string" || !PUBLIC_SUPERVISOR_INPUTS.has(key))) {
+    return {
+      iterations: 0,
+      lastOutcome: { stop: true, reason: "SUPERVISOR_ENTRYPOINT_REQUIRED" },
+    };
+  }
+  return runSupervisorLoop(ctxIn);
 }
 
 // ---------------------------------------------------------------------------
@@ -2319,7 +2351,7 @@ async function main() {
   process.on("SIGTERM", shutdown);
   process.on("exit", () => releaseKeepAwakeSync(scriptPath));
 
-  const result = await runSupervisor({ runtimeRoot, orca });
+  const result = await runSupervisorTrusted({ runtimeRoot, orca });
   console.log(`[exit] GBB supervisor stopped: ${result.lastOutcome?.reason ?? "unknown"}`);
 }
 
