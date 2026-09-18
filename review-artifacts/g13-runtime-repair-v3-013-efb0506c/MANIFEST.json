@@ -1,0 +1,48 @@
+{
+  "artifact_branch": "review-artifacts/g13-runtime-repair-v3-013-efb0506c",
+  "base_parent": "816e493f22240a017ceaf757725d9e689895e870",
+  "generation": "013",
+  "active_conversation": "6aa41339-7b94-83e8-9d24-24de07cf5235",
+  "card_comment_id": "5724990550",
+  "source_ready_comment_id": "5724982485",
+  "consumed_started_comment_id": "5724998499",
+  "source_root": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell",
+  "files": [
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v3-013-efb0506c/watcher.mjs",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/watcher.mjs",
+      "source_sha256": "EFB0506C76852ABA10E9479D36033F65387E3B1C97653E5BB7F23C51C35CF493",
+      "artifact_sha256": "EFB0506C76852ABA10E9479D36033F65387E3B1C97653E5BB7F23C51C35CF493"
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v3-013-efb0506c/config.json",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/config.json",
+      "source_sha256": "002EF70EC12DA7C518600A6BAF65685B242AF47CD108F88CF8E497CB1779A421",
+      "artifact_sha256": "002EF70EC12DA7C518600A6BAF65685B242AF47CD108F88CF8E497CB1779A421"
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v3-013-efb0506c/state.json",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/state.json",
+      "source_sha256": "2D5912B11A20266C78649D2B168424D3FFC74CB34FD7F080323070109328A1DC",
+      "artifact_sha256": "2D5912B11A20266C78649D2B168424D3FFC74CB34FD7F080323070109328A1DC"
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v3-013-efb0506c/run.ps1",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/run.ps1",
+      "source_sha256": "CFB5ADC23A1513BB0FAF23C197046B630444FE3AF0D6A3BAAA3E40C751CEDDD7",
+      "artifact_sha256": "CFB5ADC23A1513BB0FAF23C197046B630444FE3AF0D6A3BAAA3E40C751CEDDD7"
+    }
+  ],
+  "exact_paths": [
+    "review-artifacts/g13-runtime-repair-v3-013-efb0506c/watcher.mjs",
+    "review-artifacts/g13-runtime-repair-v3-013-efb0506c/config.json",
+    "review-artifacts/g13-runtime-repair-v3-013-efb0506c/state.json",
+    "review-artifacts/g13-runtime-repair-v3-013-efb0506c/run.ps1",
+    "review-artifacts/g13-runtime-repair-v3-013-efb0506c/MANIFEST.json"
+  ],
+  "no_secrets_scan": {
+    "result": "PASS",
+    "scope": "exact_artifact_files",
+    "method": "bounded_literal_secret_pattern_scan"
+  }
+}
