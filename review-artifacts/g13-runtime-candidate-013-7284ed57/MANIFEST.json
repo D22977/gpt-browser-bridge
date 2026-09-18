@@ -1,0 +1,84 @@
+{
+  "manifest_schema": "G13_EVIDENCE_ARTIFACT_MANIFEST_V1",
+  "artifact_branch": "review-artifacts/g13-runtime-candidate-013-7284ed57",
+  "artifact_paths": [
+    "review-artifacts/g13-runtime-candidate-013-7284ed57/watcher.mjs",
+    "review-artifacts/g13-runtime-candidate-013-7284ed57/config.json",
+    "review-artifacts/g13-runtime-candidate-013-7284ed57/state.json",
+    "review-artifacts/g13-runtime-candidate-013-7284ed57/run.ps1",
+    "review-artifacts/g13-runtime-candidate-013-7284ed57/MANIFEST.json"
+  ],
+  "source_root": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell",
+  "files": [
+    {
+      "name": "watcher.mjs",
+      "artifact_path": "review-artifacts/g13-runtime-candidate-013-7284ed57/watcher.mjs",
+      "source_absolute_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/watcher.mjs",
+      "source_sha256": "7284ED572C4B6ECFE4126023E59A974E230A618C5E8D75EBFDB2308C4DDC4B9E",
+      "artifact_sha256": "7284ED572C4B6ECFE4126023E59A974E230A618C5E8D75EBFDB2308C4DDC4B9E",
+      "artifact_blob_sha": "1cfbd3bd884a0415be3e636dee49e1b605967a9f",
+      "byte_length": 21398
+    },
+    {
+      "name": "config.json",
+      "artifact_path": "review-artifacts/g13-runtime-candidate-013-7284ed57/config.json",
+      "source_absolute_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/config.json",
+      "source_sha256": "11D8C98F6DEA58154D438024BBAA2B4A32556D470EC8020A5F082A4271206CAE",
+      "artifact_sha256": "11D8C98F6DEA58154D438024BBAA2B4A32556D470EC8020A5F082A4271206CAE",
+      "artifact_blob_sha": "078e20e94091619595e99b684b9de8aa7d1674f3",
+      "byte_length": 3887
+    },
+    {
+      "name": "state.json",
+      "artifact_path": "review-artifacts/g13-runtime-candidate-013-7284ed57/state.json",
+      "source_absolute_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/state.json",
+      "source_sha256": "3B5BEC627F7EE1D5D4C04864B7AD1E89F5CEB9558DD0B08B60BB94121F887548",
+      "artifact_sha256": "3B5BEC627F7EE1D5D4C04864B7AD1E89F5CEB9558DD0B08B60BB94121F887548",
+      "artifact_blob_sha": "020794f54b7a74c5d6fd99bd151ae8b45b521f24",
+      "byte_length": 898
+    },
+    {
+      "name": "run.ps1",
+      "artifact_path": "review-artifacts/g13-runtime-candidate-013-7284ed57/run.ps1",
+      "source_absolute_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/run.ps1",
+      "source_sha256": "A808DF19651F00272970F13DE5D5734ABD0EB422233461126A750C42F06F7DA2",
+      "artifact_sha256": "A808DF19651F00272970F13DE5D5734ABD0EB422233461126A750C42F06F7DA2",
+      "artifact_blob_sha": "e165bbd43e0308083fb7f43786d1cccc7a58ffe0",
+      "byte_length": 315
+    }
+  ],
+  "base_ref": "refs/heads/review-base/gbb-gh-01",
+  "base_parent": "816e493f22240a017ceaf757725d9e689895e870",
+  "control_generation": "013",
+  "active_control_conversation_id": "6aa41339-7b94-83e8-9d24-24de07cf5235",
+  "card_comment_id": 5723858716,
+  "consumed_started_comment_id": 5723890533,
+  "ready_comment_id": 5723766236,
+  "formal_fail_comment_id": 5723846328,
+  "no_secrets_scan": {
+    "result": "PASS_NO_SECRETS",
+    "scanned_files": [
+      "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/watcher.mjs",
+      "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/config.json",
+      "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/state.json",
+      "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/run.ps1"
+    ],
+    "hit_count": 0,
+    "credentials_or_tokens_found": false
+  },
+  "side_effects": {
+    "default_branch_mutation_count": 0,
+    "runtime_file_mutation_count": 0,
+    "task_mutation_count": 0,
+    "process_start_stop_restart_count": 0,
+    "herdr_prompt_count": 0,
+    "physical_send_count": 0,
+    "browser_send_count": 0,
+    "workflow_dispatch_count": 0,
+    "merge_release_deploy_count": 0,
+    "new_worker_count": 0,
+    "user_relay_count": 0
+  },
+  "exact_source_bytes_copied": true,
+  "default_head_unchanged_at_capture": "816e493f22240a017ceaf757725d9e689895e870"
+}
