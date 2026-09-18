@@ -1,0 +1,141 @@
+{
+  "schema": "CONTROL_DOORBELL_G13_CONFIG_V1",
+  "generation": "013",
+  "repo": "D22977/gpt-browser-bridge",
+  "issue": 162,
+  "runtime_root": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell",
+  "allowed_existing_files": [
+    "watcher.mjs",
+    "config.json",
+    "state.json",
+    "run.ps1"
+  ],
+  "github_read_only": true,
+  "poll_interval_ms": 60000,
+  "authority_sources": {
+    "control_switch": {
+      "issue": 88,
+      "marker": "CONTROL_GENERATION_SWITCH_V1"
+    },
+    "start": {
+      "issue": 43,
+      "marker_prefix": "CURRENT_REHYDRATION_INDEX_"
+    },
+    "registry": {
+      "issue": 81,
+      "marker_prefix": "CURRENT_REGISTRY_INDEX_"
+    },
+    "runtime_rule": "derive_newest_valid_all_three_at_poll_claim_send_and_return"
+  },
+  "control_hint": {
+    "generation": "013",
+    "conversation_id": "6aa41339-7b94-83e8-9d24-24de07cf5235",
+    "conversation_url": "https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhuan-an/c/6aa41339-7b94-83e8-9d24-24de07cf5235",
+    "semantic_authority": "github_issue_88_issue_43_issue_81"
+  },
+  "source_binding": {
+    "activation_comment_id": 5723532623,
+    "implementation_card_comment_id": 5722694009,
+    "architecture_comment_id": 5722657910,
+    "adoption_comment_id": 5723486395,
+    "consumed_started_comment_id": 5723620180
+  },
+  "authorization": {
+    "model": "dynamic_per_event_operational_card",
+    "operational_card_prefix": "GBB_G13_",
+    "allowed_actions": [
+      "wake",
+      "return"
+    ],
+    "action_capabilities": {
+      "wake": "HERDR_SINGLE_PANE_WAKE",
+      "return": "CONTROL_DOORBELL_RETURN"
+    },
+    "recognized_canary_scopes": [
+      "issue162-single-event",
+      "issue162-bounded-pane-canary"
+    ],
+    "source_card": "5729220243",
+    "source_review": "5729202105",
+    "source_authority": "5725452761"
+  },
+  "herdr": {
+    "executable": "C:/Users/Lupun/.herdr/packages/standalone/releases/0.8.2-x86_64-pc-windows-msvc/herdr.exe",
+    "required_version": "0.8.2",
+    "workspace": "w2",
+    "target_rule": "exactly_one_working_codex_pane_with_cwd_C:/WINDOWS/system32",
+    "semantic_control_authority": false
+  },
+  "task": {
+    "name": "GBB_TEMP_CONTROL_DOORBELL",
+    "observed_inventory": {
+      "state": "Ready",
+      "action_executable": "C:/Program Files/PowerShell/7/pwsh.exe",
+      "action_arguments": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/run.ps1"
+      ],
+      "trigger": "AtLogOn:user_D22977/Lupun",
+      "principal": "Lupun:Interactive:Limited",
+      "start_when_available": true,
+      "wake_to_run": false,
+      "multiple_instances": "Parallel",
+      "restart_count": 0,
+      "last_result": 1,
+      "raw_query_sha256": "7BB2FB370B64D2D2F0A455FC961F85AB58E905559BDA17DC3EFF70DFAFD254FC",
+      "raw_xml_sha256": "DB770055F4B66F56A5F3A1C90733DF5DCEAC0654A2E6ED5D2BA3282315BB9228",
+      "canonical_action_sha256": "0C6ECB8F28F25479242D176439D6C70F57C1590394639A89C8684478B7B58E73"
+    },
+    "desired_static_definition": {
+      "task_name": "GBB_TEMP_CONTROL_DOORBELL",
+      "action_executable": "C:/Program Files/PowerShell/7/pwsh.exe",
+      "action_arguments": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/run.ps1"
+      ],
+      "action_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/run.ps1",
+      "trigger": "AtLogOn:user_D22977/Lupun",
+      "principal": "Lupun:Interactive:Limited",
+      "start_when_available": true,
+      "wake_to_run": true,
+      "multiple_instances": "IgnoreNew",
+      "restart_policy": "BOUNDED_AND_EXPLICIT",
+      "mutation_applied": false
+    }
+  },
+  "receipt": {
+    "event_marker": "GBB_G13_BIDIRECTIONAL_WAKE_EVENT_V1",
+    "receipt_marker": "GBB_G13_BIDIRECTIONAL_WAKE_RECEIPT_V1",
+    "state_machine": [
+      "SEEN",
+      "CLAIMED",
+      "SEND_ATTEMPTED",
+      "DELIVERED",
+      "CONSUMED"
+    ],
+    "duplicate": "NO_OP_DUPLICATE",
+    "stale_wrong_multiple_target": "CONTROL_REQUIRED_NO_SEND",
+    "uncertain_send": "NO_BLIND_RETRY"
+  },
+  "transport": {
+    "physical_send": false,
+    "browser_send": false,
+    "process_mutation": false,
+    "task_mutation": false,
+    "workflow_dispatch": false,
+    "repo_mutation": false,
+    "receipt_store": "state.json",
+    "producer_admission_authority": {
+      "issue": 81,
+      "comment_id": "5729213249",
+      "marker": "GBB_G13_TRANSPORT_PRODUCER_ADMISSION_AUTHORITY_V1",
+      "source_registry_authority": "5645734140"
+    }
+  }
+}

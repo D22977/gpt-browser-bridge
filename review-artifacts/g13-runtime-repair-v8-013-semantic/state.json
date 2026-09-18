@@ -1,0 +1,42 @@
+{
+  "schema": "CONTROL_DOORBELL_G13_STATE_V1",
+  "revision": 0,
+  "current_generation": "013",
+  "active_control_conversation_id": "6aa41339-7b94-83e8-9d24-24de07cf5235",
+  "consumer_identity": null,
+  "task_name": "GBB_TEMP_CONTROL_DOORBELL",
+  "runtime_identity": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell",
+  "process_identity": null,
+  "last_successful_poll_at": null,
+  "last_seen_event_id": null,
+  "last_claimed_event_id": null,
+  "last_claimed_at": null,
+  "last_delivered_event_id": null,
+  "last_delivered_at": null,
+  "last_consumed_event_id": null,
+  "last_consumed_at": null,
+  "heartbeat_is_semantic_authority": false,
+  "authority_comment_ids": {
+    "control_switch": "5645732538",
+    "start": "5725452761",
+    "registry": "5645734140"
+  },
+  "lease": null,
+  "records": {},
+  "counters": {
+    "polls": 0,
+    "duplicate_no_ops": 0,
+    "control_required_no_send": 0,
+    "uncertain_send_no_blind_retry": 0
+  },
+  "last_result": "NOT_STARTED",
+  "artifact_state_authority_overlay": true,
+  "source_runtime_untouched": true,
+  "semantic_repair_version": "V8",
+  "source_artifact_commit": "a4ab5cf5fe0fe3aa555126b02e65d2ee4dd3b345",
+  "source_review_comment_id": "5729202105",
+  "source_card_comment_id": "5729220243",
+  "producer_admission_authority_comment_id": "5729213249",
+  "producer_admission_source_registry_authority": "5645734140",
+  "updated_at": null
+}
