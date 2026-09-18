@@ -1,0 +1,57 @@
+{
+  "artifact_branch": "review-artifacts/g13-runtime-repair-v9-013-semantic",
+  "base_parent": "816e493f22240a017ceaf757725d9e689895e870",
+  "generation": "013",
+  "active_conversation": "6aa41339-7b94-83e8-9d24-24de07cf5235",
+  "card_comment_id": "5729495296",
+  "consumed_started_comment_id": "5729519886",
+  "source_review_comment_id": "5729488755",
+  "producer_admission_authority_comment_id": "5729213249",
+  "source_registry_authority_comment_id": "5645734140",
+  "source_v8_artifact_branch": "review-artifacts/g13-runtime-repair-v8-013-semantic",
+  "source_v8_artifact_commit": "90a10daabfd70eddd76c0584935d19dc515b78d8",
+  "source_v8_artifact_tree": "5f5d52ed0ea150ef779fbd400508907435e63765",
+  "source_runtime_untouched": true,
+  "artifact_state_authority_overlay": true,
+  "files": [
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v9-013-semantic/watcher.mjs",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/watcher.mjs",
+      "artifact_sha256": "5AE1D2696925B8C24D93B27721779E3ECC4B52C589E933EBC015C2B6C4D752A2",
+      "byte_length": 83924
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v9-013-semantic/config.json",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/config.json",
+      "artifact_sha256": "3B7D108F42AF66B8430D00973C06CA1E89E3FB34EB865595B01DABBD13E83871",
+      "byte_length": 4790
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v9-013-semantic/state.json",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/state.json",
+      "artifact_sha256": "70D8817C4BFE327E7AB332789EDA2B8DDD7C587353AC49BEF1D58CD019BA5825",
+      "byte_length": 1395
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v9-013-semantic/run.ps1",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/run.ps1",
+      "artifact_sha256": "CFB5ADC23A1513BB0FAF23C197046B630444FE3AF0D6A3BAAA3E40C751CEDDD7",
+      "byte_length": 175
+    }
+  ],
+  "repair": "PRODUCER_AUTHORITY_MARKER_FAMILY_SUPERSESSION_FAIL_CLOSED",
+  "preserved": [
+    "H01",
+    "H03",
+    "M01",
+    "POLL_PERSIST_LEASE_BOUNDARIES",
+    "V8_EXACT_AND_PRODUCER_MATCHING"
+  ],
+  "bounded_scope": {
+    "physical_send": false,
+    "browser_send": false,
+    "task_mutation": false,
+    "workflow_dispatch": false,
+    "merge_release_deploy": false
+  }
+}
