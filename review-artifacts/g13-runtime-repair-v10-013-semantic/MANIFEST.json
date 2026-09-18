@@ -1,0 +1,60 @@
+{
+  "artifact_branch": "review-artifacts/g13-runtime-repair-v10-013-semantic",
+  "base_parent": "816e493f22240a017ceaf757725d9e689895e870",
+  "generation": "013",
+  "active_conversation": "6aa41339-7b94-83e8-9d24-24de07cf5235",
+  "card_comment_id": "5729853244",
+  "consumed_started_comment_id": "5729923960",
+  "source_cross_review_comment_id": "5729846689",
+  "source_v9_card_comment_id": "5729495296",
+  "producer_admission_authority_comment_id": "5729213249",
+  "source_registry_authority_comment_id": "5645734140",
+  "source_v9_artifact_branch": "review-artifacts/g13-runtime-repair-v9-013-semantic",
+  "source_v9_artifact_commit": "01bd57445584850175d143273b3e992705eb9dbe",
+  "source_v9_artifact_tree": "570ad1b55eb048fb2a55d05e5adbbe61835c7a02",
+  "source_runtime_untouched": true,
+  "artifact_state_authority_overlay": true,
+  "files": [
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v10-013-semantic/watcher.mjs",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/watcher.mjs",
+      "artifact_sha256": "4F2767C9F0EDE77E3F8E9591B8B9B5877A4F9DD51D6E267E64F4037B31A10E45",
+      "byte_length": 84703
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v10-013-semantic/config.json",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/config.json",
+      "artifact_sha256": "EBD5DAEC3CE74CE69A5A98CC070A0B87E63A7CC46B3EB6C2CDCBD57FC37C8E0B",
+      "byte_length": 4790
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v10-013-semantic/state.json",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/state.json",
+      "artifact_sha256": "A3657B32759A842FF9259122EC68A342E54EC5B5DE587B909BA58218D9AA43B7",
+      "byte_length": 1396
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v10-013-semantic/run.ps1",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/run.ps1",
+      "artifact_sha256": "CFB5ADC23A1513BB0FAF23C197046B630444FE3AF0D6A3BAAA3E40C751CEDDD7",
+      "byte_length": 175
+    }
+  ],
+  "repair": "EXACT_SOURCE_REGISTRY_BINDING_TO_AUTHORITY_COMMENT_IDS_REGISTRY",
+  "fixture": "CURRENT_REGISTRY_INDEX_V19_5645734140",
+  "preserved": [
+    "H01",
+    "H03",
+    "M01",
+    "POLL_PERSIST_LEASE_BOUNDARIES",
+    "V8_EXACT_AND_PRODUCER_MATCHING",
+    "V9_MARKER_FAMILY_SUPERSESSION_FAIL_CLOSED"
+  ],
+  "bounded_scope": {
+    "physical_send": false,
+    "browser_send": false,
+    "task_mutation": false,
+    "workflow_dispatch": false,
+    "merge_release_deploy": false
+  }
+}
