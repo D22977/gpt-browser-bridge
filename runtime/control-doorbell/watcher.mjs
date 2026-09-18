@@ -1591,9 +1591,13 @@ async function selfTest() {
     readConfig: async () => config,
     readState: async () => JSON.parse(JSON.stringify(memoryState)),
     persistState: async (next, revision, identity) => {
-      const persisted = await persistState(next, revision, identity, { read: async () => JSON.parse(JSON.stringify(memoryState)), write: async (value) => { memoryState = JSON.parse(JSON.stringify(value)); } });
-      memorySnapshots.push(JSON.parse(JSON.stringify(persisted)));
-      return persisted;
+      if (identity && memoryState.lease && (memoryState.lease.owner_id !== identity.owner_id || memoryState.lease.lease_token !== identity.lease_token)) {
+        throw new Error("CONTROL_REQUIRED_SINGLE_INSTANCE");
+      }
+      if (revision !== memoryState.revision) throw new Error("CONTROL_REQUIRED_SINGLE_INSTANCE");
+      memoryState = { ...next, revision: revision + 1 };
+      memorySnapshots.push(JSON.parse(JSON.stringify(memoryState)));
+      return memoryState;
     },
     acquireGuard: async () => ({ renew: async () => { guardRenewals += 1; }, release: async () => { guardReleases += 1; } }),
     readAuthority: async () => authority,
@@ -1679,6 +1683,22 @@ async function selfTest() {
   const duplicateRegistrySnapshot = coherentSnapshotFor(authority, [{ id: "5645734141", ...metaFixture(81), body: `CURRENT_REGISTRY_INDEX_V20\ncontrol_generation=${GENERATION}\ncontrol_generation=${GENERATION}\ncontrol_conversation_id=${authority.conversationId}` }]);
   await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotV19, duplicateRegistrySnapshot]);
   await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotV19, new Error(NO_SEND)]);
+
+  const registryV21 = { id: "5645734142", ...metaFixture(81), body: `CURRENT_REGISTRY_INDEX_V21\ncontrol_generation=${GENERATION}\ncontrol_conversation_id=${authority.conversationId}` };
+  const authorityV21 = { ...authority, comment_ids: { ...authority.comment_ids, registry: "5645734142" } };
+  const snapshotB = {
+    authority: authorityV20,
+    switchComments: authorityComments.controlSwitch,
+    startComments: authorityComments.start,
+    registryComments: [...authorityComments.registry, registryV20, producerV20]
+  };
+  const snapshotC = {
+    authority: authorityV21,
+    switchComments: authorityComments.controlSwitch,
+    startComments: authorityComments.start,
+    registryComments: [...authorityComments.registry, registryV21, producerAuthorityRaw]
+  };
+  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotB, snapshotC]);
 
   const mutexName = `Local\\GBB_G13_SELFTEST_${process.pid}_${Date.now()}`;
   const guardA = await acquireSingletonGuard({ mutexName, timeoutMs: 3000 });
