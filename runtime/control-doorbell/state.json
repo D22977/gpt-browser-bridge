@@ -32,10 +32,10 @@
   "last_result": "NOT_STARTED",
   "artifact_state_authority_overlay": true,
   "source_runtime_untouched": true,
-  "semantic_repair_version": "V13",
-  "source_artifact_commit": "0706216dc590b3dad55b984879e66a082b00e522",
+  "semantic_repair_version": "V14",
+  "source_artifact_commit": "79998972c01c771542fd43decc53f942d47e67d1",
   "source_review_comment_id": "5730584137",
-  "source_card_comment_id": "5730598863",
+  "source_card_comment_id": "5731159192",
   "producer_admission_authority_comment_id": "5729213249",
   "producer_admission_source_registry_authority": "5645734140",
   "updated_at": null

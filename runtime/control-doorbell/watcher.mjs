@@ -1632,7 +1632,7 @@ async function selfTest() {
   });
   const registryV20 = { id: "5645734141", ...metaFixture(81), body: `CURRENT_REGISTRY_INDEX_V20\ncontrol_generation=${GENERATION}\ncontrol_conversation_id=${authority.conversationId}` };
   const authorityV20 = { ...authority, comment_ids: { ...authority.comment_ids, registry: "5645734141" } };
-  const producerV20 = { ...producerAuthorityRaw, id: "5729213251", body: producerAuthorityRaw.body.replace("source_registry_authority=5645734140", "source_registry_authority=5645734141") };
+  const producerV20 = { ...producerAuthorityRaw, body: producerAuthorityRaw.body.replace("source_registry_authority=5645734140", "source_registry_authority=5645734141") };
   const snapshotV20 = {
     authority: authorityV20,
     switchComments: authorityComments.controlSwitch,
@@ -1662,6 +1662,9 @@ async function selfTest() {
     };
     await assert.rejects(() => pollOnce(sequenceHarness), /CONTROL_REQUIRED_NO_SEND/);
     assert.deepEqual(sequenceState.records, {});
+    assert.equal(Object.values(sequenceState.records).some((record) => ["DELIVERED", "CONSUMED"].includes(record.state)), false);
+    assert.equal(sequenceState.last_delivered_event_id, null);
+    assert.equal(sequenceState.last_consumed_event_id, null);
     assert.equal(releases, 1);
   };
   const snapshotV19 = coherentSnapshotFor();
@@ -1669,10 +1672,13 @@ async function selfTest() {
   await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotV19, snapshotV20]);
   await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotV19, coherentSnapshotFor(authority, [producerRevoke])]);
   await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, new Error(NO_SEND)]);
+  const missingRegistrySnapshot = { ...snapshotV19, registryComments: [producerAuthorityRaw] };
+  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotV19, missingRegistrySnapshot]);
   const malformedRegistrySnapshot = coherentSnapshotFor(authority, [{ id: "5645734141", ...metaFixture(81), body: `CURRENT_REGISTRY_INDEX_V20\ncontrol_generation=${GENERATION}` }]);
-  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, malformedRegistrySnapshot]);
+  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotV19, malformedRegistrySnapshot]);
   const duplicateRegistrySnapshot = coherentSnapshotFor(authority, [{ id: "5645734141", ...metaFixture(81), body: `CURRENT_REGISTRY_INDEX_V20\ncontrol_generation=${GENERATION}\ncontrol_generation=${GENERATION}\ncontrol_conversation_id=${authority.conversationId}` }]);
-  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, duplicateRegistrySnapshot]);
+  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotV19, duplicateRegistrySnapshot]);
+  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotV19, new Error(NO_SEND)]);
 
   const mutexName = `Local\\GBB_G13_SELFTEST_${process.pid}_${Date.now()}`;
   const guardA = await acquireSingletonGuard({ mutexName, timeoutMs: 3000 });
