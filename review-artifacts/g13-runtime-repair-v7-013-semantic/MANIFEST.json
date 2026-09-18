@@ -1,0 +1,54 @@
+{
+  "artifact_branch": "review-artifacts/g13-runtime-repair-v7-013-semantic",
+  "base_parent": "816e493f22240a017ceaf757725d9e689895e870",
+  "generation": "013",
+  "active_conversation": "6aa41339-7b94-83e8-9d24-24de07cf5235",
+  "card_comment_id": "5728873665",
+  "consumed_started_comment_id": "5728909243",
+  "source_review_comment_id": "5728864115",
+  "source_v6_artifact_branch": "review-artifacts/g13-runtime-repair-v6-013-semantic",
+  "source_v6_artifact_commit": "defe889adca4479e1a5790e51e8a99fca2aac103",
+  "source_v6_artifact_tree": "a421a2fe7305e998d8527a85b2ebf02f460d0a7b",
+  "source_authority_comment_id": "5725452761",
+  "source_runtime_untouched": true,
+  "artifact_state_authority_overlay": true,
+  "files": [
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v7-013-semantic/watcher.mjs",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/watcher.mjs",
+      "artifact_sha256": "8F31C170ECE8490CD3CF64B1CD2C6DBE198C597224970DF9F687A548211E36BD",
+      "byte_length": 69327
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v7-013-semantic/config.json",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/config.json",
+      "artifact_sha256": "4416B4F32C9D6AD914FB60D42574C7965B7BAE9B8B30CA683EAB3894D3BDEF80",
+      "byte_length": 4861
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v7-013-semantic/state.json",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/state.json",
+      "artifact_sha256": "C21FFF48DAF62F66C1108078F0EEE09D8C689528D55B3865386ED96AF25698A7",
+      "byte_length": 1272
+    },
+    {
+      "artifact_path": "review-artifacts/g13-runtime-repair-v7-013-semantic/run.ps1",
+      "source_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/run.ps1",
+      "artifact_sha256": "CFB5ADC23A1513BB0FAF23C197046B630444FE3AF0D6A3BAAA3E40C751CEDDD7",
+      "byte_length": 175
+    }
+  ],
+  "repairs": [
+    "H01_LATEST_MATCHING_OWNER_INVALID_BLOCKS_FALLBACK",
+    "H02_ADMITTED_TRANSPORT_PRODUCER_IDENTITY",
+    "H03_EXACT_OPERATIONAL_CAPABILITY_AND_RECOGNIZED_SCOPE",
+    "M01_PERSISTED_PHASE_CAUSAL_ORDER"
+  ],
+  "bounded_scope": {
+    "physical_send": false,
+    "browser_send": false,
+    "task_mutation": false,
+    "workflow_dispatch": false,
+    "merge_release_deploy": false
+  }
+}
