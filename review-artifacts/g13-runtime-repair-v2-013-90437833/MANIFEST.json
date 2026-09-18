@@ -1,0 +1,53 @@
+{
+  "schema": "GBB_G13_EVIDENCE_ARTIFACT_MANIFEST_V2",
+  "generation": "013",
+  "active_control_conversation_id": "6aa41339-7b94-83e8-9d24-24de07cf5235",
+  "card_comment_id": "5724751582",
+  "source_runtime_v2_ready_comment_id": "5724740526",
+  "source_runtime_v2_consumed_started_comment_id": "5724554354",
+  "refresh_consumed_started_comment_id": "5724768989",
+  "source_prior_formal_fail_comment_id": "5724531908",
+  "default_ref": "refs/heads/review-base/gbb-gh-01",
+  "default_head": "816e493f22240a017ceaf757725d9e689895e870",
+  "artifact_branch": "review-artifacts/g13-runtime-repair-v2-013-90437833",
+  "base_parent": "816e493f22240a017ceaf757725d9e689895e870",
+  "artifact_paths": [
+    "review-artifacts/g13-runtime-repair-v2-013-90437833/watcher.mjs",
+    "review-artifacts/g13-runtime-repair-v2-013-90437833/config.json",
+    "review-artifacts/g13-runtime-repair-v2-013-90437833/state.json",
+    "review-artifacts/g13-runtime-repair-v2-013-90437833/run.ps1",
+    "review-artifacts/g13-runtime-repair-v2-013-90437833/MANIFEST.json"
+  ],
+  "files": [
+    {
+      "path": "review-artifacts/g13-runtime-repair-v2-013-90437833/watcher.mjs",
+      "source_absolute_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/watcher.mjs",
+      "source_sha256": "90437833FFC89FBED7D37ACBB420527B9F7133E05469173DA0C7DFBA72170F17",
+      "artifact_sha256": "90437833FFC89FBED7D37ACBB420527B9F7133E05469173DA0C7DFBA72170F17"
+    },
+    {
+      "path": "review-artifacts/g13-runtime-repair-v2-013-90437833/config.json",
+      "source_absolute_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/config.json",
+      "source_sha256": "002EF70EC12DA7C518600A6BAF65685B242AF47CD108F88CF8E497CB1779A421",
+      "artifact_sha256": "002EF70EC12DA7C518600A6BAF65685B242AF47CD108F88CF8E497CB1779A421"
+    },
+    {
+      "path": "review-artifacts/g13-runtime-repair-v2-013-90437833/state.json",
+      "source_absolute_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/state.json",
+      "source_sha256": "2D5912B11A20266C78649D2B168424D3FFC74CB34FD7F080323070109328A1DC",
+      "artifact_sha256": "2D5912B11A20266C78649D2B168424D3FFC74CB34FD7F080323070109328A1DC"
+    },
+    {
+      "path": "review-artifacts/g13-runtime-repair-v2-013-90437833/run.ps1",
+      "source_absolute_path": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/run.ps1",
+      "source_sha256": "CFB5ADC23A1513BB0FAF23C197046B630444FE3AF0D6A3BAAA3E40C751CEDDD7",
+      "artifact_sha256": "CFB5ADC23A1513BB0FAF23C197046B630444FE3AF0D6A3BAAA3E40C751CEDDD7"
+    }
+  ],
+  "no_secrets_scan": {
+    "result": "PASS",
+    "scope": "the four artifact source files",
+    "patterns": ["ghp_", "github_pat_", "BEGIN PRIVATE KEY", "Authorization: Bearer", "session_token", "cookie"],
+    "credentials_or_tokens_found": false
+  }
+}
