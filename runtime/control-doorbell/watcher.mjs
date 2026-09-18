@@ -1227,7 +1227,7 @@ async function pollOnce(harness) {
     for (const receipt of receipts.sort((a, b) => Number(a.comment_id) - Number(b.comment_id))) {
       const key = receipt.fields.logical_event_id;
       state = await renewAtBoundary(state, identity, io);
-      authority = await io.readAuthority();
+      const snapshotA = await io.readAuthoritySnapshot();
       let enrichedReceipt = receipt;
       if (["DELIVERED", "CONSUMED"].includes(receipt.fields.receipt_state)) {
         try {
@@ -1240,13 +1240,15 @@ async function pollOnce(harness) {
         } catch { /* fail closed in validateReceipt */ }
       }
       state = await renewAtBoundary(state, identity, io);
-      authoritySnapshot = await io.readAuthoritySnapshot();
-      authority = authoritySnapshot.authority;
-      producerAuthority = resolveProducerFromAuthoritySnapshot(authoritySnapshot);
-      verifiedSnapshot = await io.readAuthoritySnapshot();
-      if (!sameAuthorityTuple(authority, verifiedSnapshot.authority)) throw new Error(NO_SEND);
-      authority = verifiedSnapshot.authority;
-      const result = key ? mergeReceipt(records, enrichedReceipt, authority, io.now(), producerAuthority) : { outcome: NO_SEND, record: null };
+      const snapshotB = await io.readAuthoritySnapshot();
+      if (!sameAuthorityTuple(snapshotA.authority, snapshotB.authority)) throw new Error(NO_SEND);
+      resolveProducerFromAuthoritySnapshot(snapshotB);
+      const snapshotC = await io.readAuthoritySnapshot();
+      if (!sameAuthorityTuple(snapshotB.authority, snapshotC.authority)) throw new Error(NO_SEND);
+      const producerAuthorityC = resolveProducerFromAuthoritySnapshot(snapshotC);
+      if (JSON.stringify(resolveProducerFromAuthoritySnapshot(snapshotB)) !== JSON.stringify(producerAuthorityC)) throw new Error(NO_SEND);
+      authority = snapshotC.authority;
+      const result = key ? mergeReceipt(records, enrichedReceipt, authority, io.now(), producerAuthorityC) : { outcome: NO_SEND, record: null };
       if (result.record) {
         if (result.record.logical_event_id !== key) throw new Error(NO_SEND);
         records[key] = result.record;
@@ -1621,6 +1623,56 @@ async function selfTest() {
   assert.equal(Object.keys(memoryState.records).every((key) => key === memoryState.records[key].logical_event_id), true);
   assert.ok(guardRenewals > 0);
   assert.equal(guardReleases, 1);
+
+  const coherentSnapshotFor = (snapshotAuthority = authority, extraRegistry = []) => ({
+    authority: snapshotAuthority,
+    switchComments: authorityComments.controlSwitch,
+    startComments: authorityComments.start,
+    registryComments: [...authorityComments.registry, producerAuthorityRaw, ...extraRegistry]
+  });
+  const registryV20 = { id: "5645734141", ...metaFixture(81), body: `CURRENT_REGISTRY_INDEX_V20\ncontrol_generation=${GENERATION}\ncontrol_conversation_id=${authority.conversationId}` };
+  const authorityV20 = { ...authority, comment_ids: { ...authority.comment_ids, registry: "5645734141" } };
+  const producerV20 = { ...producerAuthorityRaw, id: "5729213251", body: producerAuthorityRaw.body.replace("source_registry_authority=5645734140", "source_registry_authority=5645734141") };
+  const snapshotV20 = {
+    authority: authorityV20,
+    switchComments: authorityComments.controlSwitch,
+    startComments: authorityComments.start,
+    registryComments: [...authorityComments.registry, registryV20, producerV20]
+  };
+  const producerRevoke = { id: "5729213252", ...metaFixture(81), body: `GBB_G13_TRANSPORT_PRODUCER_ADMISSION_REVOKE_V1\nrevokes_comment_id=${PRODUCER_ADMISSION_COMMENT_ID}` };
+  const runSequencedFailure = async (sequence) => {
+    let sequenceState = JSON.parse(JSON.stringify(baseState));
+    let sequenceIndex = 0;
+    let releases = 0;
+    const sequenceHarness = {
+      ...harness,
+      readState: async () => JSON.parse(JSON.stringify(sequenceState)),
+      persistState: async (next, revision, identity) => persistState(next, revision, identity, {
+        read: async () => JSON.parse(JSON.stringify(sequenceState)),
+        write: async (value) => { sequenceState = JSON.parse(JSON.stringify(value)); }
+      }),
+      acquireGuard: async () => ({ renew: async () => {}, release: async () => { releases += 1; } }),
+      readAuthoritySnapshot: async () => {
+        const value = sequence[Math.min(sequenceIndex, sequence.length - 1)];
+        sequenceIndex += 1;
+        if (value instanceof Error) throw value;
+        return value;
+      },
+      fetchComments: async () => [deliveredRaw]
+    };
+    await assert.rejects(() => pollOnce(sequenceHarness), /CONTROL_REQUIRED_NO_SEND/);
+    assert.deepEqual(sequenceState.records, {});
+    assert.equal(releases, 1);
+  };
+  const snapshotV19 = coherentSnapshotFor();
+  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotV20]);
+  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotV19, snapshotV20]);
+  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, snapshotV19, coherentSnapshotFor(authority, [producerRevoke])]);
+  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, new Error(NO_SEND)]);
+  const malformedRegistrySnapshot = coherentSnapshotFor(authority, [{ id: "5645734141", ...metaFixture(81), body: `CURRENT_REGISTRY_INDEX_V20\ncontrol_generation=${GENERATION}` }]);
+  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, malformedRegistrySnapshot]);
+  const duplicateRegistrySnapshot = coherentSnapshotFor(authority, [{ id: "5645734141", ...metaFixture(81), body: `CURRENT_REGISTRY_INDEX_V20\ncontrol_generation=${GENERATION}\ncontrol_generation=${GENERATION}\ncontrol_conversation_id=${authority.conversationId}` }]);
+  await runSequencedFailure([snapshotV19, snapshotV19, snapshotV19, duplicateRegistrySnapshot]);
 
   const mutexName = `Local\\GBB_G13_SELFTEST_${process.pid}_${Date.now()}`;
   const guardA = await acquireSingletonGuard({ mutexName, timeoutMs: 3000 });
