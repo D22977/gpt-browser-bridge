@@ -1032,8 +1032,12 @@ async function persistState(state, expectedRevision, identity, storage = null) {
   const current = assertState(await read());
   const initialAcquire = expectedRevision === 0 && current.revision === 0 &&
     state.lease?.owner_id === identity?.owner_id && state.lease?.lease_token === identity?.lease_token;
+  const leaseReclaimable = !current.lease || !processIsAlive(current.lease.pid) ||
+    current.lease.expires_at <= new Date().toISOString();
   if (current.revision !== expectedRevision ||
-      (!initialAcquire && identity && (!current.lease || current.lease.owner_id !== identity.owner_id || current.lease.lease_token !== identity.lease_token))) {
+      (!initialAcquire && identity &&
+       (current.lease?.owner_id !== identity.owner_id || current.lease?.lease_token !== identity.lease_token) &&
+       !leaseReclaimable)) {
     throw new Error("CONTROL_REQUIRED_SINGLE_INSTANCE");
   }
   const next = { ...state, revision: expectedRevision + 1 };
@@ -1622,6 +1626,23 @@ async function selfTest() {
   assert.equal(prepareInitialLease({ revision: 0, lease: null }, "2026-09-18T00:00:00.000Z", identityForTest("first", "host", 1)).lease.owner_id, "first");
   assert.throws(() => prepareLease({ revision: 1, lease: { owner_id: "other", host: "other", pid: process.pid, expires_at: "2099-01-01T00:00:00.000Z" } }, "2026-09-18T00:00:00.000Z", identityForTest("self", "self", process.pid)), /CONTROL_REQUIRED_SINGLE_INSTANCE/);
   assert.doesNotThrow(() => prepareLease({ revision: 1, lease: { owner_id: "other", host: "other", pid: process.pid, expires_at: "2020-01-01T00:00:00.000Z" } }, "2026-09-18T00:00:00.000Z", identityForTest("self", "self", process.pid)));
+  const staleLeaseIdentity = identityForTest("replacement", "self", process.pid);
+  let staleLeaseState = {
+    schema: "CONTROL_DOORBELL_G13_STATE_V1", revision: 1, records: {},
+    counters: { polls: 0, duplicate_no_ops: 0, control_required_no_send: 0, uncertain_send_no_blind_retry: 0 },
+    lease: { owner_id: "dead", host: "old", pid: 999999, expires_at: "2099-01-01T00:00:00.000Z" }
+  };
+  const staleLeaseNext = { ...staleLeaseState, lease: { ...staleLeaseIdentity, expires_at: "2099-01-01T00:00:00.000Z" } };
+  await assert.doesNotReject(() => persistState(staleLeaseNext, 1, staleLeaseIdentity, {
+    read: async () => staleLeaseState,
+    write: async (value) => { staleLeaseState = value; }
+  }));
+  assert.equal(staleLeaseState.revision, 2);
+  const liveLeaseState = { ...staleLeaseState, revision: 1, lease: { ...identityForTest("live", "self", process.pid), expires_at: "2099-01-01T00:00:00.000Z" } };
+  await assert.rejects(() => persistState({ ...liveLeaseState, lease: staleLeaseNext.lease }, 1, staleLeaseIdentity, {
+    read: async () => liveLeaseState,
+    write: async () => {}
+  }), /CONTROL_REQUIRED_SINGLE_INSTANCE/);
   assert.throws(() => renewLease({ lease: { ...identityForTest("self", "self", process.pid), expires_at: "2020-01-01T00:00:00.000Z" } }, "2026-09-18T00:00:00.000Z", identityForTest("self", "self", process.pid)), /CONTROL_REQUIRED_SINGLE_INSTANCE/);
 
   const sendFields = { ...eventFields, receipt_state: "SEND_ATTEMPTED", actor_type: "HERDR", actor_id: "w2:p1", destination_type: "HERDR", destination_id: "w2:p1", readback_verified: "true" };
