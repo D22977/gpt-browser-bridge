@@ -844,7 +844,6 @@ function makeGuard(child, timeoutMs, fail) {
   let released = false;
   let renewing = false;
   let pending = null;
-  let expiresAt = Date.now() + timeoutMs;
   const stdout = child.stdout;
   const bufferState = { buffer: "" };
   const onData = (chunk) => {
@@ -857,7 +856,6 @@ function makeGuard(child, timeoutMs, fail) {
         const request = pending;
         pending = null;
         renewing = false;
-        expiresAt = Date.now() + timeoutMs;
         request.resolve();
       }
     }
@@ -865,7 +863,7 @@ function makeGuard(child, timeoutMs, fail) {
   stdout.on("data", onData);
   return {
     async renew() {
-      if (released || Date.now() >= expiresAt || renewing) throw new Error("CONTROL_REQUIRED_SINGLE_INSTANCE");
+      if (released || renewing || child.exitCode !== null) throw new Error("CONTROL_REQUIRED_SINGLE_INSTANCE");
       renewing = true;
       child.stdin.write("PING\n");
       await new Promise((resolve, reject) => {
