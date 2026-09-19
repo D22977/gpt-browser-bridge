@@ -769,7 +769,7 @@ function spawnJsonInput(executable, args, input) {
 
 function acquireSingletonGuard(options = {}) {
   const mutexName = options.mutexName || "Local\\GBB_G13_CONTROL_DOORBELL_013_V2";
-  const timeoutMs = options.timeoutMs || 5000;
+  const timeoutMs = options.timeoutMs || 30000;
   const script = [
     "$m = [System.Threading.Mutex]::new($false, '" + mutexName + "');",
     "if (-not $m.WaitOne(0)) { [Console]::Out.WriteLine('BUSY'); [Console]::Out.Flush(); exit 17 };",
