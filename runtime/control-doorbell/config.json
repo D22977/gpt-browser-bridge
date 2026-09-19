@@ -10,7 +10,7 @@
     "state.json",
     "run.ps1"
   ],
-  "github_read_only": true,
+  "github_read_only": false,
   "poll_interval_ms": 60000,
   "authority_sources": {
     "control_switch": {
@@ -124,7 +124,8 @@
     "uncertain_send": "NO_BLIND_RETRY"
   },
   "transport": {
-    "physical_send": false,
+    "physical_send": true,
+    "receipt_write": true,
     "browser_send": false,
     "process_mutation": false,
     "task_mutation": false,

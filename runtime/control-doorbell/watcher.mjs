@@ -64,6 +64,10 @@ function parseFields(body) {
   return { marker, fields, duplicates };
 }
 
+function formatFields(marker, fields) {
+  return [marker, ...Object.entries(fields).map(([key, value]) => `${key}=${value}`)].join("\n");
+}
+
 function parseDurableComment(comment) {
   const parsed = parseFields(comment.body);
   if (![EVENT_MARKER, RECEIPT_MARKER, OBSERVATION_MARKER, ACK_MARKER].includes(parsed.marker)) return null;
@@ -743,6 +747,26 @@ function spawnJson(executable, args) {
   });
 }
 
+function spawnJsonInput(executable, args, input) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) return reject(new Error(stderr.trim() || "WRITE_COMMAND_FAILED"));
+      try {
+        resolve(JSON.parse(stdout));
+      } catch {
+        reject(new Error("WRITE_COMMAND_NOT_JSON"));
+      }
+    });
+    child.stdin.end(input, "utf8");
+  });
+}
+
 function acquireSingletonGuard(options = {}) {
   const mutexName = options.mutexName || "Local\\GBB_G13_CONTROL_DOORBELL_013_V2";
   const timeoutMs = options.timeoutMs || 5000;
@@ -882,6 +906,19 @@ async function githubGetComment(commentId) {
   return githubGet("repos/" + REPO + "/issues/comments/" + commentId);
 }
 
+async function githubPostIssueComment(body) {
+  return spawnJsonInput("gh.exe", [
+    "api",
+    "repos/" + REPO + "/issues/" + ISSUE + "/comments",
+    "--method",
+    "POST",
+    "--header",
+    "Accept: application/vnd.github+json",
+    "--input",
+    "-"
+  ], JSON.stringify({ body }));
+}
+
 async function fetchIssueComments(issue) {
   const comments = [];
   for (let page = 1; page <= 20; page += 1) {
@@ -1015,8 +1052,9 @@ function assertConfig(config) {
   assert.deepEqual(config.allowed_existing_files, expectedFiles);
   assert.equal(config.repo, REPO);
   assert.equal(String(config.issue), String(ISSUE));
-  assert.equal(config.github_read_only, true);
-  assert.equal(config.transport.physical_send, false);
+  assert.equal(config.github_read_only, false);
+  assert.equal(config.transport.physical_send, true);
+  assert.equal(config.transport.receipt_write, true);
   assert.equal(config.transport.browser_send, false);
   assert.equal(config.transport.process_mutation, false);
   assert.equal(config.transport.task_mutation, false);
@@ -1158,6 +1196,8 @@ function productionIo() {
     fetchComments: () => fetchIssueComments(ISSUE),
     fetchProducerAuthorityComments: () => fetchIssueComments(PRODUCER_ADMISSION_ISSUE),
     fetchComment: (id) => githubGetComment(id),
+    createIssueComment: (body) => githubPostIssueComment(body),
+    prompt: (config, target, text) => spawnJson(config.herdr.executable, ["agent", "prompt", target, text]),
     now: nowIso
   };
 }
@@ -1174,6 +1214,85 @@ async function persistSemantic(state, records, authority, identity, io, timestam
   return io.persistState(state, state.revision, identity);
 }
 
+function herdrPromptText(event, target, sendCommentId) {
+  const fields = event.fields || event;
+  return [
+    `Read GitHub directly. This is one bounded G13 inbound wake for Issue #${ISSUE}.`,
+    `source_event_comment_id=${event.comment_id}`,
+    `send_attempted_receipt=${sendCommentId}`,
+    `logical_event_id=${fields.logical_event_id}`,
+    `idempotency_key=${fields.idempotency_key}`,
+    `target_pane=${target.id}`,
+    `target_session=${target.session}`,
+    "Do not resend any browser or ChatGPT prompt, do not mutate product files, and do not merge or release.",
+    `After observing this exact prompt, publish exactly one ${OBSERVATION_MARKER} on Issue #${ISSUE} with logical_event_id, idempotency_key, actor_type=HERDR, actor_id=${target.id}, destination_type=HERDR, destination_id=${target.id}, readback_verified=true, transport_producer_id=herdr-daemon, transport_provenance=HERDR_LOCAL_OBSERVATION. Then wait for the DELIVERED receipt and publish the admitted CONSUMED acknowledgement required by the existing protocol. Stop at the typed terminal.`,
+  ].join("\n");
+}
+
+async function sendHerdrOnce({ event, record, authority, config = null, io }) {
+  if (record?.state === TERMINAL_NO_RETRY || record?.decision === "NO_BLIND_RETRY") {
+    return { outcome: "NO_OP_NO_BLIND_RETRY", record };
+  }
+  const fields = event.fields || event;
+  if (fields.direction !== "A" || fields.exact_target_role !== "HERDR" ||
+      typeof io?.createIssueComment !== "function" || typeof io?.prompt !== "function") {
+    return { outcome: NO_SEND, record: { ...record, decision: NO_SEND, reason: NO_SEND } };
+  }
+
+  const before = await io.readAuthoritySnapshot();
+  const targets = await io.readTargets(config);
+  const after = await io.readAuthoritySnapshot();
+  if (!sameAuthorityTuple(before.authority, after.authority)) throw new Error(NO_SEND);
+  const matches = (targets || []).filter((target) => target.role === "HERDR");
+  if (matches.length !== 1 || matches[0].id !== record.target_id || !nonEmpty(matches[0].session)) throw new Error(NO_SEND);
+  const target = matches[0];
+  const sendBody = formatFields(RECEIPT_MARKER, {
+    logical_event_id: fields.logical_event_id,
+    receipt_state: "SEND_ATTEMPTED",
+    control_generation: after.authority.generation,
+    active_control_conversation_id: after.authority.conversationId,
+    exact_target_role: "HERDR",
+    target_id: target.id,
+    idempotency_key: fields.idempotency_key,
+    actor_type: "HERDR",
+    actor_id: target.id,
+    destination_type: "HERDR",
+    destination_id: target.id,
+    readback_verified: "true"
+  });
+  const posted = await io.createIssueComment(sendBody);
+  const sendReceipt = parseDurableComment(await io.fetchComment(posted.id));
+  if (!sendReceipt || sendReceipt.marker !== RECEIPT_MARKER || sendReceipt.fields.receipt_state !== "SEND_ATTEMPTED" ||
+      sendReceipt.fields.logical_event_id !== fields.logical_event_id || sendReceipt.fields.idempotency_key !== fields.idempotency_key) {
+    throw new Error(NO_SEND);
+  }
+  const attempted = {
+    ...record,
+    state: "SEND_ATTEMPTED",
+    decision: "SEND_ATTEMPTED",
+    reason: null,
+    send_attempted_comment_id: String(sendReceipt.comment_id),
+    send_attempted_at: sendReceipt.created_at || io.now()
+  };
+  try {
+    const result = await io.prompt(config, target.id, herdrPromptText(event, target, sendReceipt.comment_id));
+    const prompted = unwrapHerdr(result);
+    if (prompted?.type !== "agent_prompted" || prompted.agent?.pane_id !== target.id ||
+        prompted.agent?.agent_session?.value !== target.session) throw new Error("PROMPT_IDENTITY_MISMATCH");
+    return { outcome: "SEND_ATTEMPTED", record: { ...attempted, decision: "WAIT_INDEPENDENT_OBSERVATION" } };
+  } catch {
+    return {
+      outcome: "NO_BLIND_RETRY",
+      record: {
+        ...attempted,
+        state: TERMINAL_NO_RETRY,
+        decision: "NO_BLIND_RETRY",
+        reason: "POST_BOUNDARY_AMBIGUOUS"
+      }
+    };
+  }
+}
+
 async function pollOnce(harness) {
   const io = { ...productionIo(), ...(harness || {}) };
   const config = assertConfig(await io.readConfig());
@@ -1182,6 +1301,7 @@ async function pollOnce(harness) {
   const guard = await io.acquireGuard();
   io.guard = guard;
   const initialRevision = state.revision;
+  let physicalSendCount = 0;
   try {
     state = await io.persistState(prepareInitialLease(state, io.now(), identity), initialRevision, identity);
     let authoritySnapshot = await io.readAuthoritySnapshot();
@@ -1217,11 +1337,17 @@ async function pollOnce(harness) {
       const result = fields.logical_event_id
         ? reconcileEvent(event, records, authority, finalTargets, io.now(), card, config.authorization)
         : { outcome: NO_SEND, record: null };
-      if (result.record) {
-        if (result.record.logical_event_id !== fields.logical_event_id) throw new Error(NO_SEND);
-        records[result.record.logical_event_id] = result.record;
+      let sendResult = result;
+      if (result.record?.state === "CLAIMED" && result.outcome === "CLAIMED" &&
+          typeof io.createIssueComment === "function" && typeof io.prompt === "function") {
+        sendResult = await sendHerdrOnce({ event, record: result.record, authority, config, io });
+        if (["SEND_ATTEMPTED", "NO_BLIND_RETRY"].includes(sendResult.outcome)) physicalSendCount += 1;
       }
-      updateCounters(state, result.outcome);
+      if (sendResult.record) {
+        if (sendResult.record.logical_event_id !== fields.logical_event_id) throw new Error(NO_SEND);
+        records[sendResult.record.logical_event_id] = sendResult.record;
+      }
+      updateCounters(state, sendResult.outcome);
       state = await persistSemantic(state, records, authority, identity, io, io.now());
     }
     for (const receipt of receipts.sort((a, b) => Number(a.comment_id) - Number(b.comment_id))) {
@@ -1272,7 +1398,7 @@ async function pollOnce(harness) {
       records: Object.keys(records).length,
       target_count_A: initialHerdrTargets.length,
       target_count_B: finalTargets.length,
-      physical_send_count: 0,
+      physical_send_count: physicalSendCount,
       browser_send_count: 0,
       process_mutation_count: 0,
       task_mutation_count: 0,
@@ -1581,7 +1707,7 @@ async function selfTest() {
   assert.equal(validateReturnTarget({ direction: "B", target_id: "old" }, { conversationId: "new" }).ok, false);
   assert.equal(validateReturnTarget({ direction: "B" }, { conversationId: "new" }).ok, false);
 
-  const baseState = JSON.parse(readFileSync(STATE_PATH, "utf8"));
+  const baseState = { ...JSON.parse(readFileSync(STATE_PATH, "utf8")), revision: 0, lease: null, records: {} };
   const memorySnapshots = [];
   let memoryState = JSON.parse(JSON.stringify(baseState));
   let guardRenewals = 0;
@@ -1607,6 +1733,8 @@ async function selfTest() {
     fetchComments: async () => [eventRaw, sendRaw, observationRaw, deliveredRaw, ackRaw, consumedRaw],
     fetchProducerAuthorityComments: async () => [producerAuthorityRaw],
     fetchComment: async (id) => commentMap.get(String(id)),
+    createIssueComment: undefined,
+    prompt: undefined,
     now: () => "2026-09-18T00:00:00.000Z",
     identity: identityForTest("harness", "host", process.pid)
   };
@@ -1727,14 +1855,19 @@ async function main() {
   } while (loop);
 }
 
-if (process.argv.includes("--self-test")) {
-  selfTest().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
-} else {
-  main().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
+const isMainModule = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+if (isMainModule) {
+  if (process.argv.includes("--self-test")) {
+    selfTest().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+  } else {
+    main().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+  }
 }
+
+export { sendHerdrOnce };
