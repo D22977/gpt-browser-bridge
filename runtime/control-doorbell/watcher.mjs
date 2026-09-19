@@ -1229,24 +1229,35 @@ function herdrPromptText(event, target, sendCommentId) {
   ].join("\n");
 }
 
-async function sendHerdrOnce({ event, record, authority, config = null, io }) {
+async function sendHerdrOnce({ event, record, authority, card = null, config = null, io }) {
   if (record?.state === TERMINAL_NO_RETRY || record?.decision === "NO_BLIND_RETRY") {
     return { outcome: "NO_OP_NO_BLIND_RETRY", record };
   }
   const fields = event.fields || event;
+  const noSend = (reason = NO_SEND) => ({
+    outcome: NO_SEND,
+    record: { ...record, state: "SEEN", decision: NO_SEND, reason }
+  });
   if (fields.direction !== "A" || fields.exact_target_role !== "HERDR" ||
       typeof io?.createIssueComment !== "function" || typeof io?.prompt !== "function") {
-    return { outcome: NO_SEND, record: { ...record, decision: NO_SEND, reason: NO_SEND } };
+    return noSend();
   }
 
   const before = await io.readAuthoritySnapshot();
   const targets = await io.readTargets(config);
   const after = await io.readAuthoritySnapshot();
-  if (!sameAuthorityTuple(before.authority, after.authority)) throw new Error(NO_SEND);
+  if (!authority || !sameAuthorityTuple(authority, before.authority) ||
+      !sameAuthorityTuple(before.authority, after.authority) ||
+      fields.control_generation !== after.authority.generation ||
+      fields.active_control_conversation_id !== after.authority.conversationId ||
+      !card || !validateCardAuthorization(event, after.authority, card, config?.authorization).ok) {
+    return noSend();
+  }
   const matches = (targets || []).filter((target) => target.role === "HERDR");
-  if (matches.length !== 1 || matches[0].id !== record.target_id || !nonEmpty(matches[0].session)) throw new Error(NO_SEND);
+  if (matches.length !== 1 || matches[0].id !== record.target_id || !nonEmpty(matches[0].session)) return noSend();
   const target = matches[0];
   const sendBody = formatFields(RECEIPT_MARKER, {
+    issue: String(ISSUE),
     logical_event_id: fields.logical_event_id,
     receipt_state: "SEND_ATTEMPTED",
     control_generation: after.authority.generation,
@@ -1260,11 +1271,39 @@ async function sendHerdrOnce({ event, record, authority, config = null, io }) {
     destination_id: target.id,
     readback_verified: "true"
   });
-  const posted = await io.createIssueComment(sendBody);
-  const sendReceipt = parseDurableComment(await io.fetchComment(posted.id));
-  if (!sendReceipt || sendReceipt.marker !== RECEIPT_MARKER || sendReceipt.fields.receipt_state !== "SEND_ATTEMPTED" ||
-      sendReceipt.fields.logical_event_id !== fields.logical_event_id || sendReceipt.fields.idempotency_key !== fields.idempotency_key) {
-    throw new Error(NO_SEND);
+  let posted = null;
+  let sendReceipt = null;
+  try {
+    posted = await io.createIssueComment(sendBody);
+    if (!/^[0-9]+$/.test(String(posted?.id || ""))) throw new Error(NO_SEND);
+    sendReceipt = parseDurableComment(await io.fetchComment(posted.id));
+    if (!sendReceipt || sendReceipt.marker !== RECEIPT_MARKER ||
+        sendReceipt.fields.receipt_state !== "SEND_ATTEMPTED" ||
+        sendReceipt.fields.issue !== String(ISSUE) ||
+        sendReceipt.fields.logical_event_id !== fields.logical_event_id ||
+        sendReceipt.fields.idempotency_key !== fields.idempotency_key ||
+        sendReceipt.fields.control_generation !== after.authority.generation ||
+        sendReceipt.fields.active_control_conversation_id !== after.authority.conversationId ||
+        sendReceipt.fields.exact_target_role !== record.target_role ||
+        sendReceipt.fields.target_id !== target.id ||
+        sendReceipt.fields.actor_type !== record.target_role ||
+        sendReceipt.fields.actor_id !== target.id ||
+        sendReceipt.fields.destination_type !== record.target_role ||
+        sendReceipt.fields.destination_id !== target.id ||
+        sendReceipt.fields.readback_verified !== "true" ||
+        !validateReceipt(sendReceipt, after.authority, record).ok) throw new Error(NO_SEND);
+  } catch {
+    return {
+      outcome: "NO_BLIND_RETRY",
+      record: {
+        ...record,
+        state: TERMINAL_NO_RETRY,
+        decision: "NO_BLIND_RETRY",
+        reason: "POST_BOUNDARY_AMBIGUOUS",
+        send_attempted_comment_id: /^[0-9]+$/.test(String(posted?.id || "")) ? String(posted.id) : null,
+        send_attempted_at: io.now()
+      }
+    };
   }
   const attempted = {
     ...record,
@@ -1340,7 +1379,7 @@ async function pollOnce(harness) {
       let sendResult = result;
       if (result.record?.state === "CLAIMED" && result.outcome === "CLAIMED" &&
           typeof io.createIssueComment === "function" && typeof io.prompt === "function") {
-        sendResult = await sendHerdrOnce({ event, record: result.record, authority, config, io });
+        sendResult = await sendHerdrOnce({ event, record: result.record, authority, card, config, io });
         if (["SEND_ATTEMPTED", "NO_BLIND_RETRY"].includes(sendResult.outcome)) physicalSendCount += 1;
       }
       if (sendResult.record) {
