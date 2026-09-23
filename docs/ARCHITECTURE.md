@@ -3,10 +3,31 @@
 This document records the intended architecture, the local environment inventory
 (GBB-001 deliverable) and the skill/instruction loading matrix for each agent CLI.
 
-Authoritative project rules: `plans/GBB_PARENT_WORK_ORDER.md`. This file is a
-living design doc that each card may extend.
+Current semantic authority is the latest applicable GitHub Control/card receipts.
+Start with [AGENTS.md](../AGENTS.md) and [HANDOFF_CONTRACT.md](HANDOFF_CONTRACT.md).
+The parent plan and the ORCA topology below preserve historical implementation
+context; they do not establish current routing, liveness or adoption.
 
-## 1. Overview
+## Current role and loading map
+
+| Reader | Entry | Responsibility |
+| --- | --- | --- |
+| Web GPT Control | [Web runbook](WEB_CONTROL_RUNBOOK.md) + canonical Control skill | GitHub rehydration, bounded decisions, parent completion |
+| Desktop Herdr operator / transport | [Herdr runbook](HERDR_RUNBOOK.md) | admitted event consumption, exact executor delivery and guard |
+| CLI Worker / fresh Reviewer | AGENTS + respective canonical role skill + exact request | implementation / independent review, own durable terminal |
+
+All share [HANDOFF_CONTRACT.md](HANDOFF_CONTRACT.md). Project instructions and local
+adapters carry pointers to accepted versioned documents. Record loaded ref/blob;
+check canonical bytes at restart. Web Project loading and Herdr consumption must be
+explicitly verified, not inferred from the presence of AGENTS.md in Git.
+
+Current logical flow: GitHub authority -> admitted outbound consumer -> exact Worker
+-> terminal observer -> current Control reread/decision -> distinct fresh-review
+transport -> Reviewer result -> Control's next authorized phase. Each edge has its
+own direction, identity, liveness and guard. This is the required contract, not a
+claim that every edge is implemented or currently passing.
+
+## 1. Historical ORCA overview
 
 ```text
 Windows Task Scheduler
@@ -33,7 +54,8 @@ Principles:
 
 - Single-line serial execution (no parallelism between cards).
 - Control Tower is the **only** decision point.
-- All durable progress is written to the runtime tree **before** any terminal message.
+- Local progress is checkpointed before terminal messages; current semantic progress
+  requires GitHub publication/readback and the card's return/ACK chain.
 - Terminal handles are not permanent IDs; recovery uses `run_id` + terminal title.
 - Watcher source must never contain browser write APIs.
 - Supervisor only recovers; it never decides pass/rework and never resends.
@@ -47,8 +69,10 @@ Principles:
 | Runtime | `D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\` | **no** (ignored) |
 | This worktree | `C:\Users\Lupun\orca\workspaces\GPT_BROWSER_BRIDGE\gbb-001-a1` | yes (branch `gbb-001-a1`) |
 
-The runtime tree (`state/`, `locks/`, `jobs/`, `runs/`, `events/`, `logs/`) is the
-single source of truth for project progress. It is never committed.
+The runtime tree (`state/`, `locks/`, `jobs/`, `runs/`, `events/`, `logs/`) stores
+execution checkpoints and physical-attempt evidence. It is never committed and
+does not outrank durable GitHub authority. Preserve uncertainty even when a GitHub
+receipt has not yet been published; reconcile both before any physical action.
 
 ## 3. Runtime structure
 
@@ -114,7 +138,10 @@ Notes:
 
 ## 6. Skill loading matrix
 
-Canonical skills live in this repo under `skills/<role>/SKILL.md`. Different CLIs
+Canonical skills live in this repo under `skills/<role>/SKILL.md`. The current
+Web/Herdr loading requirements are in the map above. The table below is a historical
+machine inventory, not a guarantee about current tool versions or auto-loading.
+Different CLIs
 load instructions/skills from different locations; the matrix below records what was
 found on this machine (GBB-001). Do **not** hand-maintain diverging copies of the
 same rules per tool; copy/adapt from the canonical files only.

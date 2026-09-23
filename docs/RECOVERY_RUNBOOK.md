@@ -4,7 +4,19 @@ Use this after any Supervisor, ORCA, role terminal, Chrome/CDP, network, Git,
 or host interruption. The order is deliberate: read durable evidence before
 touching a terminal.
 
-## First five minutes
+Current common rules: [HANDOFF_CONTRACT.md](HANDOFF_CONTRACT.md). Web Control starts
+at [WEB_CONTROL_RUNBOOK.md](WEB_CONTROL_RUNBOOK.md); desktop Herdr starts at
+[HERDR_RUNBOOK.md](HERDR_RUNBOOK.md). First read current GitHub #43/#81/#88 and the
+exact card with complete pagination; determine phase, authority and physical-attempt
+state before consulting runtime files.
+
+The commands, fixed paths, retry ceilings and local state names below document the
+historical ORCA lane. Use them only if that route is currently selected and admitted.
+They do not bootstrap a Herdr consumer, authorize new prompts or override the current
+card's retry budget. Worker/task failure returns to Control; HUMAN_REQUIRED needs a
+proven human gate. Stored state is not evidence of a resident future consumer.
+
+## ORCA lane: local evidence after GitHub rehydration
 
 ```powershell
 Get-Content 'D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\state\morning_summary.md' -Raw
@@ -25,21 +37,25 @@ git -C 'D:\AIWORK_WT\GPT_BROWSER_BRIDGE\GBB-004-A1' status --short
 git -C 'D:\AIWORK_WT\GPT_BROWSER_BRIDGE\GBB-004-A1' diff --name-only
 ```
 
-If `project_state` is `COMPLETED`, `CANCELLED`, or `NEEDS_HUMAN`, do not start
-a new agent. `NEEDS_HUMAN` can return to `RUNNING` only after the human and
-Control Tower resolve the recorded blocker.
+If local `project_state` is `COMPLETED`, `CANCELLED`, or `NEEDS_HUMAN`, do not
+start a new agent from that checkpoint. Reconcile current GitHub authority with
+Control; never silently clear a local hold. A real human-required gate still needs
+the human action and Control resolution; a stale pointer is not a new human gate.
 
-## Retry ceilings
+## Historical ORCA retry ceilings (current card limits take precedence)
 
 | Failure | Automatic retry | Escalation |
 | --- | --- | --- |
-| Same role terminal/process | 10s, 30s, 120s; at most 3 creates | `NEEDS_HUMAN / REPEATED_TERMINAL_CRASH` |
-| ORCA unavailable | 30s, 60s, 180s, then 300s cap | 20 continuous minutes: `NEEDS_HUMAN / ORCA_UNAVAILABLE` |
-| Worker rework on same card | Control Tower may dispatch at most 2 repair attempts | Third: `NEEDS_HUMAN / REPEATED_REWORK` |
+| Same role terminal/process | 10s, 30s, 120s; at most 3 creates | Stop lane; local `NEEDS_HUMAN / REPEATED_TERMINAL_CRASH` goes to Control for reconciliation |
+| ORCA unavailable | 30s, 60s, 180s, then 300s cap | At 20 minutes stop lane; local `NEEDS_HUMAN / ORCA_UNAVAILABLE` goes to Control |
+| Worker rework on same card | Only the exact current preauthorized repair limit; original ORCA limit was 2 | Exhaustion returns Control for bounded adjudication, not an automatic new human gate |
 | Chrome login wall | none | `NEEDS_HUMAN / AUTH_REQUIRED` |
 
 The 15-second Supervisor tick is not permission to call ORCA every 15 seconds;
 it must honor the persisted ORCA retry deadline.
+These local state names are historical runtime outputs. Do not clear the hold or
+exceed its retry limit. Control must reconcile the actual cause and any separately
+admitted route; asking the owner is required only for a proven human dependency.
 
 ## Crash recovery matrix
 
@@ -55,7 +71,7 @@ it must honor the persisted ORCA retry deadline.
 | Network outage | bounded read reattach after wait | retry events/result; same job | resend |
 | Unknown Git dirt | pause and write `dirty_attribution_report.md` | report lists status/diff | clean/stash/reset |
 | Test failure | Control Tower sends the smallest repair back to Worker | test + Worker/Reviewer reports | ignore or Supervisor verdict |
-| Three terminal failures | stop in `NEEDS_HUMAN` | exhausted event and blocker | fourth create/infinite loop |
+| Three terminal failures | stop lane in local `NEEDS_HUMAN`, return to Control | exhausted event and blocker | fourth create/infinite loop |
 | `reply.md` exists, `result.json` absent | treat job as non-terminal; resume Watcher | no `job_result` event yet | mark DONE |
 
 ## Role-specific procedures
@@ -164,7 +180,10 @@ The only permitted Git probes are read-only. Preserve their exact output in:
 D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\runs\<run_id>\dirty_attribution_report.md
 ```
 
-Do not start the replacement Worker until the human attributes the files.
+Do not mutate or restart the Worker in that dirty checkout until attribution is
+resolved. Control may bind a clean isolated checkout under current authority while
+preserving the unknown files and WIP limits. Require the human only if attribution
+or access actually requires their intervention.
 
 ### Test failure and rework
 
