@@ -30,6 +30,14 @@ import writeFileAtomic from "write-file-atomic";
 import { projectStateSchema } from "./contracts.mjs";
 import { OrcaAdapter, resolveOrcaCli, resolveActiveTerminal } from "./adapters/orca_adapter.mjs";
 import { gatherMorningSummaryData, writeMorningSummary } from "./morning_summary.mjs";
+import {
+  deliverResumeOnce,
+  parseControlDecision,
+  matchWaitToDecision,
+  buildLogicalEventKey,
+  findExistingDelivery,
+  validateWaitTuple,
+} from "./adapters/herdr_resume.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -667,6 +675,7 @@ function normalizeCtx(ctxIn) {
     sleep: ctxIn.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
     maxIterations: ctxIn.maxIterations ?? Infinity,
     intervalMs: ctxIn.intervalMs ?? HEARTBEAT_INTERVAL_MS,
+    resumeDelivery: ctxIn.resumeDelivery,
   };
 }
 
@@ -752,6 +761,14 @@ export async function runLoopOnce(ctxIn) {
     tickEvents.push({ type: "escalate_needs_human", reason: "AUTH_REQUIRED" });
   }
 
+  // Issue #89: optional deterministic Control-resume delivery hook. Runs
+  // whenever a registered wait tuple is configured; exactly-once and
+  // duplicate-safe, and never adds semantic authority.
+  if (ctx.resumeDelivery) {
+    const resume = await runResumeDeliveryCheck(ctx, { isoNow });
+    tickEvents.push(...resume.events);
+  }
+
   if (JSON.stringify(state) !== JSON.stringify(stateResult.state)) {
     await writeProjectState(paths, state);
   }
@@ -785,6 +802,104 @@ export async function runSupervisor(ctxIn) {
     if (i < ctx.maxIterations) await ctx.sleep(ctx.intervalMs);
   }
   return { iterations: i, lastOutcome };
+}
+
+// ---------------------------------------------------------------------------
+// Control-resume delivery hook (Issue #89 repair)
+// ---------------------------------------------------------------------------
+//
+// Optional deterministic hook: when a supervisor is configured with an exact
+// registered wait tuple (`ctx.resumeDelivery`), each tick re-reads GitHub as
+// sole authority and, on exactly one matching newer CONTROL_DECISION_V1,
+// physically resumes the exact waiting Herdr executor once, with NO_OP_DUPLICATE
+// safety. It never infers BEST_NEXT/successor/repair/reviewer/merge semantics;
+// it only delivers an exact decision to an exact waiting executor. No second
+// authority DB is created: the wait tuple and any delivery evidence are
+// reconstructible from GitHub durable receipts.
+
+export async function runResumeDeliveryCheck(ctx, { isoNow }) {
+  const cfg = ctx?.resumeDelivery;
+  if (!cfg || typeof cfg !== "object") {
+    return { events: [], delivered: false, duplicate: false };
+  }
+  const events = [];
+  const tupleCheck = validateWaitTuple(cfg.waitTuple);
+  if (!tupleCheck.ok) {
+    events.push({
+      type: "resume_delivery_config_invalid",
+      errors: tupleCheck.errors,
+    });
+    return { events, delivered: false, duplicate: false };
+  }
+  const waitTuple = tupleCheck.waitTuple;
+
+  let decisionBody;
+  try {
+    decisionBody = await cfg.readDecisionBody();
+  } catch (e) {
+    events.push({ type: "resume_delivery_decision_read_failed", error: e.message });
+    return { events, delivered: false, duplicate: false };
+  }
+
+  const parsed = parseControlDecision(decisionBody);
+  const matched = matchWaitToDecision(waitTuple, parsed);
+  if (!matched.ok) {
+    events.push({ type: "resume_delivery_decision_not_applicable", reason: matched.reason });
+    return { events, delivered: false, duplicate: false };
+  }
+
+  let comments;
+  try {
+    comments = await cfg.readComments();
+  } catch (e) {
+    events.push({ type: "resume_delivery_comments_read_failed", error: e.message });
+    return { events, delivered: false, duplicate: false };
+  }
+
+  const logicalKey = buildLogicalEventKey(waitTuple, parsed);
+  const existing = findExistingDelivery(comments, logicalKey, cfg.protocol);
+  if (existing) {
+    events.push({
+      type: "resume_delivery_no_op_duplicate",
+      logical_key: logicalKey,
+      existing_receipt_id: existing.receipt_id,
+    });
+    return { events, delivered: false, duplicate: true, logical_key: logicalKey };
+  }
+
+  try {
+    const result = await deliverResumeOnce({
+      waitTuple,
+      decisionBody,
+      comments,
+      herdr: cfg.herdr,
+      publishReceipt: cfg.publishReceipt,
+      protocol: cfg.protocol,
+      now: () => isoNow,
+    });
+    if (result.decision === "DELIVERED") {
+      events.push({
+        type: "resume_delivery_delivered",
+        logical_key: result.logical_key,
+        receipt_id: result.receipt_id,
+        target: `${waitTuple.target.agent_name}/${waitTuple.target.executor_instance_id}/${waitTuple.target.surface}`,
+      });
+      return { events, delivered: true, duplicate: false, logical_key: result.logical_key };
+    }
+    if (result.decision === "NO_OP_DUPLICATE") {
+      events.push({
+        type: "resume_delivery_no_op_duplicate",
+        logical_key: result.logical_key,
+        existing_receipt_id: result.existing_receipt_id,
+      });
+      return { events, delivered: false, duplicate: true, logical_key: result.logical_key };
+    }
+    events.push({ type: "resume_delivery_rejected", reason: result.reason, detail: result.detail });
+    return { events, delivered: false, duplicate: false };
+  } catch (e) {
+    events.push({ type: "resume_delivery_failed", error: e.message });
+    return { events, delivered: false, duplicate: false };
+  }
 }
 
 // ---------------------------------------------------------------------------
