@@ -1,8 +1,22 @@
 # AGENTS.md — GPT Browser Bridge build-agent rules
 
-These rules apply to any agent that works in this repository. The authoritative
-project rules are in `plans/GBB_PARENT_WORK_ORDER.md` (§6 roles, §7 skills, §17 Git
-governance, §18 security). This file is the repo-local summary for build agents.
+These rules apply to any agent that works in this repository. The cited parent plan
+defines project-wide role, skill, Git, and security rules; current durable GitHub
+Control authority and the exact card govern the current task, scope, and execution.
+This file is the repo-local summary for build agents.
+
+## Control entry
+
+Control reads `skills/control-tower/HANDOFF.md` as navigation only, then follows the
+single rehydration order in the live `skills/control-tower/SKILL.md` §3. Read the
+canonical Skill's current GitHub ref, commit head, and blob SHA; if that identity does
+not match the authorized card/base, fail closed. A candidate identity recorded in
+HANDOFF is a freshness hint, not authority; report it as stale when it differs from
+the live GitHub binding.
+
+Any shared handoff contract and applicable role-specific runbook or skill supplement
+role duties only after that Control rehydration sequence. They do not reorder it,
+replace current GitHub authority, or select the task.
 
 ## Repo purpose
 
