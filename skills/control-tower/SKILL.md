@@ -85,39 +85,49 @@ that must survive the current interaction must itself be durably recorded and re
 ## 3. Mandatory rehydration and local-adapter admission gate
 
 At every new Control conversation, Control-generation handoff, process restart, recovered
-session, or local skill-adapter change, complete this gate **before semantic work**:
+session, or local skill-adapter change, complete this ordered gate **before semantic work**:
 
-1. Fresh-read `D22977/gpt-browser-bridge/skills/control-tower/SKILL.md` from the current
-   admitted canonical ref when GitHub is reachable.
-2. If a local adapter copy is used (`~/.agents/skills`, `~/.codex/skills`, or equivalent),
+1. Read `skills/control-tower/HANDOFF.md` as navigation only. Never use its phase, gate,
+   next-action, or recorded candidate identity as authority; compare its freshness claims
+   with live GitHub and report a stale pointer.
+2. Fresh-read this Skill from the current admitted canonical ref when GitHub is reachable,
+   and bind its exact ref, commit head, and Git blob SHA. If that live identity differs
+   from the authorized card/base binding, fail closed as stale. A candidate identity
+   embedded in HANDOFF does not override the live GitHub binding.
+3. If a local adapter copy is used (`~/.agents/skills`, `~/.codex/skills`, or equivalent),
    fetch the canonical bytes in the current run and deterministically compare local bytes
    against canonical bytes (byte equality or matching SHA-256 of the exact bytes). Record
    the canonical Git blob SHA for traceability. A mismatch means `LOCAL_SKILL_STALE` and
    semantic work fails closed until the adapter is synchronized by an authorized
    mechanism and rechecked, or the executor uses the canonical GitHub bytes directly.
-3. Fresh-read the project durable Control issue and latest comments/receipts.
-4. Fresh-read the current capability registry and architecture/current-state pointer.
-   For GBB-derived projects, `D22977/gpt-browser-bridge#81` and
-   `D22977/gpt-browser-bridge#88` are mandatory references unless a newer durable
-   standard explicitly supersedes them.
-5. Fresh-read current product/card authority using fully repo-qualified identities.
-6. Fresh-read mutable repository metadata before asserting current visibility, default
+4. Read `SUCCESS_EVIDENCE_INDEX.md`; admit only exact `PASS` or `PROVEN_BOUNDED` entries,
+   read each exact source receipt before relying on it, and check for newer invalidation.
+5. Read `INVARIANTS_AND_LESSONS.md` and preserve its explicit no-authority boundary.
+6. Fresh-read current project Control, start-here, registry, and architecture/current-state
+   authority, then bind the exact project/card/candidate identity using fully
+   repo-qualified references. For GBB-derived projects, `D22977/gpt-browser-bridge#43`,
+   `#81`, and `#88` remain mandatory unless a newer durable standard explicitly supersedes
+   them.
+7. Fresh-read mutable repository metadata before asserting current visibility, default
    branch, branch head, or similar mutable facts.
-7. When selecting a capability, read the exact historical proof receipt needed for the
-   claim; do not rely only on a later summary.
-8. Reconcile repo `HANDOFF.md` against durable GitHub authority. If stale, ignore stale
-   phase/gate/next-action claims.
-9. If stale `HANDOFF.md` cannot legally be updated because tracked mutation/main is
-   frozen, publish/read-back a durable `STALE_POINTER_ONLY` (or equivalent) receipt bound
-   to the stale file/blob and current authoritative landing pointers. Do **not** mutate a
-   frozen product branch merely to repair handoff metadata. Update the tracked pointer at
-   the next legal maintenance boundary.
-10. Reconstruct the minimum current matrix:
+8. Read only task-required receipts and fresh liveness. For a capability claim, inspect
+   the exact historical proof receipt and its invalidation state; do not rely on a later
+   summary alone.
+9. Open `FAILURE_ARCHIVE.md` only for a matching diagnostic, reviewer lineage, or explicit
+   owner request. Do not replay it during routine rehydration.
+10. After this Control sequence, read the shared `docs/HANDOFF_CONTRACT.md` and applicable
+    role-specific runbook or skill when present. They supplement handoff and role duties;
+    they do not replace or reorder this authority sequence.
+11. If the HANDOFF pointer is stale and cannot legally be updated because tracked mutation
+    or the product branch is frozen, publish/read back `STALE_POINTER_ONLY` bound to the
+    stale file/blob and current authoritative pointers. Never mutate a frozen product
+    branch merely to repair handoff metadata; update it at the next legal maintenance boundary.
+12. Reconstruct the minimum current matrix:
    `component | role/surface | durable proof | capability class | target applicability |
    current liveness | restrictions`.
-11. Recall already-durable owner decisions and do not ask the owner again unless newer
+13. Recall already-durable owner decisions and do not ask the owner again unless newer
    durable evidence creates a real conflict.
-12. Only after this gate choose BEST_NEXT, bounded repair, or durable NO_OP/BLOCKED.
+14. Only after this gate choose BEST_NEXT, bounded repair, or durable NO_OP/BLOCKED.
 
 A new Control candidate is not ACTIVE merely because it has the correct display name.
 Activation must satisfy the current generation ACK / routing-canary / switch protocol.
@@ -203,6 +213,8 @@ Report only the highest state supported by durable evidence:
 - `CONSUMED_STARTED` requires executor-authored durable evidence bound to executor and
   session/pane/runtime identity where applicable.
 - `TERMINAL_RESULT` requires the exact terminal durable receipt.
+- `SENDING` or `UNCERTAIN_SEND` locks that physical attempt: reconcile it read-only;
+  without proof of delivery or non-delivery, do not resend or mint a new idempotency key.
 
 If dispatch ages without a valid local consumer, stop creating more dependent product
 cards and repair/admit the physical wake binding. Independent proven lanes may continue
@@ -227,6 +239,47 @@ current durable contract requires and proves the applicable chain:
 The user is not the normal task/result courier. If the admitted automatic route is not
 live, publish the exact BLOCKED/HUMAN_REQUIRED transport evidence and the first missing
 capability. Do not silently fall back to user relay as PASS.
+
+### 8.1 Turn-exit gate for autonomous Control wake
+
+Before a Control turn exits at a handoff/control-return boundary that relies on later
+autonomous continuation through a monitor/wake path, Control MUST fresh-read and read back
+all three of these bindings from current durable authority:
+
+1. The exact current ACTIVE Control binding, including its generation and the exact
+   conversation/session locator required by the admitted transport.
+2. One current-generation monitor/wake lease targeted to that exact ACTIVE Control
+   binding, with a lease/task identity that is not stale, retired, or from a prior
+   generation.
+3. One matching fresh heartbeat for that same lease, target, and generation. “Matching”
+   means the same lease identity and the same ACTIVE generation/target binding, with a
+   heartbeat timestamp inside that lease's declared freshness window. Use the lease's
+   declared window; do not invent a universal TTL.
+
+If any binding is absent, stale, malformed, expired, mismatched, or not read back, Control
+MUST publish and read back `CONTROL_REQUIRED` and stop the turn. Do not leave silent or
+empty waiting, claim unattended continuation, or infer a valid lease from a task's mere
+presence.
+
+A GitHub issue/comment publication, workflow trigger, Actions run or job state, or
+scheduler/task status is authority, trigger, or runtime evidence only. None alone proves
+WebGPT physical delivery, Control wake, `CONSUMED`, or `ACK`. Physical delivery and ACK
+require separately typed evidence from the admitted exact target transport/session.
+
+A prior-generation watcher/task/config, `browser_send=false`, stale conversation binding,
+or old heartbeat cannot satisfy this gate. Never inherit a G14/G13 or other prior task
+identity merely because that process or task still exists.
+
+When the gate fails, stop at `CONTROL_REQUIRED`: no blind resend, duplicate prompt,
+repeated Enter/wake, stale task invocation, or indefinite idle-poll loop may manufacture
+liveness. Retry only after newer exact authority or a materially new contract-authorized
+event. Keep the §7 lifecycle states distinct and preserve its `SENDING` /
+`UNCERTAIN_SEND` no-blind-retry rule. Control does not become Browser Sender; formal review
+remains a NEW, fresh, independent Reviewer context, and normal-path `user_relay_target = 0`.
+
+Resolve the ACTIVE generation, target, lease/task identity, and heartbeat window afresh
+from durable authority for every turn. This contract is generation-agnostic; any specific
+generation, task, or run mentioned elsewhere is an example only, never a normative value.
 
 ## 9. Formal review, Browser transport, and reviewer-owned publication
 
