@@ -18,6 +18,11 @@ Any shared handoff contract and applicable role-specific runbook or skill supple
 role duties only after that Control rehydration sequence. They do not reorder it,
 replace current GitHub authority, or select the task.
 
+At a handoff/control-return boundary that relies on later autonomous wake, follow the
+canonical Skill's §8.1 current ACTIVE Control binding, current-generation lease, and
+matching fresh-heartbeat gate. A missing edge requires `CONTROL_REQUIRED` and a stop;
+GitHub, Actions, and scheduler records alone do not prove WebGPT delivery or ACK.
+
 ## Repo purpose
 
 Implement GPT Browser Bridge as a series of work orders (GBB-001 … GBB-005),

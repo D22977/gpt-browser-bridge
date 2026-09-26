@@ -240,6 +240,47 @@ The user is not the normal task/result courier. If the admitted automatic route 
 live, publish the exact BLOCKED/HUMAN_REQUIRED transport evidence and the first missing
 capability. Do not silently fall back to user relay as PASS.
 
+### 8.1 Turn-exit gate for autonomous Control wake
+
+Before a Control turn exits at a handoff/control-return boundary that relies on later
+autonomous continuation through a monitor/wake path, Control MUST fresh-read and read back
+all three of these bindings from current durable authority:
+
+1. The exact current ACTIVE Control binding, including its generation and the exact
+   conversation/session locator required by the admitted transport.
+2. One current-generation monitor/wake lease targeted to that exact ACTIVE Control
+   binding, with a lease/task identity that is not stale, retired, or from a prior
+   generation.
+3. One matching fresh heartbeat for that same lease, target, and generation. “Matching”
+   means the same lease identity and the same ACTIVE generation/target binding, with a
+   heartbeat timestamp inside that lease's declared freshness window. Use the lease's
+   declared window; do not invent a universal TTL.
+
+If any binding is absent, stale, malformed, expired, mismatched, or not read back, Control
+MUST publish and read back `CONTROL_REQUIRED` and stop the turn. Do not leave silent or
+empty waiting, claim unattended continuation, or infer a valid lease from a task's mere
+presence.
+
+A GitHub issue/comment publication, workflow trigger, Actions run or job state, or
+scheduler/task status is authority, trigger, or runtime evidence only. None alone proves
+WebGPT physical delivery, Control wake, `CONSUMED`, or `ACK`. Physical delivery and ACK
+require separately typed evidence from the admitted exact target transport/session.
+
+A prior-generation watcher/task/config, `browser_send=false`, stale conversation binding,
+or old heartbeat cannot satisfy this gate. Never inherit a G14/G13 or other prior task
+identity merely because that process or task still exists.
+
+When the gate fails, stop at `CONTROL_REQUIRED`: no blind resend, duplicate prompt,
+repeated Enter/wake, stale task invocation, or indefinite idle-poll loop may manufacture
+liveness. Retry only after newer exact authority or a materially new contract-authorized
+event. Keep the §7 lifecycle states distinct and preserve its `SENDING` /
+`UNCERTAIN_SEND` no-blind-retry rule. Control does not become Browser Sender; formal review
+remains a NEW, fresh, independent Reviewer context, and normal-path `user_relay_target = 0`.
+
+Resolve the ACTIVE generation, target, lease/task identity, and heartbeat window afresh
+from durable authority for every turn. This contract is generation-agnostic; any specific
+generation, task, or run mentioned elsewhere is an example only, never a normative value.
+
 ## 9. Formal review, Browser transport, and reviewer-owned publication
 
 Formal review is an independent role, not a Worker, Control, or browser-transport role.
