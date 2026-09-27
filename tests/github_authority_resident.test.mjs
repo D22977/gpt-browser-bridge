@@ -63,10 +63,17 @@ function github(initial = [lease()]) {
   return {
     receipts,
     sourceEvents: [source],
+    sourceCommentReads: [],
     set failReadback(value) { failReadback = value; },
     async readAuthority() { return { ...authority }; },
     async listReceipts() { return receipts.map((r) => ({ ...r })); },
-    async getReceipt(id) { return failReadback ? null : receipts.find((r) => r.github_comment_id === String(id)); },
+    async getReceipt(id) {
+      const commentId = String(id);
+      this.sourceCommentReads.push(commentId);
+      if (failReadback) return null;
+      const event = this.sourceEvents.find((item) => String(item.source_comment_id) === commentId);
+      return event ? { ...event, github_comment_id: commentId } : receipts.find((r) => r.github_comment_id === commentId);
+    },
     async listSourceEvents() { return this.sourceEvents.map((event) => ({ ...event })); },
     async publishReceipt(receipt) {
       const item = { ...receipt, github_comment_id: String(next++) };
@@ -120,7 +127,7 @@ test("GitHub numeric comment IDs survive exact receipt readback", async () => {
   const client = github();
   const originalGet = client.getReceipt;
   client.getReceipt = async (id) => {
-    const item = await originalGet(id);
+    const item = await originalGet.call(client, id);
     return item && { ...item, github_comment_id: Number(item.github_comment_id) };
   };
   assert.equal((await runOnce(opts(client))).state, "WAIT_CONTROL_DECISION");
@@ -147,12 +154,43 @@ test("wrong-generation source and failed readback cannot notify transport", asyn
   let sends = 0;
   const transport = async () => { sends++; return "DELIVERED"; };
   client.sourceEvents = [{ ...source, control_generation: "030" }];
-  await assert.rejects(runOnce(opts(client, transport)), /STALE_GENERATION/);
+  const stale = await runOnce(opts(client, transport));
+  assert.equal(stale.results[0].state, "STALE_GENERATION_OR_CONTROL_IDENTITY");
   assert.equal(sends, 0);
   client.sourceEvents = [source];
   client.failReadback = true;
   await assert.rejects(runOnce(opts(client, transport)), /READBACK/);
   assert.equal(sends, 0);
+});
+
+test("each source is fetched by exact comment ID and bad source readback has no side effects", async () => {
+  const valid = github();
+  const originalGet = valid.getReceipt;
+  valid.getReceipt = async (id) => {
+    const item = await originalGet.call(valid, id);
+    return String(id) === source.source_comment_id && item
+      ? { ...item, source_comment_id: Number(item.source_comment_id), github_comment_id: Number(item.github_comment_id) }
+      : item;
+  };
+  const validResult = await runOnce(opts(valid));
+  assert.ok(valid.sourceCommentReads.includes(source.source_comment_id));
+  assert.equal(validResult.results[0].state, "WAIT_CONTROL_DECISION");
+  assert.equal(validResult.results[0].source_comment_id, source.source_comment_id);
+
+  for (const badReadback of [
+    null,
+    { ...source, github_comment_id: "5850000099" },
+    { ...source, github_comment_id: source.source_comment_id, active_control_conversation_id: "stale-control" },
+  ]) {
+    const client = github();
+    const originalGet = client.getReceipt;
+    client.getReceipt = async (id) => String(id) === source.source_comment_id ? badReadback : originalGet.call(client, id);
+    let sends = 0;
+    const result = await runOnce(opts(client, async () => { sends++; return "DELIVERED"; }));
+    assert.equal(result.results[0].state, "SOURCE_READBACK_MISMATCH");
+    assert.equal(client.receipts.filter((item) => item.type === "LOCAL_CONTROL_WAKE_REQUEST_V1").length, 0);
+    assert.equal(sends, 0);
+  }
 });
 
 test("transport success, error, and webhook trigger never count as ACK", async () => {
@@ -242,6 +280,86 @@ test("a released source does not starve the next GitHub source event", async () 
   const result = await runOnce(opts(client));
   assert.equal(result.state, "WAIT_CONTROL_DECISION");
   assert.equal(client.receipts.filter((r) => r.type === "LOCAL_CONTROL_WAKE_REQUEST_V1").length, 2);
+  assert.equal(result.results[0].state, "RELEASED_TO_NAMED_EXECUTOR");
+});
+
+test("one iteration records every source and continues past both waits and a release", async () => {
+  const waitingAck = { ...source, source_comment_id: "5850000001", source_event_type: "PROGRESS" };
+  const waitingDecision = { ...source, source_comment_id: "5850000002" };
+  const released = { ...source, source_comment_id: "5850000003" };
+  const later = { ...source, source_comment_id: "5850000004" };
+  const requests = [waitingAck, waitingDecision, released].map((item) => createWakeRequest(item, lease()));
+  const client = github([
+    lease(),
+    requests[0],
+    requests[1],
+    requests[2],
+    ack(requests[2]),
+    {
+      type: "ACTIVE_CONTROL_SOURCE_DECISION_V1",
+      wake_request_id: requests[2].wake_request_id,
+      source_comment_id: released.source_comment_id,
+      control_generation: "031",
+      active_control_conversation_id: "control-031",
+      ack_comment_id: "5",
+      named_executor: "worker-a",
+      decision_idempotency_key: "decision-release-first",
+    },
+  ]);
+  client.sourceEvents = [later, released, waitingDecision, waitingAck];
+  const pointers = [];
+  const result = await runOnce(opts(client, async (pointer) => { pointers.push(pointer); return "DELIVERED"; }));
+
+  assert.equal(client.receipts.filter((item) => item.type === "LOCAL_CONTROL_WAKE_REQUEST_V1").length, 4);
+  assert.deepEqual(result.results.map((item) => [item.source_comment_id, item.semantic_state || item.state]), [
+    [waitingAck.source_comment_id, "WAIT_CONTROL_ACK"],
+    [waitingDecision.source_comment_id, "WAIT_CONTROL_DECISION"],
+    [released.source_comment_id, "RELEASED_TO_NAMED_EXECUTOR"],
+    [later.source_comment_id, "WAIT_CONTROL_DECISION"],
+  ]);
+  assert.equal(result.results[2].named_executor, "worker-a");
+  assert.deepEqual(pointers.map((pointer) => pointer.source_comment_id), [later.source_comment_id]);
+});
+
+test("ACK GitHub comment ID must be numerically later than its wake request", async () => {
+  const request = { ...createWakeRequest(source, lease()), github_comment_id: "9007199254740994" };
+  const earlyAck = { ...ack(request), github_comment_id: "9007199254740993" };
+  const earlyClient = github([lease(), request, earlyAck]);
+  earlyClient.receipts[1].github_comment_id = request.github_comment_id;
+  earlyClient.receipts[2].github_comment_id = earlyAck.github_comment_id;
+  await assert.rejects(runOnce(opts(earlyClient)), /ACK_COMMENT_NOT_AFTER_WAKE_REQUEST/);
+});
+
+test("a current authority switch after exact ACK readback blocks wake consumption and release", async () => {
+  const request = { ...createWakeRequest(source, lease()), github_comment_id: "9007199254740994" };
+  const validAck = { ...ack(request), github_comment_id: "9007199254740995" };
+  const switchedClient = github([lease(), request, validAck]);
+  switchedClient.receipts[1].github_comment_id = request.github_comment_id;
+  switchedClient.receipts[2].github_comment_id = validAck.github_comment_id;
+  let authorityReads = 0;
+  switchedClient.readAuthority = async () => ++authorityReads === 1
+    ? { ...authority }
+    : { ...authority, current_registry_receipt: "81:68" };
+  await assert.rejects(runOnce(opts(switchedClient)), /AUTHORITY_CHANGED/);
+});
+
+test("source ordering uses exact numeric IDs beyond 2^53", async () => {
+  const low = { ...source, source_comment_id: "9007199254740992" };
+  const high = { ...source, source_comment_id: "9007199254740993" };
+  const client = github();
+  client.sourceEvents = [high, low];
+  const result = await runOnce(opts(client));
+  assert.deepEqual(result.results.map((item) => item.source_comment_id), [low.source_comment_id, high.source_comment_id]);
+  assert.deepEqual(client.sourceCommentReads.filter((id) => id === low.source_comment_id || id === high.source_comment_id), [low.source_comment_id, high.source_comment_id]);
+});
+
+test("a malformed source comment ID returns a typed per-source failure without wake side effects", async () => {
+  const malformedClient = github();
+  const malformed = { ...source, source_comment_id: "not-a-comment-id" };
+  malformedClient.sourceEvents = [source, malformed];
+  const malformedResult = await runOnce(opts(malformedClient));
+  assert.equal(malformedResult.results.find((item) => item.source_comment_id === malformed.source_comment_id).state, "MALFORMED_SOURCE_COMMENT_ID");
+  assert.equal(malformedClient.receipts.some((item) => item.type === "LOCAL_CONTROL_WAKE_REQUEST_V1" && item.source_comment_id === malformed.source_comment_id), false);
 });
 
 test("different watched issue sets yield distinct lease identities, and terminal release needs a named executor", () => {

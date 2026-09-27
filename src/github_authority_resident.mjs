@@ -22,20 +22,57 @@ function authorityCheck(authority) {
 function exact(actual, expected) {
   return Object.entries(expected).every(([key, value]) => JSON.stringify(actual?.[key]) === JSON.stringify(value));
 }
+function commentNumber(value, name) {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return BigInt(value);
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value)) return BigInt(value);
+  fail(`MALFORMED_${name}`);
+}
+function commentText(value, name) { return commentNumber(value, name).toString(); }
 async function readback(github, receipt) {
   const item = await github.getReceipt(receipt.github_comment_id);
   const { github_comment_id, ...fields } = receipt;
-  if (!item || !exact(item, fields) || String(item.github_comment_id) !== String(github_comment_id)) fail("RECEIPT_READBACK_MISMATCH");
+  if (!item || !exact(item, fields) || commentNumber(item.github_comment_id, "RECEIPT_COMMENT_ID") !== commentNumber(github_comment_id, "RECEIPT_COMMENT_ID")) fail("RECEIPT_READBACK_MISMATCH");
   return item;
 }
 async function publish(github, receipt) {
   const commentId = await github.publishReceipt(receipt);
   if (!commentId) fail("RECEIPT_PUBLICATION_UNCONFIRMED");
-  return readback(github, { ...receipt, github_comment_id: String(commentId) });
+  return readback(github, { ...receipt, github_comment_id: commentText(commentId, "RECEIPT_COMMENT_ID") });
 }
 async function confirmAuthority(github, authority) {
   const current = authorityCheck(await github.readAuthority());
   if (!exact(current, authority)) fail("AUTHORITY_CHANGED");
+}
+function sourceFields(source) {
+  if (!source || typeof source !== "object" || Array.isArray(source)) fail("MALFORMED_SOURCE_EVENT");
+  const source_issue = source.source_issue;
+  if (!Number.isSafeInteger(source_issue) || source_issue <= 0) fail("MALFORMED_SOURCE_ISSUE");
+  const fields = {
+    source_repo: need(source.source_repo, "SOURCE_REPO"),
+    source_issue,
+    source_comment_id: commentText(source.source_comment_id, "SOURCE_COMMENT_ID"),
+    source_event_type: need(source.source_event_type, "SOURCE_EVENT_TYPE"),
+    control_generation: need(source.control_generation, "SOURCE_CONTROL_GENERATION"),
+    active_control_conversation_id: need(source.active_control_conversation_id, "SOURCE_CONTROL_IDENTITY"),
+  };
+  if (fields.source_event_type === "TERMINAL" || fields.source_event_type === "CONTROL_NEEDED") fields.named_executor = need(source.named_executor, "NAMED_EXECUTOR");
+  return fields;
+}
+async function readSource(github, fields) {
+  let item;
+  try { item = await github.getReceipt(fields.source_comment_id); }
+  catch { fail("SOURCE_READBACK_MISMATCH"); }
+  let itemId;
+  let itemSourceId;
+  try {
+    itemId = commentText(item?.github_comment_id, "SOURCE_COMMENT_ID");
+    itemSourceId = commentText(item?.source_comment_id, "SOURCE_COMMENT_ID");
+  }
+  catch { fail("SOURCE_READBACK_MISMATCH"); }
+  if (itemId !== fields.source_comment_id || itemSourceId !== fields.source_comment_id || !exact({ ...item, source_comment_id: itemSourceId }, fields)) fail("SOURCE_READBACK_MISMATCH");
+}
+function sourceOutcome(state, source, extra = {}) {
+  return { state, source_comment_id: source?.source_comment_id, ...extra };
 }
 
 export function createLease(input) {
@@ -147,11 +184,11 @@ export function verifyAck(ack, request, authority) {
 
 export async function runOnce(args) { return processOnce(args); }
 
-async function processOnce({ github, transport, residentInstanceId, triggerContractHash, now }, afterSourceId) {
+async function processOnce({ github, transport, residentInstanceId, triggerContractHash, now }) {
   need(residentInstanceId, "resident_instance_id");
   need(triggerContractHash, "trigger_contract_hash");
   const authority = authorityCheck(await github.readAuthority());
-  const receipts = await github.listReceipts();
+  let receipts = await github.listReceipts();
   if (!Array.isArray(receipts)) fail("MALFORMED_GITHUB_RECEIPTS");
   const relevantLeases = receipts.filter((r) => r.type === "LOCAL_CONTROL_RESIDENT_LEASE_V1" && r.control_generation === authority.control_generation && r.trigger_contract_hash === triggerContractHash);
   const candidates = relevantLeases.filter((r) => instant(r.expires_at, "lease_expires_at") > instant(now, "now"));
@@ -161,48 +198,81 @@ async function processOnce({ github, transport, residentInstanceId, triggerContr
   await readback(github, lease);
   const events = await github.listSourceEvents();
   if (!Array.isArray(events)) fail("MALFORMED_SOURCE_EVENTS");
-  const ordered = [...events].filter((event) => afterSourceId === undefined || BigInt(event.source_comment_id) > BigInt(afterSourceId)).sort((a, b) => BigInt(a.source_comment_id) < BigInt(b.source_comment_id) ? -1 : 1);
-  const source = ordered[0];
-  if (!source) return { state: "NO_SOURCE_EVENT" };
-  if (source.control_generation !== authority.control_generation || source.active_control_conversation_id !== authority.active_control_conversation_id) fail("STALE_GENERATION_OR_CONTROL_IDENTITY");
-  if (!lease.watched_issue_set.includes(`${source.source_repo}#${source.source_issue}`)) fail("SOURCE_NOT_WATCHED");
-  const expected = createWakeRequest(source, lease);
-  const matches = receipts.filter((r) => r.type === expected.type && (r.wake_request_id === expected.wake_request_id || (r.source_repo === source.source_repo && r.source_issue === source.source_issue && r.source_comment_id === source.source_comment_id)));
-  if (matches.some((r) => !exact(r, expected)) || matches.length > 1) fail("CONFLICTING_WAKE_REQUEST");
-  let request = matches[0];
-  let diagnostic;
-  if (request) {
-    await readback(github, request);
-  } else {
-    request = await publish(github, expected);
-    const after = (await github.listReceipts()).filter((r) => r.type === expected.type && r.wake_request_id === expected.wake_request_id);
-    const { github_comment_id, ...fields } = request;
-    if (after.length !== 1 || String(after[0].github_comment_id) !== String(github_comment_id) || !exact(after[0], fields)) fail("CONFLICTING_WAKE_REQUEST");
-    await confirmAuthority(github, authority);
+  const indexed = events.map((source, index) => {
+    try { return { source, index, commentId: commentNumber(source?.source_comment_id, "SOURCE_COMMENT_ID") }; }
+    catch { return { source, index, error: "MALFORMED_SOURCE_COMMENT_ID" }; }
+  });
+  const ordered = indexed.filter((item) => !item.error).sort((a, b) => a.commentId < b.commentId ? -1 : a.commentId > b.commentId ? 1 : a.index - b.index);
+  const malformed = indexed.filter((item) => item.error);
+  const results = [];
+  for (const entry of [...ordered, ...malformed]) {
+    const source = entry.source;
+    if (entry.error) {
+      results.push(sourceOutcome(entry.error, source));
+      continue;
+    }
+    let event;
     try {
-      diagnostic = await transport?.({ source_repo: source.source_repo, source_issue: source.source_issue, source_comment_id: source.source_comment_id, wake_request_comment_id: request.github_comment_id });
-    } catch { diagnostic = "ERROR"; }
-  }
-  const ackCandidates = receipts.filter((r) => r.type === "ACTIVE_CONTROL_WAKE_ACK_V1" && (r.wake_request_id === request.wake_request_id || r.source_comment_id === source.source_comment_id));
-  for (const item of ackCandidates) verifyAck(item, request, authority);
-  const uniqueAcks = new Set(ackCandidates.map((r) => r.ack_idempotency_key));
-  if (uniqueAcks.size > 1) fail("CONFLICTING_ACK");
-  const controlAck = ackCandidates[0];
-  if (controlAck) await readback(github, controlAck);
-  const terminal = source.source_event_type === "TERMINAL" || source.source_event_type === "CONTROL_NEEDED";
-  if (controlAck && terminal) {
-    const decisions = receipts.filter((r) => r.type === "ACTIVE_CONTROL_SOURCE_DECISION_V1" && (r.wake_request_id === request.wake_request_id || r.source_comment_id === source.source_comment_id));
-    for (const decision of decisions) {
-      if (!exact(decision, { wake_request_id: request.wake_request_id, source_comment_id: source.source_comment_id, control_generation: authority.control_generation, active_control_conversation_id: authority.active_control_conversation_id, ack_comment_id: controlAck.github_comment_id, named_executor: source.named_executor }) || !decision.decision_idempotency_key || BigInt(decision.github_comment_id) <= BigInt(controlAck.github_comment_id)) fail("DECISION_BINDING_MISMATCH");
+      const fields = sourceFields(source);
+      await readSource(github, fields);
+      event = { ...source, ...fields };
+    } catch (error) {
+      results.push(sourceOutcome(error?.message || "SOURCE_PROCESSING_FAILED", source));
+      continue;
     }
-    if (decisions.length > 1) fail("CONFLICTING_DECISION");
-    if (decisions[0]) {
-      await readback(github, decisions[0]);
+    if (event.control_generation !== authority.control_generation || event.active_control_conversation_id !== authority.active_control_conversation_id) {
+      results.push(sourceOutcome("STALE_GENERATION_OR_CONTROL_IDENTITY", event));
+      continue;
+    }
+    if (!lease.watched_issue_set.includes(`${event.source_repo}#${event.source_issue}`)) {
+      results.push(sourceOutcome("SOURCE_NOT_WATCHED", event));
+      continue;
+    }
+    const expected = createWakeRequest(event, lease);
+    const matches = receipts.filter((r) => r.type === expected.type && (r.wake_request_id === expected.wake_request_id || (r.source_repo === event.source_repo && r.source_issue === event.source_issue && r.source_comment_id === event.source_comment_id)));
+    if (matches.some((r) => !exact(r, expected)) || matches.length > 1) fail("CONFLICTING_WAKE_REQUEST");
+    let request = matches[0];
+    let diagnostic;
+    if (request) {
+      await readback(github, request);
+    } else {
+      request = await publish(github, expected);
+      const afterReceipts = await github.listReceipts();
+      const after = afterReceipts.filter((r) => r.type === expected.type && r.wake_request_id === expected.wake_request_id);
+      const { github_comment_id, ...fields } = request;
+      if (after.length !== 1 || commentNumber(after[0].github_comment_id, "WAKE_REQUEST_COMMENT_ID") !== commentNumber(github_comment_id, "WAKE_REQUEST_COMMENT_ID") || !exact(after[0], fields)) fail("CONFLICTING_WAKE_REQUEST");
+      receipts = afterReceipts;
       await confirmAuthority(github, authority);
-      if (ordered.length > 1) return processOnce({ github, transport, residentInstanceId, triggerContractHash, now }, source.source_comment_id);
-      return { state: "RELEASED_TO_NAMED_EXECUTOR", named_executor: decisions[0].named_executor, wake_request_comment_id: request.github_comment_id, ack_comment_id: controlAck.github_comment_id, decision_comment_id: decisions[0].github_comment_id };
+      try {
+        diagnostic = await transport?.({ source_repo: event.source_repo, source_issue: event.source_issue, source_comment_id: event.source_comment_id, wake_request_comment_id: request.github_comment_id });
+      } catch { diagnostic = "ERROR"; }
     }
+    const ackCandidates = receipts.filter((r) => r.type === "ACTIVE_CONTROL_WAKE_ACK_V1" && (r.wake_request_id === request.wake_request_id || r.source_comment_id === event.source_comment_id));
+    for (const item of ackCandidates) verifyAck(item, request, authority);
+    const uniqueAcks = new Set(ackCandidates.map((r) => r.ack_idempotency_key));
+    if (uniqueAcks.size > 1) fail("CONFLICTING_ACK");
+    const controlAck = ackCandidates[0];
+    if (controlAck) {
+      if (commentNumber(controlAck.github_comment_id, "ACK_COMMENT_ID") <= commentNumber(request.github_comment_id, "WAKE_REQUEST_COMMENT_ID")) fail("ACK_COMMENT_NOT_AFTER_WAKE_REQUEST");
+      await readback(github, controlAck);
+      await confirmAuthority(github, authority);
+    }
+    const terminal = event.source_event_type === "TERMINAL" || event.source_event_type === "CONTROL_NEEDED";
+    if (controlAck && terminal) {
+      const decisions = receipts.filter((r) => r.type === "ACTIVE_CONTROL_SOURCE_DECISION_V1" && (r.wake_request_id === request.wake_request_id || r.source_comment_id === event.source_comment_id));
+      for (const decision of decisions) {
+        if (!exact(decision, { wake_request_id: request.wake_request_id, source_comment_id: event.source_comment_id, control_generation: authority.control_generation, active_control_conversation_id: authority.active_control_conversation_id, ack_comment_id: controlAck.github_comment_id, named_executor: event.named_executor }) || !decision.decision_idempotency_key || commentNumber(decision.github_comment_id, "DECISION_COMMENT_ID") <= commentNumber(controlAck.github_comment_id, "ACK_COMMENT_ID")) fail("DECISION_BINDING_MISMATCH");
+      }
+      if (decisions.length > 1) fail("CONFLICTING_DECISION");
+      if (decisions[0]) {
+        await readback(github, decisions[0]);
+        await confirmAuthority(github, authority);
+        results.push(sourceOutcome("RELEASED_TO_NAMED_EXECUTOR", event, { named_executor: decisions[0].named_executor, wake_request_comment_id: request.github_comment_id, ack_comment_id: controlAck.github_comment_id, decision_comment_id: decisions[0].github_comment_id }));
+        continue;
+      }
+    }
+    const semanticState = terminal ? "WAIT_CONTROL_DECISION" : controlAck ? "ACKED" : "WAIT_CONTROL_ACK";
+    results.push(sourceOutcome((matches.length && !controlAck) || ackCandidates.length > 1 ? "NO_OP_DUPLICATE" : semanticState, event, { semantic_state: semanticState, wake_consumed: Boolean(controlAck), wake_request_comment_id: request.github_comment_id, ...(controlAck ? { ack_comment_id: controlAck.github_comment_id } : {}), ...(diagnostic === undefined ? {} : { transport_diagnostic: diagnostic }) }));
   }
-  const semanticState = terminal ? "WAIT_CONTROL_DECISION" : controlAck ? "ACKED" : "WAIT_CONTROL_ACK";
-  return { state: (matches.length && !controlAck) || ackCandidates.length > 1 ? "NO_OP_DUPLICATE" : semanticState, semantic_state: semanticState, wake_consumed: Boolean(controlAck), wake_request_comment_id: request.github_comment_id, ...(controlAck ? { ack_comment_id: controlAck.github_comment_id } : {}), ...(diagnostic === undefined ? {} : { transport_diagnostic: diagnostic }) };
+  return results.length ? { ...results.at(-1), results } : { state: "NO_SOURCE_EVENT", results };
 }
