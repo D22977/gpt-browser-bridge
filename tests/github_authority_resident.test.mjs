@@ -102,6 +102,27 @@ function ack(request, overrides = {}) {
   };
 }
 
+function decision(request, overrides = {}) {
+  return {
+    type: "ACTIVE_CONTROL_SOURCE_DECISION_V1",
+    wake_request_id: request.wake_request_id,
+    source_comment_id: request.source_comment_id,
+    control_generation: "031",
+    active_control_conversation_id: "control-031",
+    ack_comment_id: "3",
+    named_executor: "worker-a",
+    decision_idempotency_key: "decision:" + request.wake_request_id,
+    ...overrides,
+  };
+}
+
+function releasable(events = [source]) {
+  const request = createWakeRequest(source, lease());
+  const client = github([lease(), request, ack(request), decision(request)]);
+  client.sourceEvents = events;
+  return { client, request };
+}
+
 test("valid current lease and conflicting, expired, or stale leases fail closed", () => {
   const current = lease();
   assert.equal(validateLease(current, authority, [current], now).lease_id, current.lease_id);
@@ -227,7 +248,7 @@ test("timeout cannot release WAIT; only later exact Control decision names execu
   const client = github([lease(), request, ack(request)]);
   const waiting = await runOnce({ ...opts(client), now: "2026-09-27T12:09:00.000Z", actionTimeout: true });
   assert.equal(waiting.state, "WAIT_CONTROL_DECISION");
-  client.receipts.push({
+  await client.publishReceipt({
     type: "ACTIVE_CONTROL_SOURCE_DECISION_V1",
     wake_request_id: request.wake_request_id,
     source_comment_id: source.source_comment_id,
@@ -236,7 +257,6 @@ test("timeout cannot release WAIT; only later exact Control decision names execu
     ack_comment_id: "3",
     named_executor: "wrong-worker",
     decision_idempotency_key: "decision-1",
-    github_comment_id: "4",
   });
   await assert.rejects(runOnce(opts(client)), /DECISION_BINDING/);
   client.receipts[3].named_executor = "worker-a";
@@ -370,4 +390,81 @@ test("different watched issue sets yield distinct lease identities, and terminal
 test("core contains no browser, Playwright, Herdr, or workflow import", async () => {
   const code = await readFile(new URL("../src/github_authority_resident.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(code, /(?:from|import\s*\()\s*["'][^"']*(?:playwright|browser|herdr|workflow)/i);
+});
+
+test("first valid executor release publishes and reads back one bound durable receipt", async () => {
+  const { client, request } = releasable();
+  const result = await runOnce(opts(client));
+  const releases = client.receipts.filter((item) => item.type === "LOCAL_CONTROL_EXECUTOR_RELEASE_V1");
+
+  assert.equal(result.results[0].state, "RELEASED_TO_NAMED_EXECUTOR");
+  assert.equal(result.results.filter((item) => item.state === "RELEASED_TO_NAMED_EXECUTOR").length, 1);
+  assert.equal(releases.length, 1);
+  assert.equal(releases[0].wake_request_id, request.wake_request_id);
+  assert.equal(releases[0].source_repo, source.source_repo);
+  assert.equal(releases[0].source_issue, source.source_issue);
+  assert.equal(releases[0].source_comment_id, source.source_comment_id);
+  assert.equal(releases[0].control_generation, authority.control_generation);
+  assert.equal(releases[0].active_control_conversation_id, authority.active_control_conversation_id);
+  assert.equal(releases[0].ack_comment_id, "3");
+  assert.equal(releases[0].decision_comment_id, "4");
+  assert.equal(releases[0].named_executor, "worker-a");
+  assert.equal(releases[0].idempotency_key, "release:" + releases[0].release_id);
+  assert.equal(releases[0].readback_required, true);
+  assert.match(releases[0].release_id, /^[0-9a-f]{64}$/);
+  assert.ok(client.sourceCommentReads.includes(releases[0].github_comment_id));
+  assert.equal(result.results[0].release_id, releases[0].release_id);
+  const reconstructed = releasable();
+  await runOnce(opts(reconstructed.client));
+  assert.equal(reconstructed.client.receipts.find((item) => item.type === "LOCAL_CONTROL_EXECUTOR_RELEASE_V1").release_id, releases[0].release_id);
+});
+
+test("replaying a source with its exact release receipt returns NO_OP_DUPLICATE", async () => {
+  const { client } = releasable();
+  await runOnce(opts(client));
+  const result = await runOnce(opts(client));
+
+  assert.equal(result.results[0].state, "NO_OP_DUPLICATE");
+  assert.equal(client.receipts.filter((item) => item.type === "LOCAL_CONTROL_EXECUTOR_RELEASE_V1").length, 1);
+});
+
+test("duplicate source rows preserve the first release and make the duplicate a no-op", async () => {
+  const { client } = releasable([source, { ...source }]);
+  const result = await runOnce(opts(client));
+
+  assert.deepEqual(result.results.map((item) => item.state), ["RELEASED_TO_NAMED_EXECUTOR", "NO_OP_DUPLICATE"]);
+  assert.equal(client.receipts.filter((item) => item.type === "LOCAL_CONTROL_EXECUTOR_RELEASE_V1").length, 1);
+});
+
+test("malformed, mismatched, or multiple matching release receipts fail closed", async () => {
+  const seed = releasable();
+  await runOnce(opts(seed.client));
+  const release = seed.client.receipts.find((item) => item.type === "LOCAL_CONTROL_EXECUTOR_RELEASE_V1");
+  const cases = [
+    [{ ...release, release_id: "f".repeat(64), idempotency_key: "release:" + "f".repeat(64) }],
+    [release, { ...release }],
+    [{ type: "LOCAL_CONTROL_EXECUTOR_RELEASE_V1", wake_request_id: seed.request.wake_request_id }],
+  ];
+
+  for (const records of cases) {
+    const { client } = releasable();
+    client.receipts.push(...records);
+    await assert.rejects(runOnce(opts(client)), /EXECUTOR_RELEASE|CONFLICTING_RELEASE/);
+  }
+});
+
+test("authority change after release receipt readback blocks release reporting", async () => {
+  const { client } = releasable();
+  const getReceipt = client.getReceipt;
+  let releaseReadback = false;
+  client.getReceipt = async (id) => {
+    const item = await getReceipt.call(client, id);
+    if (item?.type === "LOCAL_CONTROL_EXECUTOR_RELEASE_V1") releaseReadback = true;
+    return item;
+  };
+  client.readAuthority = async () => releaseReadback
+    ? { ...authority, current_registry_receipt: "81:68" }
+    : { ...authority };
+
+  await assert.rejects(runOnce(opts(client)), /AUTHORITY_CHANGED/);
 });

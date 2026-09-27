@@ -182,6 +182,74 @@ export function verifyAck(ack, request, authority) {
   return true;
 }
 
+function createExecutorRelease(source, request, ack, decision, authority) {
+  const ack_comment_id = commentText(ack.github_comment_id, "ACK_COMMENT_ID");
+  const decision_comment_id = commentText(decision.github_comment_id, "DECISION_COMMENT_ID");
+  const named_executor = need(decision.named_executor, "NAMED_EXECUTOR");
+  const release_id = id([
+    request.wake_request_id,
+    source.source_repo,
+    source.source_issue,
+    commentText(source.source_comment_id, "SOURCE_COMMENT_ID"),
+    authority.control_generation,
+    authority.active_control_conversation_id,
+    ack_comment_id,
+    need(ack.ack_idempotency_key, "ACK_IDEMPOTENCY_KEY"),
+    decision_comment_id,
+    need(decision.decision_idempotency_key, "DECISION_IDEMPOTENCY_KEY"),
+    named_executor,
+  ]);
+  return {
+    type: "LOCAL_CONTROL_EXECUTOR_RELEASE_V1",
+    release_id,
+    idempotency_key: `release:${release_id}`,
+    wake_request_id: request.wake_request_id,
+    source_repo: source.source_repo,
+    source_issue: source.source_issue,
+    source_comment_id: commentText(source.source_comment_id, "SOURCE_COMMENT_ID"),
+    control_generation: authority.control_generation,
+    active_control_conversation_id: authority.active_control_conversation_id,
+    ack_comment_id,
+    decision_comment_id,
+    named_executor,
+    readback_required: true,
+  };
+}
+
+function validateExecutorRelease(receipt) {
+  try {
+    const fields = [
+      "type", "release_id", "idempotency_key", "wake_request_id", "source_repo", "source_issue",
+      "source_comment_id", "control_generation", "active_control_conversation_id", "ack_comment_id",
+      "decision_comment_id", "named_executor", "readback_required", "github_comment_id",
+    ];
+    if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)
+      || Object.keys(receipt).length !== fields.length
+      || fields.some((field) => !Object.hasOwn(receipt, field))
+      || Object.keys(receipt).some((field) => !fields.includes(field))
+      || receipt.type !== "LOCAL_CONTROL_EXECUTOR_RELEASE_V1"
+      || !Number.isSafeInteger(receipt.source_issue) || receipt.source_issue <= 0
+      || !/^[0-9a-f]{64}$/.test(receipt.release_id)
+      || !/^[0-9a-f]{64}$/.test(receipt.wake_request_id)
+      || receipt.idempotency_key !== `release:${receipt.release_id}`
+      || receipt.readback_required !== true) fail("MALFORMED_EXECUTOR_RELEASE");
+    for (const field of ["source_repo", "control_generation", "active_control_conversation_id", "named_executor"]) need(receipt[field], `EXECUTOR_RELEASE_${field}`);
+    for (const field of ["source_comment_id", "ack_comment_id", "decision_comment_id", "github_comment_id"]) commentText(receipt[field], `EXECUTOR_RELEASE_${field}`);
+  } catch { fail("MALFORMED_EXECUTOR_RELEASE"); }
+}
+
+function exactExecutorRelease(receipt, expected) {
+  const { github_comment_id, ...fields } = receipt;
+  return Object.keys(fields).length === Object.keys(expected).length && exact(fields, expected);
+}
+
+function executorReleaseMatches(receipt, expected) {
+  return receipt.release_id === expected.release_id
+    || receipt.idempotency_key === expected.idempotency_key
+    || receipt.wake_request_id === expected.wake_request_id
+    || receipt.source_comment_id === expected.source_comment_id;
+}
+
 export async function runOnce(args) { return processOnce(args); }
 
 async function processOnce({ github, transport, residentInstanceId, triggerContractHash, now }) {
@@ -190,6 +258,7 @@ async function processOnce({ github, transport, residentInstanceId, triggerContr
   const authority = authorityCheck(await github.readAuthority());
   let receipts = await github.listReceipts();
   if (!Array.isArray(receipts)) fail("MALFORMED_GITHUB_RECEIPTS");
+  for (const receipt of receipts.filter((r) => r.type === "LOCAL_CONTROL_EXECUTOR_RELEASE_V1")) validateExecutorRelease(receipt);
   const relevantLeases = receipts.filter((r) => r.type === "LOCAL_CONTROL_RESIDENT_LEASE_V1" && r.control_generation === authority.control_generation && r.trigger_contract_hash === triggerContractHash);
   const candidates = relevantLeases.filter((r) => instant(r.expires_at, "lease_expires_at") > instant(now, "now"));
   if (candidates.length !== 1) fail(candidates.length ? "CONFLICTING_LEASE" : "NO_CURRENT_LEASE");
@@ -267,7 +336,29 @@ async function processOnce({ github, transport, residentInstanceId, triggerContr
       if (decisions[0]) {
         await readback(github, decisions[0]);
         await confirmAuthority(github, authority);
-        results.push(sourceOutcome("RELEASED_TO_NAMED_EXECUTOR", event, { named_executor: decisions[0].named_executor, wake_request_comment_id: request.github_comment_id, ack_comment_id: controlAck.github_comment_id, decision_comment_id: decisions[0].github_comment_id }));
+        const expectedRelease = createExecutorRelease(event, request, controlAck, decisions[0], authority);
+        const existing = receipts
+          .filter((r) => r.type === expectedRelease.type)
+          .filter((r) => executorReleaseMatches(r, expectedRelease));
+        if (existing.length > 1) fail("CONFLICTING_EXECUTOR_RELEASE");
+        if (existing.length === 1 && !exactExecutorRelease(existing[0], expectedRelease)) fail("CONFLICTING_EXECUTOR_RELEASE");
+        const duplicate = existing.length === 1;
+        const release = duplicate ? await readback(github, existing[0]) : await publish(github, expectedRelease);
+        validateExecutorRelease(release);
+        if (!exactExecutorRelease(release, expectedRelease)) fail("CONFLICTING_EXECUTOR_RELEASE");
+        const afterReceipts = await github.listReceipts();
+        if (!Array.isArray(afterReceipts)) fail("MALFORMED_GITHUB_RECEIPTS");
+        for (const receipt of afterReceipts.filter((r) => r.type === expectedRelease.type)) validateExecutorRelease(receipt);
+        const afterRelease = afterReceipts.filter((r) => r.type === expectedRelease.type).filter((r) => executorReleaseMatches(r, expectedRelease));
+        const releaseCommentId = commentText(release.github_comment_id, "EXECUTOR_RELEASE_COMMENT_ID");
+        if (afterRelease.length !== 1 || !exactExecutorRelease(afterRelease[0], expectedRelease) || commentNumber(afterRelease[0].github_comment_id, "EXECUTOR_RELEASE_COMMENT_ID") !== commentNumber(releaseCommentId, "EXECUTOR_RELEASE_COMMENT_ID")) fail("CONFLICTING_EXECUTOR_RELEASE");
+        receipts = afterReceipts;
+        await confirmAuthority(github, authority);
+        results.push(sourceOutcome(duplicate ? "NO_OP_DUPLICATE" : "RELEASED_TO_NAMED_EXECUTOR", event, {
+          ...(!duplicate ? { named_executor: release.named_executor, wake_request_comment_id: request.github_comment_id, ack_comment_id: controlAck.github_comment_id, decision_comment_id: decisions[0].github_comment_id } : {}),
+          release_id: expectedRelease.release_id,
+          release_receipt_comment_id: releaseCommentId,
+        }));
         continue;
       }
     }
