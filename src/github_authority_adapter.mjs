@@ -134,7 +134,7 @@ export function createGitHubAuthorityAdapter({ token, repository = "D22977/gpt-b
       if (relations.has("next") && (relations.get("next") !== page + 1 || data.length !== 100)) stop("INCOMPLETE_GITHUB_PAGINATION");
       if (relations.has("prev") && (page <= 1 || relations.get("prev") !== page - 1)) stop("INCOMPLETE_GITHUB_PAGINATION");
       if (relations.has("first") && relations.get("first") !== 1) stop("INCOMPLETE_GITHUB_PAGINATION");
-      if (relations.has("last") && relations.get("last") < page) stop("INCOMPLETE_GITHUB_PAGINATION");
+      if (relations.has("last") && (relations.get("last") < page || (relations.has("next") && relations.get("last") < relations.get("next")) || (!relations.has("next") && relations.get("last") !== page))) stop("INCOMPLETE_GITHUB_PAGINATION");
       if (!relations.has("next") && data.length === 100 && relations.get("last") !== page) stop("INCOMPLETE_GITHUB_PAGINATION");
       next = relations.has("next") ? `${root}/issues/${issue}/comments?per_page=100&page=${++page}` : null;
     }
