@@ -5,8 +5,10 @@ import { runOnce } from "../src/github_authority_resident.mjs";
 // Explicit invocation only. No token is read and no network request is made on import.
 export async function main(argv = process.argv.slice(2), env = process.env) {
   if (argv.length !== 4 || argv[0] !== "--resident-instance-id" || argv[2] !== "--trigger-contract-hash" || !argv[1] || !argv[3]) throw new Error("USAGE: --resident-instance-id ID --trigger-contract-hash HASH");
-  const github = createGitHubAuthorityAdapter({ token: env.GITHUB_TOKEN });
-  return runOnce({ github, residentInstanceId: argv[1], triggerContractHash: argv[3], now: new Date().toISOString() });
+  const now = new Date().toISOString();
+  const triggerContractHash = argv[3];
+  const github = createGitHubAuthorityAdapter({ token: env.GITHUB_TOKEN, triggerContractHash, now });
+  return runOnce({ github, residentInstanceId: argv[1], triggerContractHash, now });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
