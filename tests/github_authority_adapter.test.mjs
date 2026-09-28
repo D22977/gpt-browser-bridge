@@ -46,6 +46,28 @@ async function adapter(fetchImpl, config = {}) {
   return createGitHubAuthorityAdapter({ fetchImpl, repository, triggerContractHash: "contract-test", now: instant, ...config });
 }
 
+function sourceEvent(id, eventType = "PROGRESS", extraFields = []) {
+  return comment(id, 162, [
+    "GITHUB_SOURCE_EVENT_V1",
+    "source_repo: " + repository,
+    "source_issue: 162",
+    "source_comment_id: " + id,
+    "source_event_type: " + eventType,
+    "control_generation: 031",
+    "active_control_conversation_id: control-031",
+    ...extraFields,
+  ].join("\n"));
+}
+
+function fullCommentPage(seed) {
+  return Array.from({ length: 100 }, (_, i) => comment(seed + i, 43, "old comment " + i));
+}
+
+async function assertIncompletePagination(rows, link) {
+  const bad = harness({ pages: new Map([["43:1", rows]]), links: new Map([["43:1", link]]) });
+  await assert.rejects((await adapter(bad.fetchImpl)).readAuthority(), /INCOMPLETE_GITHUB_PAGINATION/);
+}
+
 test("adapter import and construction are pure; malformed configuration fails", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
@@ -122,13 +144,32 @@ test("current authority requires the exact start, registry pointer, generation, 
 
 test("one-shot caller is inert on import and routes only through mocked fetch", async () => {
   const originalFetch = globalThis.fetch;
+  const originalProcess = globalThis.process;
   const calls = [];
+  let tokenReads = 0;
   globalThis.fetch = async (url, init) => {
     calls.push({ url, init });
     return response({}, null, 401);
   };
+  globalThis.process = new Proxy(originalProcess, {
+    get(target, key) {
+      if (key === "env") {
+        return new Proxy(target.env, {
+          get(env, name, receiver) {
+            if (name === "GITHUB_TOKEN") {
+              tokenReads++;
+              return undefined;
+            }
+            return Reflect.get(env, name, receiver);
+          },
+        });
+      }
+      return Reflect.get(target, key, target);
+    },
+  });
   try {
-    const { main } = await import("../scripts/github_authority_once.mjs?caller-check=1");
+    const { main } = await import("../scripts/github_authority_once.mjs?caller-check=2");
+    assert.equal(tokenReads, 0);
     assert.equal(calls.length, 0);
     await assert.rejects(main([], {}), /USAGE/);
     assert.equal(calls.length, 0);
@@ -140,6 +181,160 @@ test("one-shot caller is inert on import and routes only through mocked fetch", 
     ].sort());
     assert.ok(calls.every(({ init }) => !Object.hasOwn(init.headers, "Authorization")));
     assert.ok(calls.every(({ init }) => init.redirect === "error"));
+  } finally {
+    globalThis.process = originalProcess;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("pagination rejects a short page whose last relation points past it without next", async () => {
+  await assertIncompletePagination(
+    [comment(5001, 43, "short page")],
+    "<" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"last\"",
+  );
+});
+
+test("pagination rejects a full page with no valid completion or next signal", async () => {
+  await assertIncompletePagination(fullCommentPage(5100), null);
+});
+
+test("pagination rejects a next relation that skips the current page successor", async () => {
+  await assertIncompletePagination(
+    fullCommentPage(5200),
+    "<" + apiRoot + "/issues/43/comments?per_page=100&page=3>; rel=\"next\"",
+  );
+});
+
+test("pagination rejects next on a non-100-row page", async () => {
+  await assertIncompletePagination(
+    [comment(5301, 43, "short page")],
+    "<" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"next\", <" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"last\"",
+  );
+});
+
+test("pagination rejects duplicate Link relation keys", async () => {
+  await assertIncompletePagination(
+    fullCommentPage(5400),
+    "<" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"next\", <" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"next\"",
+  );
+});
+
+test("pagination rejects malformed or disallowed Link relations", async () => {
+  await assertIncompletePagination(
+    fullCommentPage(5500),
+    "<" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"unknown\"",
+  );
+});
+
+test("pagination rejects a Link relation for the wrong issue path", async () => {
+  await assertIncompletePagination(
+    fullCommentPage(5600),
+    "<" + apiRoot + "/issues/44/comments?per_page=100&page=2>; rel=\"next\"",
+  );
+});
+
+test("pagination rejects the wrong per_page query shape", async () => {
+  await assertIncompletePagination(
+    fullCommentPage(5700),
+    "<" + apiRoot + "/issues/43/comments?per_page=50&page=2>; rel=\"next\"",
+  );
+});
+
+test("pagination rejects an invalid page target", async () => {
+  await assertIncompletePagination(
+    fullCommentPage(5800),
+    "<" + apiRoot + "/issues/43/comments?per_page=100&page=0>; rel=\"next\"",
+  );
+});
+
+test("pagination rejects duplicate comment IDs across pages", async () => {
+  const firstPage = fullCommentPage(5900);
+  const secondPage = [firstPage[0]];
+  const pages = new Map([["43:1", firstPage], ["43:2", secondPage]]);
+  const links = new Map([
+    ["43:1", "<" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"next\", <" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"last\""],
+    ["43:2", "<" + apiRoot + "/issues/43/comments?per_page=100&page=1>; rel=\"prev\", <" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"last\""],
+  ]);
+  const duplicate = harness({ pages, links });
+  await assert.rejects((await adapter(duplicate.fetchImpl)).readAuthority(), /DUPLICATE_GITHUB_COMMENT/);
+});
+
+test("adapter rejects unsupported recognized receipt fields", async () => {
+  const malformed = harness({ extraComments: [sourceEvent("6001", "PROGRESS", ["unsupported_field: value"])] });
+  await assert.rejects((await adapter(malformed.fetchImpl)).getReceipt("6001"), /MALFORMED_RECOGNIZED_RECEIPT/);
+});
+
+test("adapter rejects TERMINAL source events without a named executor", async () => {
+  const malformed = harness({ extraComments: [sourceEvent("6002", "TERMINAL")] });
+  await assert.rejects((await adapter(malformed.fetchImpl)).getReceipt("6002"), /MALFORMED_SOURCE_EVENT/);
+});
+
+test("adapter rejects CONTROL_NEEDED source events without a named executor", async () => {
+  const malformed = harness({ extraComments: [sourceEvent("6003", "CONTROL_NEEDED")] });
+  await assert.rejects((await adapter(malformed.fetchImpl)).getReceipt("6003"), /MALFORMED_SOURCE_EVENT/);
+});
+
+test("adapter preserves comment IDs beyond Number.MAX_SAFE_INTEGER as decimal strings", async () => {
+  const id = "900719925474099312345678901";
+  const exact = harness({ extraComments: [sourceEvent(id)] });
+  const parsed = await (await adapter(exact.fetchImpl)).getReceipt(id);
+  assert.equal(parsed.github_comment_id, id);
+  assert.equal(parsed.source_comment_id, id);
+});
+
+test("authority rejects a stale WebGPT route switch ID", async () => {
+  const authority = authorityRows();
+  const start = authority.comments.get(43)[0];
+  start.body = start.body.replace("Issue #88 comment 300", "Issue #88 comment 301");
+  await assert.rejects((await adapter(harness({ authority }).fetchImpl)).readAuthority(), /AUTHORITY_POINTER_MISMATCH/);
+});
+
+test("authority rejects a stale WebGPT route generation", async () => {
+  const authority = authorityRows();
+  const start = authority.comments.get(43)[0];
+  start.body = start.body.replace("generation031", "generation030");
+  await assert.rejects((await adapter(harness({ authority }).fetchImpl)).readAuthority(), /AUTHORITY_POINTER_MISMATCH/);
+});
+
+test("authority rejects an exact readback body mismatch", async () => {
+  const authority = authorityRows();
+  const start = authority.comments.get(43)[0];
+  const overrides = new Map([["100", { ...start, body: start.body + "\nreadback-mismatch" }]]);
+  await assert.rejects((await adapter(harness({ authority, exactOverrides: overrides }).fetchImpl)).readAuthority(), /AUTHORITY_READBACK_MISMATCH/);
+});
+
+test("authority rejects an exact readback issue provenance mismatch", async () => {
+  const authority = authorityRows();
+  const start = authority.comments.get(43)[0];
+  const overrides = new Map([["100", { ...start, issue_url: apiRoot + "/issues/81" }]]);
+  await assert.rejects((await adapter(harness({ authority, exactOverrides: overrides }).fetchImpl)).readAuthority(), /AUTHORITY_READBACK_MISMATCH/);
+});
+
+test("adapter sends only an explicitly supplied synthetic fixture token", async () => {
+  const explicit = harness();
+  await (await adapter(explicit.fetchImpl, { token: "fixture-token" })).readAuthority();
+  assert.ok(explicit.calls.length > 0);
+  assert.ok(explicit.calls.every(({ init }) => init.headers.Authorization === "Bearer fixture-token"));
+
+  const omitted = harness();
+  await (await adapter(omitted.fetchImpl)).readAuthority();
+  assert.ok(omitted.calls.length > 0);
+  assert.ok(omitted.calls.every(({ init }) => !Object.hasOwn(init.headers, "Authorization")));
+});
+
+test("one-shot caller reaches NO_CURRENT_LEASE through mocked authority and exact readbacks", async () => {
+  const originalFetch = globalThis.fetch;
+  const mocked = harness();
+  globalThis.fetch = mocked.fetchImpl;
+  try {
+    const { main } = await import("../scripts/github_authority_once.mjs?caller-success=1");
+    await assert.rejects(main(["--resident-instance-id", "worker-test", "--trigger-contract-hash", "contract-test"], Object.create(null)), /NO_CURRENT_LEASE/);
+    const paths = mocked.calls.map(({ url }) => new URL(url).pathname);
+    for (const issue of [43, 81, 88, 162]) {
+      assert.ok(paths.includes("/repos/" + repository + "/issues/" + issue + "/comments"));
+    }
+    for (const id of ["100", "200", "300"]) assert.ok(paths.includes("/repos/" + repository + "/issues/comments/" + id));
+    assert.ok(mocked.calls.every(({ init }) => !Object.hasOwn(init.headers, "Authorization")));
   } finally {
     globalThis.fetch = originalFetch;
   }
