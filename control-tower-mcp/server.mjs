@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 
+import { createGitHubRuntimeServices } from "./github_runtime.mjs";
 import { createRuntimeServices } from "./runtime.mjs";
 
 const repo = z.string().min(1);
@@ -42,6 +43,12 @@ function resultFor(value) {
 
 export function createControlTowerMcpServer({ services = {} } = {}) {
   const runtime = createRuntimeServices(services);
+  const github = createGitHubRuntimeServices();
+  runtime.bootstrapProject = services.bootstrapProject ?? github.bootstrapProject;
+  runtime.readControlState = services.readControlState ?? github.readControlState;
+  if (typeof services.publishReceipt !== "function" && typeof services.readReceipt !== "function") {
+    runtime.writeReceipt = github.writeReceipt;
+  }
   const server = new McpServer({ name: "control-tower-mcp", version: "1.0.0" });
 
   for (const [name, serviceName, inputSchema, description] of tools) {
