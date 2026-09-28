@@ -339,3 +339,28 @@ test("one-shot caller reaches NO_CURRENT_LEASE through mocked authority and exac
     globalThis.fetch = originalFetch;
   }
 });
+
+test("pagination rejects a Link target for the wrong repository path", async () => {
+  await assertIncompletePagination(
+    fullCommentPage(6100),
+    "<https://api.github.com/repos/D22977/other-repo/issues/43/comments?per_page=100&page=2>; rel=\"next\", <" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"last\"",
+  );
+});
+
+test("pagination rejects a Link target with an extra query parameter", async () => {
+  await assertIncompletePagination(
+    fullCommentPage(6200),
+    "<" + apiRoot + "/issues/43/comments?per_page=100&page=2&state=all>; rel=\"next\", <" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"last\"",
+  );
+});
+
+test("pagination rejects a Link target with a duplicate page query key", async () => {
+  await assertIncompletePagination(
+    fullCommentPage(6300),
+    "<" + apiRoot + "/issues/43/comments?per_page=100&page=2&page=2>; rel=\"next\", <" + apiRoot + "/issues/43/comments?per_page=100&page=2>; rel=\"last\"",
+  );
+});
+
+test("pagination rejects a syntactically malformed Link header", async () => {
+  await assertIncompletePagination(fullCommentPage(6400), "not a valid Link header");
+});
