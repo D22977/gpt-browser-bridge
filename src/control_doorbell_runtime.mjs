@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { runOnce, validateLease, watcherRunning } from "./github_authority_resident.mjs";
+import { createGitHubAuthorityAdapter } from "./github_authority_adapter.mjs";
 
 export const RUNTIME_ARTIFACT_MAPPING = Object.freeze({
   adapter_source: "src/control_doorbell_runtime.mjs",
@@ -76,10 +80,13 @@ export function hasCurrentProducerAdmission(source, authority, receipt) {
 
 export function validateConfig(config) {
   const issues = config?.authority_issue_numbers;
+  const residentId = config?.resident_instance_id;
   if (config?.schema_version !== 1
     || config.repository_full_name !== "D22977/gpt-browser-bridge"
     || !issues || issues.control !== 88 || issues.registry !== 43 || issues.switch !== 81
     || config.source_issue_number !== 162
+    || typeof residentId !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(residentId)
+    || /generation[-_. ]?\d+|control[-_. ]?(?:current|generation)|conversation|pane|session|reviewer|worker|producer/i.test(residentId)
     || !Number.isSafeInteger(config.poll_interval_min_ms) || config.poll_interval_min_ms <= 0
     || !Number.isSafeInteger(config.poll_interval_max_ms) || config.poll_interval_max_ms < config.poll_interval_min_ms
     || !Number.isSafeInteger(config.poll_interval_ms)
@@ -126,7 +133,7 @@ export function createControlDoorbellRuntime({ config, github, residentInstanceI
           && receipt.trigger_contract_hash === triggerContractHash);
         if (leases.length !== 1) failClosed();
         const lease = validateLease(leases[0], authority, receipts, currentTime);
-        const heartbeat = await github.readHeartbeat();
+        const heartbeat = await github.readHeartbeat(lease);
         if (!watcherRunning(heartbeat, lease, authority, currentTime, config.heartbeat_max_age_ms)) failClosed();
 
         const sourceEvents = await github.listSourceEvents(config.source_issue_number);
@@ -171,4 +178,64 @@ export function createControlDoorbellRuntime({ config, github, residentInstanceI
       }
     },
   };
+}
+
+export function parseLoopArguments(args) {
+  if (!Array.isArray(args) || args.length !== 1 || args[0] !== "--loop") throw new Error("UNSUPPORTED_CLI");
+  return true;
+}
+
+export async function loadSiblingConfig(moduleUrl = import.meta.url) {
+  try {
+    return validateConfig(JSON.parse(await readFile(new URL("./config.json", moduleUrl), "utf8")));
+  } catch {
+    failClosed();
+  }
+}
+
+export function createProductionRuntime(config, { env = process.env, fetchImpl = globalThis.fetch, now = () => new Date().toISOString() } = {}) {
+  validateConfig(config);
+  const github = createGitHubAuthorityAdapter({
+    token: env?.GITHUB_TOKEN,
+    repository: config.repository_full_name,
+    authorityIssueNumbers: config.authority_issue_numbers,
+    sourceIssueNumber: config.source_issue_number,
+    fetchImpl,
+  });
+  return createControlDoorbellRuntime({
+    config,
+    github,
+    residentInstanceId: config.resident_instance_id,
+    now,
+    sendPointer: (pointer) => github.sendPointer(pointer),
+  });
+}
+
+export async function runPollingLoop(runtime, sleep = (delay) => new Promise((resolveDelay) => setTimeout(resolveDelay, delay))) {
+  if (!runtime || typeof runtime.poll !== "function" || !Number.isSafeInteger(runtime.pollIntervalMs) || runtime.pollIntervalMs <= 0 || typeof sleep !== "function") failClosed();
+  while (true) {
+    await runtime.poll();
+    await sleep(runtime.pollIntervalMs);
+  }
+}
+
+export async function startWatcher(args = process.argv.slice(2), dependencies = {}) {
+  parseLoopArguments(args);
+  const moduleUrl = dependencies.moduleUrl ?? import.meta.url;
+  const config = await (dependencies.loadConfig ?? loadSiblingConfig)(moduleUrl);
+  const createRuntime = dependencies.createRuntime ?? createProductionRuntime;
+  await runPollingLoop(await createRuntime(config, dependencies), dependencies.sleep);
+}
+
+export function isDirectExecution(argv1 = process.argv[1], moduleUrl = import.meta.url) {
+  if (!argv1) return false;
+  try { return pathToFileURL(resolve(argv1)).href.toLowerCase() === new URL(moduleUrl).href.toLowerCase(); }
+  catch { return false; }
+}
+
+if (isDirectExecution()) {
+  startWatcher().catch(() => {
+    console.error("CONTROL_REQUIRED/NO_SEND");
+    process.exitCode = 1;
+  });
 }

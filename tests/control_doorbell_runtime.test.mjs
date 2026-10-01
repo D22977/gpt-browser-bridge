@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createHeartbeat, createLease, createWakeRequest } from "../src/github_authority_resident.mjs";
+import { createGitHubAuthorityAdapter } from "../src/github_authority_adapter.mjs";
 
 let runtime;
 try { runtime = await import("../src/control_doorbell_runtime.mjs"); } catch {}
@@ -48,6 +52,7 @@ async function makeHarness({
   heartbeatGeneration = leaseGeneration,
   localCache,
   send = async () => "transport-success",
+  nowFn = () => "2026-10-01T01:00:00.000Z",
 } = {}) {
   assert.equal(typeof runtime?.createControlDoorbellRuntime, "function", "adapter must export createControlDoorbellRuntime");
   const config = await loadConfig();
@@ -110,7 +115,7 @@ async function makeHarness({
     config,
     github,
     residentInstanceId,
-    now: () => now,
+    now: nowFn,
     sendPointer: async (pointer) => {
       sent.push(structuredClone(pointer));
       return send(pointer);
@@ -318,4 +323,252 @@ test("T19 artifact mapping is deterministic and preserves the adopted core blob"
 test("T20 tests exercise only in-memory adapters and never invoke runtime side effects", async () => {
   const source = await readFile(new URL("../src/control_doorbell_runtime.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /node:child_process|playwright|ScheduledTask|run\.ps1|execFile|https:\/\/api\.github\.com/);
+});
+
+function issueComment(id, issue, body, repository = "D22977/gpt-browser-bridge") {
+  return { id, issue_url: `https://api.github.com/repos/${repository}/issues/${issue}`, body };
+}
+
+function authorityComments(repository = "D22977/gpt-browser-bridge") {
+  const activeBody = [
+    "CONTROL_GENERATION_ATOMIC_SWITCH_V1",
+    `repository: ${repository}`,
+    "current_active_generation: 033",
+    "active_control_conversation_id: control-current",
+    "single_active_control: true",
+    'producer_admission_comment_ids: ["4309"]',
+  ].join("\n");
+  return [
+    issueComment("4301", 43, [
+      "CURRENT_REHYDRATION_INDEX_V102",
+      `repository: ${repository}`,
+      "control_generation: 033 ACTIVE_REHYDRATED",
+      'producer_admission_comment_ids: ["4309"]',
+      "webgpt_route: Issue #88 comment 8801 / generation033",
+    ].join("\n"), repository),
+    issueComment("8101", 81, [
+      "CURRENT_REGISTRY_INDEX_V102",
+      `repository: ${repository}`,
+      "control_generation: 033 ACTIVE_REHYDRATED",
+      "source_current_start: Issue #43 comment 4301",
+      'producer_admission_comment_ids: ["4309"]',
+    ].join("\n"), repository),
+    issueComment("8801", 88, activeBody, repository),
+  ];
+}
+
+function fakeGitHub({ repository = "D22977/gpt-browser-bridge", comments = authorityComments(repository) } = {}) {
+  const rows = new Map(comments.map((comment) => [String(comment.id), structuredClone(comment)]));
+  const calls = [];
+  let nextId = 20000;
+  async function fetchImpl(url, options = {}) {
+    const method = options.method ?? "GET";
+    const parsed = new URL(url);
+    calls.push({ url, method, headers: options.headers ?? {} });
+    const issueComments = new RegExp(`^/repos/${repository}/issues/(\\d+)/comments$`).exec(parsed.pathname);
+    if (method === "GET" && issueComments) {
+      const issue = Number(issueComments[1]);
+      return jsonResponse([...rows.values()].filter((comment) => comment.issue_url.endsWith(`/issues/${issue}`)));
+    }
+    if (method === "POST" && issueComments) {
+      const issue = Number(issueComments[1]);
+      const body = JSON.parse(options.body)?.body;
+      if (typeof body !== "string") return jsonResponse({ message: "invalid body" }, 422);
+      const row = issueComment(String(nextId++), issue, body, repository);
+      rows.set(String(row.id), row);
+      return jsonResponse(row, 201);
+    }
+    const exact = new RegExp(`^/repos/${repository}/issues/comments/(\\d+)$`).exec(parsed.pathname);
+    if (method === "GET" && exact) {
+      const row = rows.get(exact[1]);
+      return row ? jsonResponse(row) : jsonResponse({ message: "not found" }, 404);
+    }
+    return jsonResponse({ message: "unexpected fake route" }, 404);
+  }
+  function add(issue, body) {
+    const row = issueComment(String(nextId++), issue, body, repository);
+    rows.set(String(row.id), row);
+    return row.id;
+  }
+  return { rows, calls, fetchImpl, add };
+}
+
+function jsonResponse(value, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async json() { return value; },
+    headers: { get() { return null; } },
+  };
+}
+
+async function withSiblingConfig(config, action) {
+  const directory = await mkdtemp(join(tmpdir(), "gbb-g33-config-"));
+  const moduleUrl = pathToFileURL(join(directory, "watcher.mjs")).href;
+  const configPath = join(directory, "config.json");
+  try {
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+    return await action({ directory, moduleUrl, configPath });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+function makeAdapter(config, options = {}) {
+  return createGitHubAuthorityAdapter({
+    token: "test-token",
+    repository: config.repository_full_name,
+    authorityIssueNumbers: config.authority_issue_numbers,
+    sourceIssueNumber: config.source_issue_number,
+    fetchImpl: options.fetchImpl,
+    publisher: options.publisher,
+    now: options.now ?? (() => "2026-10-01T01:00:00.000Z"),
+  });
+}
+
+test("T21 module import stays idle and only the explicit --loop argument is accepted", () => {
+  const moduleUrl = new URL("../src/control_doorbell_runtime.mjs", import.meta.url).href;
+  assert.equal(runtime.isDirectExecution(process.argv[1], moduleUrl), false);
+  assert.equal(runtime.parseLoopArguments(["--loop"]), true);
+  assert.throws(() => runtime.parseLoopArguments([]), /UNSUPPORTED_CLI/);
+  assert.throws(() => runtime.parseLoopArguments(["--once"]), /UNSUPPORTED_CLI/);
+  assert.throws(() => runtime.parseLoopArguments(["--loop", "--force"]), /UNSUPPORTED_CLI/);
+});
+
+test("T22 sibling config.json loads by module URL and missing or invalid config fails closed", async () => {
+  const config = await loadConfig();
+  await withSiblingConfig(config, async ({ moduleUrl, configPath }) => {
+    assert.deepEqual(await runtime.loadSiblingConfig(moduleUrl), config);
+    await rm(configPath);
+    await assert.rejects(runtime.loadSiblingConfig(moduleUrl), /CONTROL_REQUIRED\/NO_SEND/);
+    await writeFile(configPath, "{bad json", "utf8");
+    await assert.rejects(runtime.loadSiblingConfig(moduleUrl), /CONTROL_REQUIRED\/NO_SEND/);
+  });
+});
+
+test("T23 --loop starts an injected resident poll loop", async () => {
+  const config = await loadConfig();
+  const stop = new Error("stop test loop");
+  let polls = 0;
+  let starts = 0;
+  await withSiblingConfig(config, async ({ moduleUrl }) => {
+    await assert.rejects(runtime.startWatcher(["--loop"], {
+      moduleUrl,
+      env: { GITHUB_TOKEN: "test-token" },
+      createRuntime: async (loadedConfig) => {
+        starts += 1;
+        assert.deepEqual(loadedConfig, config);
+        return { pollIntervalMs: config.poll_interval_ms, async poll() { polls += 1; } };
+      },
+      sleep: async (delay) => {
+        assert.equal(delay, config.poll_interval_ms);
+        throw stop;
+      },
+    }), (error) => error === stop);
+  });
+  assert.equal(starts, 1);
+  assert.equal(polls, 1);
+});
+
+test("T24 config requires a generation-neutral resident_instance_id", async () => {
+  const config = await loadConfig();
+  assert.equal(typeof config.resident_instance_id, "string");
+  assert.equal(runtime.validateConfig(config), config);
+  for (const resident_instance_id of [undefined, "generation033", "control-current", "w3:p9", "reviewer-session-7", "g14-producer"]) {
+    assert.throws(() => runtime.validateConfig({ ...config, resident_instance_id }), /CONTROL_REQUIRED\/NO_SEND/);
+  }
+});
+
+test("T25 missing GITHUB_TOKEN fails before GitHub fetch or transport", async () => {
+  const config = await loadConfig();
+  const backend = fakeGitHub();
+  await withSiblingConfig(config, async ({ moduleUrl }) => {
+    await assert.rejects(runtime.startWatcher(["--loop"], {
+      moduleUrl,
+      env: {},
+      fetchImpl: backend.fetchImpl,
+      sleep: async () => assert.fail("poll loop must not start without authentication"),
+    }), /GITHUB_AUTH_REQUIRED/);
+  });
+  assert.equal(backend.calls.length, 0);
+});
+
+test("T26 production clock is called freshly once for each resident poll", async () => {
+  let nowCalls = 0;
+  const h = await makeHarness({ nowFn: () => { nowCalls += 1; return "2026-10-01T01:00:00.000Z"; } });
+  await h.controller.poll();
+  await h.controller.poll();
+  assert.equal(nowCalls, 2);
+});
+
+test("T27 GitHub adapter exact-reads authority and publishes then exact-reads a receipt", async () => {
+  const config = await loadConfig();
+  const backend = fakeGitHub();
+  const writes = [];
+  const adapter = makeAdapter(config, {
+    fetchImpl: backend.fetchImpl,
+    publisher: async ({ issue, body }) => {
+      writes.push({ issue, body });
+      return backend.add(issue, body);
+    },
+  });
+  const snapshot = await adapter.readAuthoritySnapshot();
+  assert.equal(snapshot.control.control_generation, "033");
+  assert.equal(snapshot.control.active_control_conversation_id, "control-current");
+  assert.deepEqual(snapshot.switch.producer_admission_comment_ids, ["4309"]);
+
+  const receipt = {
+    type: "LOCAL_CONTROL_WAKE_REQUEST_V1",
+    wake_request_id: "wake-id-1",
+    lease_id: "lease-1",
+    resident_instance_id: config.resident_instance_id,
+    source_repo: config.repository_full_name,
+    source_issue: config.source_issue_number,
+    source_comment_id: "16299",
+    source_event_type: "WAKE",
+    control_generation: "033",
+    active_control_conversation_id: "control-current",
+    trigger_contract_hash: "a".repeat(64),
+    idempotency_key: "wake-id-1",
+  };
+  const id = await adapter.publishReceipt(receipt);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].issue, config.source_issue_number);
+  assert.ok(backend.rows.get(String(id)));
+  assert.ok(backend.calls.some((call) => call.url.endsWith(`/issues/comments/${id}`)));
+  assert.ok(backend.calls.every((call) => call.headers.Authorization === "Bearer test-token"));
+});
+
+test("T28 pointer delivery request is deterministic and duplicate publishing is idempotent", async () => {
+  const config = await loadConfig();
+  const backend = fakeGitHub();
+  const adapter = makeAdapter(config, { fetchImpl: backend.fetchImpl });
+  const pointer = {
+    source_repo: config.repository_full_name,
+    source_issue: config.source_issue_number,
+    source_comment_id: "16277",
+    wake_request_comment_id: "16288",
+  };
+  const first = await adapter.sendPointer(pointer);
+  const second = await adapter.sendPointer(pointer);
+  assert.equal(first.idempotency_key, second.idempotency_key);
+  assert.match(first.idempotency_key, /^[0-9a-f]{64}$/);
+  assert.equal(first.github_comment_id, second.github_comment_id);
+  const posted = [...backend.rows.values()].filter((row) => row.body.startsWith("GBB_LOCAL_CONTROL_POINTER_DELIVERY_REQUEST_V1\n"));
+  assert.equal(posted.length, 1);
+  assert.match(posted[0].body, new RegExp(`^GBB_LOCAL_CONTROL_POINTER_DELIVERY_REQUEST_V1\\nsource_repo: ${config.repository_full_name}\\nsource_issue: ${config.source_issue_number}\\nsource_comment_id: ${pointer.source_comment_id}\\nwake_request_comment_id: ${pointer.wake_request_comment_id}\\nidempotency_key: ${first.idempotency_key}$`));
+});
+
+test("T29 transport stays separate and delegates to the pinned semantic core", async () => {
+  const [runtimeSource, adapterSource, coreSource, config] = await Promise.all([
+    readFile(new URL("../src/control_doorbell_runtime.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../src/github_authority_adapter.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../src/github_authority_resident.mjs", import.meta.url), "utf8"),
+    loadConfig(),
+  ]);
+  assert.match(runtimeSource, /import \{ runOnce, validateLease, watcherRunning \} from "\.\/github_authority_resident\.mjs"/);
+  assert.match(runtimeSource, /await runOnce\(\{/);
+  assert.match(coreSource, /export async function runOnce/);
+  assert.equal(config.artifact_mapping.semantic_core_blob, "1a0c818321e64ec3dd4619e563d6845124af7c2b");
+  assert.doesNotMatch(`${runtimeSource}\n${adapterSource}`, /node:child_process|@herdr|herdr\.(?:agent|pane|send|run)|browser\.(?:send|click|evaluate)|playwright|puppeteer|chrome-remote-interface|ScheduledTask|taskschd|execFile|execSync|spawn\(/i);
 });

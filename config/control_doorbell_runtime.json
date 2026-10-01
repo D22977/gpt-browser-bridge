@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "resident_instance_id": "control-doorbell-resident",
   "repository_full_name": "D22977/gpt-browser-bridge",
   "authority_issue_numbers": {
     "control": 88,

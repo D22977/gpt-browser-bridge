@@ -1,4 +1,5 @@
-// A finite GitHub reader for the resident contract. This module has no import-time I/O.
+// GitHub transport for the resident contract. This module has no import-time I/O.
+import { createHash } from "node:crypto";
 const TYPES = new Set([
   "LOCAL_CONTROL_RESIDENT_LEASE_V1", "LOCAL_CONTROL_RESIDENT_HEARTBEAT_V1",
   "LOCAL_CONTROL_WAKE_REQUEST_V1", "ACTIVE_CONTROL_WAKE_ACK_V1",
@@ -6,7 +7,6 @@ const TYPES = new Set([
 ]);
 const EVENTS = new Set(["TERMINAL", "CONTROL_NEEDED", "PROGRESS"]);
 const AUTHORITY = { start: /^CURRENT_REHYDRATION_INDEX_V\d+$/, registry: /^CURRENT_REGISTRY_INDEX_V\d+$/, switch: "CONTROL_GENERATION_ATOMIC_SWITCH_V1" };
-const SUPPORTED_ISSUES = [43, 81, 88, 162];
 const REQUIRED = {
   LOCAL_CONTROL_RESIDENT_LEASE_V1: ["lease_id", "resident_instance_id", "control_generation", "active_control_conversation_id", "acquired_at", "expires_at", "watched_issue_set", "trigger_contract_hash", "idempotency_key", "readback_required"],
   LOCAL_CONTROL_RESIDENT_HEARTBEAT_V1: ["lease_id", "resident_instance_id", "control_generation", "trigger_contract_hash", "observed_at", "lease_expires_at", "last_processed_comment_id"],
@@ -94,14 +94,23 @@ function receipt(comment, expectedRepo, expectedIssue) {
   return { ...parsed, type, github_comment_id: id };
 }
 
-export function createGitHubAuthorityAdapter({ token, repository = "D22977/gpt-browser-bridge", fetchImpl = globalThis.fetch, publisher, triggerContractHash, now } = {}) {
-  if (!/^[^/]+\/[^/]+$/.test(repository) || typeof fetchImpl !== "function" || typeof triggerContractHash !== "string" || !triggerContractHash || typeof now !== "string" || !Number.isFinite(Date.parse(now))) stop("MALFORMED_ADAPTER_CONFIG");
+export function createGitHubAuthorityAdapter({
+  token,
+  repository = "D22977/gpt-browser-bridge",
+  authorityIssueNumbers = { control: 88, registry: 43, switch: 81 },
+  sourceIssueNumber = 162,
+  fetchImpl = globalThis.fetch,
+  publisher,
+} = {}) {
+  if (typeof token !== "string" || !token.trim()) stop("GITHUB_AUTH_REQUIRED");
+  if (!/^[^/]+\/[^/]+$/.test(repository) || typeof fetchImpl !== "function"
+    || !authorityIssueNumbers || ![authorityIssueNumbers.control, authorityIssueNumbers.registry, authorityIssueNumbers.switch, sourceIssueNumber].every((issue) => Number.isSafeInteger(issue) && issue > 0)) stop("MALFORMED_ADAPTER_CONFIG");
   const root = `https://api.github.com/repos/${repository}`;
-  const headers = { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  async function request(url) {
+  const supportedIssues = [...new Set([authorityIssueNumbers.registry, authorityIssueNumbers.switch, authorityIssueNumbers.control, sourceIssueNumber])];
+  const headers = { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", Authorization: `Bearer ${token}` };
+  async function request(url, options = {}) {
     let response;
-    try { response = await fetchImpl(url, { headers, redirect: "error" }); }
+    try { response = await fetchImpl(url, { ...options, headers: { ...headers, ...options.headers }, redirect: "error" }); }
     catch { stop("GITHUB_API_UNAVAILABLE"); }
     if (!response?.ok) stop(response?.status === 401 || response?.status === 403 ? "GITHUB_AUTH_OR_RATE_LIMIT" : "GITHUB_API_UNAVAILABLE");
     let data;
@@ -152,41 +161,61 @@ export function createGitHubAuthorityAdapter({ token, repository = "D22977/gpt-b
     if (decimal(data?.id) !== decimal(id) || issueOf(data).repo !== repository) stop("RECEIPT_READBACK_MISMATCH");
     return data;
   }
-  async function readAuthority() {
-    const [starts, registries, switches] = await Promise.all([allComments(43), allComments(81), allComments(88)]);
+  async function exactIssueComment(id, issue, body) {
+    const fetched = await exactComment(id);
+    if (issueOf(fetched).issue !== issue || fetched.body !== body) stop("RECEIPT_READBACK_MISMATCH");
+    return fetched;
+  }
+  function admissions(comment) {
+    const lines = [...comment.body.matchAll(/^producer_admission_comment_ids: (.+)$/gm)];
+    if (lines.length > 1) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    if (!lines.length) return [];
+    let ids;
+    try { ids = JSON.parse(lines[0][1]); } catch { stop("AUTHORITY_CONFLICT_OR_MALFORMED"); }
+    if (!Array.isArray(ids)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    return ids.map(decimal);
+  }
+  async function currentAuthorityComments() {
+    const [starts, registries, switches] = await Promise.all([
+      allComments(authorityIssueNumbers.registry),
+      allComments(authorityIssueNumbers.switch),
+      allComments(authorityIssueNumbers.control),
+    ]);
     const select = (rows, pattern) => rows.filter(c => pattern.test(c.body?.split(/\r?\n/, 1)[0] || "")).at(-1);
     const start = select(starts, AUTHORITY.start), registry = select(registries, AUTHORITY.registry), active = select(switches, /^CONTROL_GENERATION_ATOMIC_SWITCH_V1$/);
     if (!start || !registry || !active) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
-    for (const [row, issue] of [[start, 43], [registry, 81], [active, 88]]) {
+    for (const [row, issue] of [[start, authorityIssueNumbers.registry], [registry, authorityIssueNumbers.switch], [active, authorityIssueNumbers.control]]) {
       if (issueOf(row).repo !== repository || issueOf(row).issue !== issue || !row.body.includes(`repository: ${repository}`)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
-      const fetched = await exactComment(row.id);
-      if (fetched.body !== row.body || decimal(fetched.id) !== decimal(row.id) || issueOf(fetched).issue !== issue) stop("AUTHORITY_READBACK_MISMATCH");
+      const fetched = await exactIssueComment(row.id, issue, row.body);
+      if (decimal(fetched.id) !== decimal(row.id)) stop("AUTHORITY_READBACK_MISMATCH");
     }
-    if (pointer(registry.body, "source_current_start", 43) !== decimal(start.id)) stop("AUTHORITY_POINTER_MISMATCH");
+    if (pointer(registry.body, "source_current_start", authorityIssueNumbers.registry) !== decimal(start.id)) stop("AUTHORITY_POINTER_MISMATCH");
     const generation = /^current_active_generation: (\d+)$/m.exec(active.body)?.[1];
     const identity = /^active_control_conversation_id: (\S+)$/m.exec(active.body)?.[1];
     const startGeneration = /^control_generation: (\d+) ACTIVE_REHYDRATED$/m.exec(start.body)?.[1];
     const registryGeneration = /^control_generation: (\d+) ACTIVE_REHYDRATED$/m.exec(registry.body)?.[1];
     if (!generation || !identity || generation !== startGeneration || generation !== registryGeneration || !active.body.includes("single_active_control: true")) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
-    const routes = [...start.body.matchAll(/^webgpt_route: Issue #88 comment ([1-9]\d*) \/ generation(\d+)$/gm)];
+    const routes = [...start.body.matchAll(new RegExp(`^webgpt_route: Issue #${authorityIssueNumbers.control} comment ([1-9]\\d*) \/ generation(\\d+)$`, "gm"))];
     if (routes.length !== 1 || routes[0][1] !== decimal(active.id) || routes[0][2] !== generation) stop("AUTHORITY_POINTER_MISMATCH");
     const route = routes[0];
     const routeComment = await exactComment(route[1]);
-    if (issueOf(routeComment).issue !== 88 || routeComment.body !== active.body || !routeComment.body.startsWith(`${AUTHORITY.switch}\n`) || !routeComment.body.includes(`repository: ${repository}`) || !routeComment.body.includes(`current_active_generation: ${generation}`) || !routeComment.body.includes(`active_control_conversation_id: ${identity}`)) stop("AUTHORITY_POINTER_MISMATCH");
-    return { control_generation: generation, active_control_conversation_id: identity, current_start_receipt: `43:${start.id}`, current_registry_receipt: `81:${registry.id}`, active_switch_receipt: `88:${active.id}`, switch_conflict: false };
+    if (issueOf(routeComment).issue !== authorityIssueNumbers.control || routeComment.body !== active.body || !routeComment.body.startsWith(`${AUTHORITY.switch}\n`) || !routeComment.body.includes(`repository: ${repository}`) || !routeComment.body.includes(`current_active_generation: ${generation}`) || !routeComment.body.includes(`active_control_conversation_id: ${identity}`)) stop("AUTHORITY_POINTER_MISMATCH");
+    return { start, registry, active, control_generation: generation, active_control_conversation_id: identity };
+  }
+  async function readAuthoritySnapshot() {
+    const current = await currentAuthorityComments();
+    const item = (comment) => ({
+      github_comment_id: decimal(comment.id),
+      control_generation: current.control_generation,
+      active_control_conversation_id: current.active_control_conversation_id,
+      producer_admission_comment_ids: admissions(comment),
+      switch_conflict: false,
+    });
+    return { control: item(current.start), registry: item(current.registry), switch: item(current.active) };
   }
   async function snapshot() {
-    const authority = await readAuthority();
-    const rows = (await Promise.all(SUPPORTED_ISSUES.map(allComments))).flatMap((comments, index) => comments.map(c => receipt(c, repository, SUPPORTED_ISSUES[index])).filter(Boolean));
-    const leases = rows.filter(r => r.type === "LOCAL_CONTROL_RESIDENT_LEASE_V1" && r.control_generation === authority.control_generation && r.trigger_contract_hash === triggerContractHash && Date.parse(r.expires_at) > Date.parse(now));
-    for (const lease of leases) {
-      if (!Number.isFinite(Date.parse(lease.acquired_at)) || !Number.isFinite(Date.parse(lease.expires_at))) stop("MALFORMED_RECOGNIZED_RECEIPT");
-      for (const watched of lease.watched_issue_set) {
-        const match = /^([^#]+)#([1-9]\d*)$/.exec(watched);
-        if (!match || match[1] !== repository || !SUPPORTED_ISSUES.includes(Number(match[2]))) stop("UNSUPPORTED_WATCHED_ISSUE_SET");
-      }
-    }
-    return rows;
+    const issueRows = await Promise.all(supportedIssues.map((issue) => allComments(issue)));
+    return issueRows.flatMap((comments, index) => comments.map((comment) => receipt(comment, repository, supportedIssues[index])).filter(Boolean));
   }
   async function listReceipts() {
     const rows = await snapshot();
@@ -194,16 +223,61 @@ export function createGitHubAuthorityAdapter({ token, repository = "D22977/gpt-b
   }
   async function getReceipt(id) {
     const row = await exactComment(id);
-    const parsed = receipt(row, repository, issueOf(row).issue);
+    const issue = issueOf(row).issue;
+    if (!supportedIssues.includes(issue)) stop("UNSUPPORTED_ISSUE");
+    const parsed = receipt(row, repository, issue);
     if (!parsed) stop("UNRECOGNIZED_EXACT_RECEIPT");
     return parsed;
+  }
+  async function readHeartbeat(lease) {
+    const heartbeats = (await snapshot()).filter((item) => item.type === "LOCAL_CONTROL_RESIDENT_HEARTBEAT_V1"
+      && (!lease || item.lease_id === lease.lease_id));
+    heartbeats.sort((left, right) => BigInt(left.github_comment_id) < BigInt(right.github_comment_id) ? -1 : 1);
+    return heartbeats.at(-1) ?? null;
   }
   async function listSourceEvents() {
     return (await snapshot()).filter(r => r.type === "GITHUB_SOURCE_EVENT_V1");
   }
-  async function publishReceipt(value) {
-    if (typeof publisher !== "function") stop("LIVE_RECEIPT_PUBLICATION_NOT_AUTHORIZED");
-    return publisher(value);
+  function receiptBody(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value) || !TYPES.has(value.type)) stop("MALFORMED_RECOGNIZED_RECEIPT");
+    validateFields(value.type, value);
+    const fields = Object.keys(value).filter((key) => key !== "type" && key !== "github_comment_id").sort();
+    return [value.type, ...fields.map((key) => `${key}: ${Array.isArray(value[key]) || (value[key] && typeof value[key] === "object") ? JSON.stringify(value[key]) : value[key]}`)].join("\n");
   }
-  return { readAuthority, listReceipts, getReceipt, listSourceEvents, publishReceipt };
+  async function createComment(issue, body) {
+    let result;
+    if (typeof publisher === "function") result = await publisher({ repository, issue, body });
+    else result = (await request(`${root}/issues/${issue}/comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body }) })).data;
+    return decimal(typeof result === "object" ? result?.id : result);
+  }
+  async function publishReceipt(value) {
+    const body = receiptBody(value);
+    const issue = value.source_issue ?? sourceIssueNumber;
+    if (!Number.isSafeInteger(issue) || !supportedIssues.includes(issue) || (value.source_repo && value.source_repo !== repository)) stop("UNSUPPORTED_ISSUE");
+    const id = await createComment(issue, body);
+    const row = await exactIssueComment(id, issue, body);
+    if (!receipt(row, repository, issue)) stop("RECEIPT_READBACK_MISMATCH");
+    return id;
+  }
+  async function sendPointer(pointerValue) {
+    if (!pointerValue || pointerValue.source_repo !== repository || pointerValue.source_issue !== sourceIssueNumber) stop("MALFORMED_POINTER_REQUEST");
+    const sourceCommentId = decimal(pointerValue.source_comment_id);
+    const wakeRequestCommentId = decimal(pointerValue.wake_request_comment_id);
+    const idempotencyKey = createHash("sha256").update(`${repository}#${sourceIssueNumber}:${sourceCommentId}:${wakeRequestCommentId}`).digest("hex");
+    const body = [
+      "GBB_LOCAL_CONTROL_POINTER_DELIVERY_REQUEST_V1",
+      `source_repo: ${repository}`,
+      `source_issue: ${sourceIssueNumber}`,
+      `source_comment_id: ${sourceCommentId}`,
+      `wake_request_comment_id: ${wakeRequestCommentId}`,
+      `idempotency_key: ${idempotencyKey}`,
+    ].join("\n");
+    const matches = (await allComments(sourceIssueNumber)).filter((comment) => comment.body?.startsWith("GBB_LOCAL_CONTROL_POINTER_DELIVERY_REQUEST_V1\n")
+      && new RegExp(`^idempotency_key: ${idempotencyKey}$`, "m").test(comment.body));
+    if (matches.length > 1 || (matches.length === 1 && matches[0].body !== body)) stop("POINTER_REQUEST_CONFLICT");
+    const id = matches.length ? decimal(matches[0].id) : await createComment(sourceIssueNumber, body);
+    await exactIssueComment(id, sourceIssueNumber, body);
+    return { github_comment_id: id, idempotency_key: idempotencyKey };
+  }
+  return { readAuthoritySnapshot, listReceipts, readHeartbeat, getReceipt, listSourceEvents, publishReceipt, sendPointer };
 }
