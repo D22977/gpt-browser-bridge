@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "repository_full_name": "D22977/gpt-browser-bridge",
+  "authority_issue_numbers": {
+    "control": 88,
+    "registry": 43,
+    "switch": 81
+  },
+  "source_issue_number": 162,
+  "poll_interval_min_ms": 1000,
+  "poll_interval_ms": 5000,
+  "poll_interval_max_ms": 60000,
+  "heartbeat_max_age_ms": 30000,
+  "transport_capability": "herdr-minimal-github-pointer",
+  "artifact_mapping": {
+    "adapter_source": "src/control_doorbell_runtime.mjs",
+    "adapter_runtime": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/watcher.mjs",
+    "config_source": "config/control_doorbell_runtime.json",
+    "config_runtime": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/config.json",
+    "semantic_core_source": "src/github_authority_resident.mjs",
+    "semantic_core_runtime": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/github_authority_resident.mjs",
+    "semantic_core_blob": "1a0c818321e64ec3dd4619e563d6845124af7c2b"
+  }
+}
