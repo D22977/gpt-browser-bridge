@@ -1,5 +1,11 @@
 # GPT Browser Bridge Morning Checklist
 
+First read [AGENTS.md](../AGENTS.md), [HANDOFF_CONTRACT.md](HANDOFF_CONTRACT.md),
+current GitHub #43/#81/#88 and the target work order. The checks below describe the
+historical ORCA runtime; use only for an admitted ORCA lane. Its summary and local
+state are evidence, not current semantic authority. For Herdr/Web continuation use
+[HERDR_RUNBOOK.md](HERDR_RUNBOOK.md) and [WEB_CONTROL_RUNBOOK.md](WEB_CONTROL_RUNBOOK.md).
+
 Use this checklist before accepting any overnight claim. Treat the summary as
 an index; confirm it against state, Git, tests, reports, and current ORCA data.
 
@@ -151,6 +157,8 @@ Use exactly one branch:
    task within the same-card limit.
 5. `NEEDS_HUMAN`, unknown dirt, authentication/CAPTCHA, missing checkpoint,
    three terminal crashes, or 20-minute ORCA outage: keep stopped, preserve
-   evidence, and resolve manually.
+   evidence, and return to Control. Do not clear the local hold. Control reconciles
+   current authority and authorized alternatives; only a proven human gate needs
+   manual resolution.
 
 Record the decision and evidence paths before changing project state.

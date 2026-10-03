@@ -1,24 +1,33 @@
 ---
 name: gbb-worker
-description: Role contract for a GPT Browser Bridge Worker agent. Edits source only inside the current card's allowed paths, runs tests, writes a worker report, and commits with the card-id prefix. Use when acting as the GBB Worker for a card in GPT_BROWSER_BRIDGE.
+description: Use when executing a bounded GBB implementation card or resuming its exact parked Worker after an authorized repair request.
 ---
 
 # Worker SKILL (GBB role contract)
 
-Authoritative source: `plans/GBB_PARENT_WORK_ORDER.md` (§6.3, §7.2, §17).
-This skill is the single source of truth for the Worker role. Do not keep diverging
-copies for different CLI tools.
+Read [AGENTS.md](../../AGENTS.md), the [shared handoff contract](../../docs/HANDOFF_CONTRACT.md)
+and the exact live GitHub card. Historical parent-plan examples do not select the
+current task, base or permission. Do not keep divergent per-tool copies of this skill.
 
 ## Inputs
 
-A dispatch file (e.g. `DISPATCH.md`) supplies:
+A GitHub dispatch plus its applicable amendments supplies the following. Local
+`DISPATCH.md` or terminal prose is only a pointer/cache; independently reread GitHub:
 
 - `task_id` (e.g. `GBB-001`)
-- `base_commit` (HEAD when you start)
+- `base_commit` (exact authorized commit, not whichever HEAD happens to be checked out)
 - `allowed paths` (the only paths you may modify)
 - `acceptance gates` (verification checklist)
 - `worktree path`
 - `report path` (e.g. `docs/WORKER_REPORT_<TASK_ID>.md`)
+- source dispatch/wake identity, current generation, terminal protocol and decision set
+- exact executor/pane/session binding, return target and terminal guard owner
+- authorized repair rounds, cost bounds and stage gates
+
+Before mutation, verify fresh identity/base/scope and publish/read back your own
+card-specific CONSUMED_STARTED receipt. A Herdr delivery receipt cannot do this for you.
+Zero/ambiguous binding, conflicting authority or head drift returns a typed blocker
+to Control; do not choose a replacement base on your own.
 
 ## Outputs
 
@@ -29,11 +38,18 @@ commit_sha           — the last commit SHA written into the report
 changed_files.txt    — list of files changed by the card
 ```
 
+Use the current card's allowed output locations. Do not add a tracked report outside
+allowed paths. READY must expose a GitHub-readable exact branch/head/parent, changed
+paths/blobs, real test commands/results and unresolved limitations. Publish/read back
+the card's terminal, then verify the bound return/guard has the terminal pointer.
+Local-only reports or a final chat sentence are not durable completion.
+
 ## Rules
 
 1. Edit **only** your card's allowed paths. Any change outside them = stop.
-2. Read `AGENTS.md` and the parent work order before working.
-3. Run the tests before committing: `npm test` (node:test only).
+2. Read the common contract and current card; consult historical parent sections only where applicable.
+3. Run the card's required checks before committing: `npm test` for code changes
+   (node:test only); document-specific validation for docs-only work unless the card requires more.
 4. Run `node --check` on every `.mjs` file you touch.
 5. Commit with the card-id prefix, e.g. `GBB-001 ...`.
 6. Never self-update the card status to 通過; only the Control Tower decides.
@@ -45,12 +61,20 @@ changed_files.txt    — list of files changed by the card
 
 - A modification appears outside the allowed paths.
 - Base tests fail for reasons unrelated to your card.
-- Repo dirtiness with unknown attribution → `NEEDS_HUMAN / DIRTY_ATTRIBUTION_UNKNOWN`.
+- Repo dirtiness with unknown attribution → preserve it and return `DIRTY_ATTRIBUTION_UNKNOWN` to Control.
 - A destructive Git operation would be required.
 - A required dependency or login is missing.
 
-When stopping: record the situation in the worker report, commit what can be
-committed, and end with `GBB-001 WORKER STOPPED: <reason>` (or the card id).
+When stopping mutation, record exact evidence and publish/read back the card's typed
+terminal. Commit only attributable in-scope changes when permitted; do not blindly
+commit an unknown working tree. Publication failure remains an unresolved reporting
+obligation for the guard, not permission to rerun implementation.
+
+At READY, park the exact Worker with a recoverable identity. You do not self-review,
+merge, send a live canary or advance the parent. Control/guard owns the next phase.
+On a preauthorized in-scope repair, reread the finding and current exact binding;
+produce a new head and a new READY for a NEW fresh review. Process restart alone
+does not authorize another repair or replay a physical prompt.
 
 ## Git governance
 

@@ -5,9 +5,10 @@ description: Role contract for the GPT Browser Bridge Browser Action Runner (Sen
 
 # Browser Action Runner (Sender) SKILL (GBB role contract)
 
-Authoritative source: `plans/GBB_PARENT_WORK_ORDER.md` (§6.5, §7.4).
-This skill is the single source of truth for the Sender role. Do not keep diverging
-copies for different CLI tools.
+Read [AGENTS.md](../../AGENTS.md), the [shared handoff contract](../../docs/HANDOFF_CONTRACT.md)
+and the exact current browser request. The parent-plan job details below describe
+the original browser-job lane; they do not select today's target or grant a send.
+Do not keep divergent per-tool copies of this skill.
 
 ## Identity
 
@@ -20,6 +21,11 @@ copies for different CLI tools.
 - You never watch the answer after the job is sent.
 
 ## Before sending (baseline + identity)
+
+First bind current authority, exact target, logical action and the downstream guard.
+Reconcile durable/local physical-attempt evidence and persist the attempt before
+the send boundary. A new job UUID is not permission to replay an uncertain action.
+The caller/guard owns terminal-to-Control reporting after Sender stops.
 
 1. Read the assistant message count (baseline).
 2. Read the last old assistant message hash.
@@ -38,8 +44,9 @@ copies for different CLI tools.
 ## One conversation, one active job
 
 - A conversation URL hosts at most one active job at a time.
-- Do not re-send the same attempt; on timeout/uncertainty, leave it to the Watcher to
-  resume against the original URL.
+- Do not re-send the same attempt. On uncertainty, publish the transport limitation;
+  a Watcher may observe the exact original target if bound. Its observations go to
+  Control for reconciliation; missing output does not prove that a send never occurred.
 
 ## Security
 

@@ -5,9 +5,9 @@ description: Role contract for the GPT Browser Bridge read-only Watcher. Reads t
 
 # Watcher SKILL (GBB role contract)
 
-Authoritative source: `plans/GBB_PARENT_WORK_ORDER.md` (§6.6, §7.5, §14).
-This skill is the single source of truth for the Watcher role. Do not keep diverging
-copies for different CLI tools.
+Read [AGENTS.md](../../AGENTS.md), the [shared handoff contract](../../docs/HANDOFF_CONTRACT.md)
+and the exact immutable browser job selected by current authority. The parent-plan
+details below apply to that browser-job lane. Do not keep divergent per-tool copies.
 
 ## Identity
 
@@ -63,8 +63,11 @@ write reply.md atomically (write-file-atomic)
 → emit stdout event
 ```
 
-Only the presence of `result.json` is the terminal state. Result states: `DONE`,
-`NEEDS_DECISION`, `FAILED`.
+An atomically published, validated `result.json` is the local browser-job terminal.
+Result states: `DONE`, `NEEDS_DECISION`, `FAILED`. This is not a formal Reviewer
+verdict, Control ACK or parent completion. The bound guard must preserve the result
+identity and complete the GitHub publication/readback/return obligation. Watcher
+never acquires browser-write or semantic decision authority to complete that handoff.
 
 ## Security
 

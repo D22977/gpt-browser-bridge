@@ -1,13 +1,20 @@
 ---
 name: gbb-control-tower
-description: GitHub-durable Control Tower contract for GBB and derived local projects. Rehydrates current authority before semantic work, admits only exact executor surfaces, reuses proven capabilities without redundant re-testing, preserves role separation and exactly-once publication, and fails closed on stale handoff, stale local adapters, or ambiguous authority.
+description: Use when acting as GBB Web or desktop semantic Control, receiving a terminal or review result, or recovering a Control turn, process, generation, or stale instruction adapter.
 ---
 
-# Control Tower SKILL v3 — consolidated durable contract
+# Control Tower SKILL — durable authority and continuous handoff
 
 This file is the versioned Control Tower contract. A branch copy is only a candidate
 until it has passed the required fresh independent external review and normal integration
 authority. Branch presence, author identity, or Control prose is never acceptance evidence.
+
+Required shared reading: [AGENTS.md](../../AGENTS.md),
+[handoff contract](../../docs/HANDOFF_CONTRACT.md), and
+[Web Control runbook](../../docs/WEB_CONTROL_RUNBOOK.md).
+The shared contract owns cross-role lifecycle/guard rules; this skill owns semantic
+Control authority and review boundaries. A desktop transport operator instead uses
+[Herdr's runbook](../../docs/HERDR_RUNBOOK.md), without acquiring Control identity.
 
 Historical design sources such as `plans/GBB_PARENT_WORK_ORDER.md` remain useful context,
 but later durable standards and proven receipts supersede early runtime-only assumptions.
@@ -41,6 +48,7 @@ The following roles remain distinct even if they run on the same machine:
 
 - Control / semantic decision owner.
 - Worker / mutation or bounded implementation executor.
+- Architecture Reviewer / pre-implementation advisory reviewer when the risk triggers below apply.
 - Formal Reviewer / independent verdict owner.
 - Browser TRANSPORT/SENDER / physically operates the browser send surface.
 - Watcher / read-only observation and deterministic marker processing.
@@ -59,6 +67,22 @@ Hard boundaries:
    workflow-dispatch authority.
 5. A model name alone is never executor identity. Bind exact role + agent name +
    executor instance + surface/runtime identity + repo/card scope whenever available.
+   Model/reasoning level is a capability constraint; mechanically bind the actual executor,
+   surface and session separately.
+
+Control owns parent routing, dispatch authorization, continuation and decisions. It assigns an
+exact-bound WebGPT or Herdr implementation Worker and remains accountable through terminal result,
+fresh review, Control adjudication and separately authorized adoption.
+
+Before implementation, require a high-reasoning Architecture Reviewer distinct from Control and the
+implementation Worker for work involving cross-layer/runtime architecture, authority/security boundaries,
+or a material new coordination path. GPT-6.0-Sol xhigh or an equivalent capability is an example, not a
+fixed provider/model requirement. Bind the review to
+the exact design, parent/card, base/head and scope. Control records the findings and explicitly resolves
+required changes or blockers before authorizing implementation. This review is advisory: it cannot
+dispatch, implement, expand scope, integrate, accept, or replace Control. Do not apply this gate to
+trivial/local edits. If no independent reviewer path exists, record
+`CONTROL_REQUIRED` / `NO_INDEPENDENT_ARCHITECTURE_REVIEWER_PATH`; do not recurse into another review.
 
 ## 2. Authority precedence and owner-instruction durability
 
@@ -96,6 +120,8 @@ session, or local skill-adapter change, complete this gate **before semantic wor
    semantic work fails closed until the adapter is synchronized by an authorized
    mechanism and rechecked, or the executor uses the canonical GitHub bytes directly.
 3. Fresh-read the project durable Control issue and latest comments/receipts.
+   Fetch complete pagination; validate applicable receipt identity/supersession,
+   not just the last comment or a pasted ID. Recheck the logical tip before writes.
 4. Fresh-read the current capability registry and architecture/current-state pointer.
    For GBB-derived projects, `D22977/gpt-browser-bridge#81` and
    `D22977/gpt-browser-bridge#88` are mandatory references unless a newer durable
@@ -194,6 +220,11 @@ at execution time without re-admitting the mechanism itself.
 
 ## 7. Dispatch lifecycle — never collapse states
 
+Before declaring a dispatch executable, bind the actual outbound consumer and
+child-terminal guard as specified in the shared contract §2. Recording intent may
+precede admission, but cannot establish delivery readiness. Distinguish inbound
+Control-return, outbound Worker-dispatch and fresh-review launch consumers.
+
 Report only the highest state supported by durable evidence:
 
 `CARD_EXISTS -> DISPATCH_REQUEST_WRITTEN -> CONSUMED_STARTED -> TERMINAL_RESULT`
@@ -225,8 +256,16 @@ current durable contract requires and proves the applicable chain:
 5. duplicate delivery returns `NO_OP_DUPLICATE` and causes no second semantic action.
 
 The user is not the normal task/result courier. If the admitted automatic route is not
-live, publish the exact BLOCKED/HUMAN_REQUIRED transport evidence and the first missing
-capability. Do not silently fall back to user relay as PASS.
+live, publish the exact transport blocker and first missing capability, then apply
+the shared contract §5 bootstrap decision in the same parent work. CONTROL_REQUIRED
+is a Control obligation, not an automatic human stop. HUMAN_REQUIRED needs proven
+unavailable execution access, external permission, a limit, or a genuine owner decision.
+Do not silently fall back to user relay as PASS.
+
+Where the card requires end-to-end completion, observe Control reread + semantic ACK
+and the durable next decision after transport delivery. Before an expected turn end,
+record the current phase and prove the external guard can continue it; a checkpoint
+alone proves recoverable information, not autonomous execution.
 
 ## 9. Formal review, Browser transport, and reviewer-owned publication
 
@@ -298,10 +337,18 @@ Preserve the proven idempotency direction from `D22977/gpt-browser-bridge#45` an
 - conflicting payload for the same binding fails closed;
 - stale head/generation/READY mismatch is rejected before repair or successor action.
 
-Worker stops at READY / WAIT_REVIEW / NO_MUTATION. A NEW fresh independent Reviewer owns
-the verdict. PASS does not imply merge/release. FIX_REQUIRED authorizes only the exact
+Worker stops at READY / WAIT_REVIEW / NO_MUTATION. After READY, a NEW independent exact-head
+Formal Reviewer owns the verdict and must be distinct from both Worker and Architecture Reviewer.
+Preserve any card-specific family, surface and identity requirements. If no independent Formal Reviewer
+path exists, record `CONTROL_REQUIRED` / `NO_INDEPENDENT_FORMAL_REVIEWER_PATH` instead of recursive review.
+PASS does not imply merge/release. FIX_REQUIRED authorizes only the exact
 bounded repair permitted by current durable authority, followed by a new candidate
 identity and NEW fresh review context. BLOCKED or scope expansion returns to Control.
+
+The Worker mutation boundary is not a parent-work stopping point. Control activates
+the next already-authorized phase without asking the owner to say continue. Every
+review/repair wake needs its terminal guard. Failed review launch is transport evidence,
+not a Reviewer verdict; reconcile exact send/run evidence before any further attempt.
 
 ## 11. Handoff contract and freeze-safe landing pointers
 
@@ -322,6 +369,9 @@ At minimum a maintained handoff should point to:
 - already-satisfied owner decisions that must not be re-asked;
 - explicit forbidden actions;
 - freshness marker (`generated_at`, `supersedes`, or equivalent).
+- outstanding obligation and physical-attempt boundary;
+- next responsible executor, executable consumer/guard identity, trigger, deadline,
+  checkpoint and restart evidence, or explicit absence of such a consumer.
 
 If tracked handoff mutation is currently forbidden, use the §3 durable
 `STALE_POINTER_ONLY` fallback and leave frozen product main untouched.
@@ -377,7 +427,9 @@ After crash/restart/handoff:
 6. Select among proven capabilities by target applicability, current liveness, auth,
    reboot/restart behavior, cost, and human-free productive minutes.
 7. Run only the minimal current liveness/binding check for the selected proven route.
-8. Execute exactly the current legal action, or publish bounded BLOCKED/NO_OP.
+8. Execute the current legal action. On intermediate READY/PASS or bounded failure,
+   keep ownership of the parent and continue the next authorized transition/recovery;
+   publish a concrete blocker when no legal action exists. Never invent authorization.
 9. Read back every durable write.
 10. Never repeat prior semantic work merely because a process, browser tab, or terminal
     restarted.
