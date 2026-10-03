@@ -48,6 +48,7 @@ The following roles remain distinct even if they run on the same machine:
 
 - Control / semantic decision owner.
 - Worker / mutation or bounded implementation executor.
+- Architecture Reviewer / pre-implementation advisory reviewer when the risk triggers below apply.
 - Formal Reviewer / independent verdict owner.
 - Browser TRANSPORT/SENDER / physically operates the browser send surface.
 - Watcher / read-only observation and deterministic marker processing.
@@ -66,6 +67,22 @@ Hard boundaries:
    workflow-dispatch authority.
 5. A model name alone is never executor identity. Bind exact role + agent name +
    executor instance + surface/runtime identity + repo/card scope whenever available.
+   Model/reasoning level is a capability constraint; mechanically bind the actual executor,
+   surface and session separately.
+
+Control owns parent routing, dispatch authorization, continuation and decisions. It assigns an
+exact-bound WebGPT or Herdr implementation Worker and remains accountable through terminal result,
+fresh review, Control adjudication and separately authorized adoption.
+
+Before implementation, require a high-reasoning Architecture Reviewer distinct from Control and the
+implementation Worker for work involving cross-layer/runtime architecture, authority/security boundaries,
+or a material new coordination path. GPT-6.0-Sol xhigh or an equivalent capability is an example, not a
+fixed provider/model requirement. Bind the review to
+the exact design, parent/card, base/head and scope. Control records the findings and explicitly resolves
+required changes or blockers before authorizing implementation. This review is advisory: it cannot
+dispatch, implement, expand scope, integrate, accept, or replace Control. Do not apply this gate to
+trivial/local edits. If no independent reviewer path exists, record
+`CONTROL_REQUIRED` / `NO_INDEPENDENT_ARCHITECTURE_REVIEWER_PATH`; do not recurse into another review.
 
 ## 2. Authority precedence and owner-instruction durability
 
@@ -320,8 +337,11 @@ Preserve the proven idempotency direction from `D22977/gpt-browser-bridge#45` an
 - conflicting payload for the same binding fails closed;
 - stale head/generation/READY mismatch is rejected before repair or successor action.
 
-Worker stops at READY / WAIT_REVIEW / NO_MUTATION. A NEW fresh independent Reviewer owns
-the verdict. PASS does not imply merge/release. FIX_REQUIRED authorizes only the exact
+Worker stops at READY / WAIT_REVIEW / NO_MUTATION. After READY, a NEW independent exact-head
+Formal Reviewer owns the verdict and must be distinct from both Worker and Architecture Reviewer.
+Preserve any card-specific family, surface and identity requirements. If no independent Formal Reviewer
+path exists, record `CONTROL_REQUIRED` / `NO_INDEPENDENT_FORMAL_REVIEWER_PATH` instead of recursive review.
+PASS does not imply merge/release. FIX_REQUIRED authorizes only the exact
 bounded repair permitted by current durable authority, followed by a new candidate
 identity and NEW fresh review context. BLOCKED or scope expansion returns to Control.
 

@@ -49,6 +49,21 @@ Control 可以先記錄需求；**要宣告可執行派工，必須先確認 out
 這是既有工單的內容要求，不是新 runtime protocol／資料庫。實際 producer／consumer
 必須使用相容的既有 schema；寫了欄位不能當作程式已支援它。
 
+Control Tower 負責父工作的 routing、派工授權、接續與裁決，並指派 exact-bound 的
+WebGPT 或 Herdr implementation Worker。Worker 到 READY 後，Control 仍負責推進到
+terminal result、fresh review、Control 裁決及另有授權的 adoption。
+
+實作前若工作涉及跨層／runtime 架構、authority／security 邊界，或重大新協調路徑，
+Control 必須先取得與 Control 及 implementation Worker 身分不同、具 high-reasoning 能力的
+Architecture Reviewer。GPT-6.0-Sol xhigh 或能力相當者是例子，不是固定 provider／model 要求。
+審查需綁定 exact design、
+parent/card、base/head 與 scope；Control 記錄 findings，並明確解決所有 required changes
+或 blockers 後才授權實作。Architecture Reviewer 僅提供 advisory findings，不能派工、實作、
+擴大 scope、整合、accept 或取代 Control。模型／reasoning level 是能力條件，不是身分；
+實際 executor identity、surface 與 session 必須另行機械式綁定。trivial/local edit 不加此 gate；
+若沒有獨立審查入口，回報 `CONTROL_REQUIRED`／`NO_INDEPENDENT_ARCHITECTURE_REVIEWER_PATH`，
+不遞迴要求另一位 reviewer 審 reviewer。
+
 分別驗證 `Control -> Herdr -> Worker`、`terminal -> Control`、`Control -> fresh Reviewer`
 三個方向。檔名含 control／bridge 不代表三者都支援。歷史能力 PASS 只需做最小 current
 liveness/applicability 檢查；不因 Web tool list 沒有 Herdr 就否定已登錄的外部路徑。
@@ -60,18 +75,22 @@ C2C/custom MCP 與 Pro 升級不構成所有 GBB 生產工作的共同前置條�
 
 | 觀察到的狀態 | 當下負責人與下一步 |
 | --- | --- |
-| CARD_EXISTS | Control 補齊派工與通道 admission；尚未啟動執行。 |
+| CARD_EXISTS | Control 完成必要的高風險設計審查與裁決、派工及通道 admission；尚未啟動執行。 |
 | DISPATCH_REQUEST_WRITTEN | 已綁定的 consumer 讀回、去重、確認 fresh executor，才進行首次物理派送。 |
 | SENT／delivery receipt | guard 等 executor 自己發布精確 CONSUMED_STARTED；不能代寫成 Worker 已開工。 |
 | CONSUMED_STARTED | Worker 執行；guard 追 exact run/job/session 的 terminal，不只追「開始」。 |
-| READY／TERMINAL_RESULT | Worker 停止 mutation 並保留可恢復 identity；guard 送 Control-return，Control 讀回並裁決下一段。 |
-| fresh review FIX_REQUIRED | Control／已授權 transition 綁定有限修復給原 Worker；新 head 要新 fresh review。 |
-| fresh review PASS | Control 驗證精確 head；依另外的 integration/adoption/canary authority 前進。PASS 本身不授權 merge。 |
+| READY／TERMINAL_RESULT | Worker 停止 mutation 並保留可恢復 identity；guard 送 Control-return，Control 讀回並啟動必要的 NEW exact-head Formal Reviewer。 |
+| formal review FIX_REQUIRED | Control／已授權 transition 綁定有限修復給原 Worker；新 head 要新的獨立 fresh review。 |
+| formal review PASS | Control 驗證精確 head；依另外的 integration/adoption/canary authority 前進。PASS 本身不授權 merge。 |
 | BLOCKED／CONTROL_REQUIRED／STALE | guard 回報具體錯誤；Control 立即處理可解決的綁定、範圍與有限恢復，不預設等 owner 說繼續。 |
 | DONE | Control 核對父包全部驗收、必要外部審查與下一步，更新 durable 指標後才結案。 |
 
 Worker 到 READY 停止修改，**父工作不因此停止**。Control 負責從當前階段推進到已授權的
 下一小目標；超出 owner 授權範圍時取得決策，不把「持續執行」解讀為無限擴張。
+READY 後的 Formal Reviewer 必須是 NEW、獨立且綁定 exact head，並與 Worker 及此前的
+Architecture Reviewer 都不同；保留當前工單指定的 family／surface／identity 要求。若無
+可用的獨立 Formal Reviewer 路徑，記錄 `CONTROL_REQUIRED`／`NO_INDEPENDENT_FORMAL_REVIEWER_PATH`，
+不以 Architecture Reviewer 或遞迴審查替代。
 
 回送完成依精確工單驗證：
 

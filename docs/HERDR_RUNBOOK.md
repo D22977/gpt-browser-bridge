@@ -15,7 +15,8 @@ GitHub 多了一份 Markdown 就自動讀取或實作規則。admission 必須�
 | --- | --- |
 | GitHub event -> Herdr -> Worker | accepted marker、issue/card/generation/base guards、runner、exact eligibility、prompt admission。 |
 | Worker/Reviewer terminal -> Web Control | terminal observer、return request、browser sender、exact ACTIVE target、semantic ACK observer。 |
-| review request -> fresh Reviewer | admitted surface、NEW context 證據、request/head binding、結果發布能力、launch/result guard。 |
+| 高風險 design -> Architecture Reviewer | Control 已授權；reviewer 與 Control／Worker 不同；exact design、parent/card、base/head、scope 與 findings 回傳綁定。 |
+| Worker READY -> Formal Reviewer | NEW context、exact-head request、獨立於 Worker 與 Architecture Reviewer；保留工單指定的 family／surface 要求。 |
 
 記錄實際執行的 entrypoint/ref/blob、所用依賴 blob、host/runner/run/job；歷史 PASS 不代表
 現在這條程式路徑可用。缺少適用入口時回 Control 綁定 bootstrap，不自行另造服務或改事件格式。
@@ -31,7 +32,8 @@ herdr agent list
 
 對 pane/workspace 操作先讀對應 help 並取得 current workspace；環境變數、logical name、
 歷史 pane ID 都不是唯一執行者證據。核對 role、pane/session/process、cwd、base、模型／費用
-與 eligibility。零個或多個合格目標時依工單處理，不能猜一個送。
+與 eligibility。model／reasoning level 是能力條件，不是 executor identity；另行機械式確認實際
+identity、surface 與 session。零個或多個合格目標時依工單處理，不能猜一個送。
 
 可建立替代 Worker 只在目前工單明確允許時執行；必須記錄新身分，避免重複執行既有任務。
 角色 skill adapter 與 canonical 不一致時，直接讀已採納的 canonical；不能默默套用舊規則。
@@ -39,10 +41,13 @@ Herdr 與 Worker 使用同一 repo/card/ref 指標，不在 CLI prompt 重建一
 
 ## 3. 單次傳遞與開始證據
 
-1. 重讀 exact card、head、ACTIVE switch、logical action，查完整 receipt/run/local attempt state。
+1. 重讀 exact card、head、ACTIVE switch、logical action，查完整 receipt/run/local attempt state；
+   若 card 要求高風險設計審查，確認 Control 已讀回 findings 與明確裁決，否則停在
+   `CONTROL_REQUIRED`／`ARCHITECTURE_REVIEW_UNRESOLVED`。
 2. 綁定／啟動 child-terminal guard；若需要同一 self-hosted runner，guard 不可佔住子工作所需容量。
 3. 依共用契約 §4 判定：first send、duplicate NO_OP、publication-only recovery 或 UNCERTAIN。
 4. 對 admitted exact executor 傳遞最小指標；在跨越物理邊界前持久記錄 attempt identity。
+   Herdr 不裁決 Architecture Reviewer findings，也不以 Architecture Reviewer 取代 READY 後的 Formal Reviewer。
 5. transport 發布並讀回自己的 delivery receipt；Worker 自己讀 GitHub、核對 scope、
    發布並讀回 CONSUMED_STARTED。工具回傳成功／working 狀態不能替代 Worker 收據。
 

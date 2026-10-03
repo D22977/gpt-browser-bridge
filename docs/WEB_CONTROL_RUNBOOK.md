@@ -15,13 +15,27 @@
 4. 綁定此次階段的 executor、terminal guard 與 return route，再啟動長工作。
    如入口缺失，立即走共用契約 §5 的 bounded bootstrap 決策。
 
+## 派工前設計審查與 Worker 指派
+
+Control Tower 是唯一的語意決策點：依風險與能力指派 exact-bound 的 WebGPT 或 Herdr
+implementation Worker，授權其派工，並持續負責 parent 到 terminal result、fresh review、
+Control 裁決及另有授權的 adoption。
+
+跨層／runtime 架構、authority／security 邊界或重大新協調路徑，必須在實作前由與 Control 及
+implementation Worker 身分不同、具 high-reasoning 能力的 Architecture Reviewer 審查。
+GPT-6.0-Sol xhigh 或能力相當者僅為例子，不限定 provider／model。綁定 exact design、parent/card、base/head、scope；Control 記錄 findings，
+明確解決 required changes／blockers 後才授權實作。此 Reviewer 僅提供 advisory findings，不能
+派工、實作、擴 scope、整合、accept 或取代 Control。model／reasoning 是能力條件；實際 executor
+identity、surface 與 session 另行機械式綁定。trivial/local edit 不加 gate；若沒有獨立審查入口，
+回報 `CONTROL_REQUIRED`／`NO_INDEPENDENT_ARCHITECTURE_REVIEWER_PATH`，不遞迴審 reviewer。
+
 ## 持續控制迴圈
 
 | 事件 | Control 必須完成的決策 |
 | --- | --- |
 | Worker 尚未 started | 查 consumer／實際派送證據；不要只再寫 wake。 |
 | Worker 已 started | 確認 exact terminal guard 仍存在、未佔死子工作的 runner；觀察 job 結果。 |
-| READY | 核對 remote head/parent/paths/tests，建立精確 fresh review request，交 distinct transport 啟動與追蹤。 |
+| READY | 核對 remote head/parent/paths/tests，建立精確 fresh review request，交 distinct transport 啟動 NEW、獨立且 exact-head 的 Formal Reviewer；其身分須不同於 Worker 與 Architecture Reviewer，並保留工單指定的 family／surface 要求。無獨立路徑時記錄 `CONTROL_REQUIRED`／`NO_INDEPENDENT_FORMAL_REVIEWER_PATH`。 |
 | 審查啟動逾時 | 查 launcher run/job／新 context 身分／送出證據；不能假定沒有送出，也不能當作 Reviewer verdict。 |
 | FIX_REQUIRED | 依已授權 scope／輪數給原 Worker；新 head、新 review binding、新 fresh Reviewer；重接 guard。 |
 | PASS | 完成自身的 acceptance 決策；只有另有精確 authority 才 integration/adoption/canary。 |
