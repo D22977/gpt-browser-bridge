@@ -79,7 +79,8 @@ C2C/custom MCP 與 Pro 升級不構成所有 GBB 生產工作的共同前置條�
 | DISPATCH_REQUEST_WRITTEN | 已綁定的 consumer 讀回、去重、確認 fresh executor，才進行首次物理派送。 |
 | SENT／delivery receipt | guard 等 executor 自己發布精確 CONSUMED_STARTED；不能代寫成 Worker 已開工。 |
 | CONSUMED_STARTED | Worker 執行；guard 追 exact run/job/session 的 terminal，不只追「開始」。 |
-| READY／TERMINAL_RESULT | Worker 停止 mutation 並保留可恢復 identity；guard 送 Control-return，Control 讀回並啟動必要的 NEW exact-head Formal Reviewer。 |
+| READY | Worker 停止 mutation 並保留可恢復 identity；guard 送 Control-return，Control 讀回並綁定／啟動 NEW、獨立且 exact-head Formal Reviewer，與 Worker 及 Architecture Reviewer 不同。 |
+| TERMINAL_RESULT（非 READY；BLOCKED／CONTROL_REQUIRED／STALE 見下列） | guard 送 Control-return；Control 讀回後依現有 authority 分類／恢復，不啟動 Formal Reviewer。 |
 | formal review FIX_REQUIRED | Control／已授權 transition 綁定有限修復給原 Worker；新 head 要新的獨立 fresh review。 |
 | formal review PASS | Control 驗證精確 head；依另外的 integration/adoption/canary authority 前進。PASS 本身不授權 merge。 |
 | BLOCKED／CONTROL_REQUIRED／STALE | guard 回報具體錯誤；Control 立即處理可解決的綁定、範圍與有限恢復，不預設等 owner 說繼續。 |
