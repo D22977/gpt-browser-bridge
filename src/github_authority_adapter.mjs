@@ -321,7 +321,7 @@ export function createGitHubAuthorityAdapter({
     if (controlFields.generation !== generation || controlFields.status_after !== "ACTIVE"
       || controlFields.conversation_id !== ackFields.conversation_id || controlFields.conversation_url !== ackFields.conversation_url
       || controlFields.single_active_control !== "true") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
-    if (oldIdentity === controlFields.conversation_id || oldFields.conversation_url === controlFields.conversation_url) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    if (oldIdentity.toLowerCase() === controlFields.conversation_id.toLowerCase() || oldFields.conversation_url === controlFields.conversation_url) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     validConversationUrl(controlFields.conversation_id, controlFields.conversation_url);
     return { start: startReadback, registry: registryReadback, active, control_generation: generation, active_control_conversation_id: ackFields.conversation_id };
   }

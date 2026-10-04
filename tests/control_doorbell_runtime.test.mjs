@@ -863,6 +863,10 @@ test("T31 malformed exact generation 033 pointers and identities fail closed wit
       replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "conversation_id", "6abd98f5-5808-83e8-852c-f01a16cebf24");
       replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "conversation_url", "https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhu-an/c/6abd98f5-5808-83e8-852c-f01a16cebf24");
     }],
+    ["OLD_CONTROL UUID case alias duplicates NEW_CONTROL", (rows) => {
+      replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "conversation_id", "6ABD98F5-5808-83E8-852C-F01A16CEBF24");
+      replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "conversation_url", "https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhu-an/c/6ABD98F5-5808-83E8-852C-F01A16CEBF24");
+    }],
     ["ambiguous OLD_CONTROL section", (rows) => replaceRecordText(rows, "5921509976", "OLD_CONTROL\ngeneration: 031", "OLD_CONTROL\nOLD_CONTROL\ngeneration: 031")],
     ["pointer comment is absent", (rows) => replaceRecordText(rows, "5921589118", "active_control_ack: #88/5921541952", "active_control_ack: #88/5999999999")],
   ];
