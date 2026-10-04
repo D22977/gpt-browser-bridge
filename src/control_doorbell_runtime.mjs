@@ -43,6 +43,8 @@ export function selectCurrentAuthority(snapshot) {
       control_generation: requiredText(receipt.control_generation),
       active_control_conversation_id: requiredText(receipt.active_control_conversation_id),
       producer_admission_comment_ids: receipt.producer_admission_comment_ids ?? [],
+      ...(Object.hasOwn(receipt, "producer_admission_policy") ? { producer_admission_policy: receipt.producer_admission_policy } : {}),
+      ...(Object.hasOwn(receipt, "producer_admission_registry_id") ? { producer_admission_registry_id: commentId(receipt.producer_admission_registry_id) } : {}),
     };
   });
   const [control, registry, activeSwitch] = receipts;
@@ -61,11 +63,34 @@ export function selectCurrentAuthority(snapshot) {
     current_registry_receipt: registry.github_comment_id,
     active_switch_receipt: activeSwitch.github_comment_id,
     producer_admission_comment_ids: [...admissions].sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0),
+    ...(Array.isArray(registry.producer_admission_policy) ? {
+      producer_admission_policy: registry.producer_admission_policy,
+      producer_admission_registry_id: registry.producer_admission_registry_id ?? registry.github_comment_id,
+    } : {}),
   };
 }
 
 export function hasCurrentProducerAdmission(source, authority, receipt) {
   try {
+    if (Array.isArray(authority?.producer_admission_policy)) {
+      const originId = commentId(source?.origin_comment_id);
+      const registryId = commentId(source?.producer_admission_registry_id);
+      const eventId = commentId(source?.source_comment_id);
+      if (registryId !== commentId(authority.producer_admission_registry_id)
+        || eventId !== commentId(source?.github_comment_id ?? eventId)
+        || source.control_generation !== authority.control_generation
+        || source.active_control_conversation_id !== authority.active_control_conversation_id) return false;
+      const matches = authority.producer_admission_policy.filter((grant) =>
+        grant?.origin_comment_id === originId && grant?.source_event_type === source.source_event_type);
+      if (matches.length !== 1) return false;
+      const grant = matches[0];
+      if (grant.origin_body_sha256 !== source.origin_body_sha256
+        || grant.producer_github_user_id !== source.producer_github_user_id
+        || grant.producer_github_login !== source.producer_github_login) return false;
+      if (source.source_event_type === "PROGRESS") return !Object.hasOwn(grant, "named_executor") && !Object.hasOwn(source, "named_executor");
+      return ["TERMINAL", "CONTROL_NEEDED"].includes(source.source_event_type)
+        && typeof grant.named_executor === "string" && grant.named_executor === source.named_executor;
+    }
     const id = commentId(source?.producer_admission_comment_id);
     if (!authority?.producer_admission_comment_ids?.includes(id)
       || commentId(receipt?.github_comment_id) !== id
@@ -142,6 +167,10 @@ export function createControlDoorbellRuntime({ config, github, residentInstanceI
         if (!Array.isArray(sourceEvents)) failClosed();
         const authorizedEvents = [];
         for (const source of sourceEvents) {
+          if (Array.isArray(authority.producer_admission_policy)) {
+            if (hasCurrentProducerAdmission(source, authority)) authorizedEvents.push(source);
+            continue;
+          }
           let admission;
           try { admission = await github.getReceipt(commentId(source?.producer_admission_comment_id)); }
           catch { admission = null; }
@@ -163,8 +192,12 @@ export function createControlDoorbellRuntime({ config, github, residentInstanceI
           transport: async (pointer) => {
             const source = authorizedEvents.find((event) => String(event.source_comment_id) === String(pointer.source_comment_id));
             if (!source || !sameAuthority(authority, await readAuthority())) failClosed();
-            const admission = await github.getReceipt(commentId(source.producer_admission_comment_id));
-            if (!hasCurrentProducerAdmission(source, authority, admission)) failClosed();
+            if (Array.isArray(authority.producer_admission_policy)) {
+              if (!hasCurrentProducerAdmission(source, authority)) failClosed();
+            } else {
+              const admission = await github.getReceipt(commentId(source.producer_admission_comment_id));
+              if (!hasCurrentProducerAdmission(source, authority, admission)) failClosed();
+            }
             const result = await sendPointer({
               source_repo: pointer.source_repo,
               source_issue: pointer.source_issue,

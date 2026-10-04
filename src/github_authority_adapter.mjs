@@ -74,6 +74,116 @@ function issueOf(comment) {
   if (!match) stop("GITHUB_COMMENT_PROVENANCE_MISSING");
   return { repo: match[1], issue: Number(match[2]) };
 }
+
+function parseSourceEventV2(body, envelopeId, expectedRepo, expectedIssue) {
+  if (typeof body !== "string" || body.split(/\r?\n/, 1)[0] !== "GITHUB_SOURCE_EVENT_V2") stop("MALFORMED_SOURCE_EVENT");
+  const allowed = new Set([
+    "source_repo", "source_issue", "origin_comment_id", "producer_admission_registry_id",
+    "source_event_type", "control_generation", "active_control_conversation_id", "named_executor",
+  ]);
+  const parsed = {};
+  for (const line of body.split(/\r?\n/).slice(1)) {
+    const match = /^([a-z][a-z0-9_]*): (.+)$/.exec(line);
+    if (!match || !allowed.has(match[1]) || Object.hasOwn(parsed, match[1])) stop("MALFORMED_SOURCE_EVENT");
+    parsed[match[1]] = match[2];
+  }
+  const required = [
+    "source_repo", "source_issue", "origin_comment_id", "producer_admission_registry_id",
+    "source_event_type", "control_generation", "active_control_conversation_id",
+  ];
+  if (required.some((key) => !Object.hasOwn(parsed, key))) stop("MALFORMED_SOURCE_EVENT");
+  if (!/^[1-9]\d*$/.test(parsed.source_issue)) stop("MALFORMED_SOURCE_EVENT");
+  const sourceIssue = Number(parsed.source_issue);
+  const id = decimal(envelopeId);
+  decimal(parsed.origin_comment_id);
+  decimal(parsed.producer_admission_registry_id);
+  if (!Number.isSafeInteger(sourceIssue) || sourceIssue !== expectedIssue || parsed.source_repo !== expectedRepo
+    || !EVENTS.has(parsed.source_event_type) || !/^[0-9]{3}$/.test(parsed.control_generation)
+    || !parsed.active_control_conversation_id.trim()) stop("MALFORMED_SOURCE_EVENT");
+  if (["TERMINAL", "CONTROL_NEEDED"].includes(parsed.source_event_type)) {
+    if (typeof parsed.named_executor !== "string" || !parsed.named_executor.trim()) stop("MALFORMED_SOURCE_EVENT");
+  } else if (Object.hasOwn(parsed, "named_executor")) stop("MALFORMED_SOURCE_EVENT");
+  return {
+    ...parsed,
+    type: "GITHUB_SOURCE_EVENT_V2",
+    source_issue: sourceIssue,
+    source_comment_id: id,
+    github_comment_id: id,
+  };
+}
+
+function commentUser(comment) {
+  const user = comment?.user;
+  const rawId = user?.id;
+  const id = typeof rawId === "number" && Number.isSafeInteger(rawId) && rawId > 0 ? String(rawId) : rawId;
+  if (typeof id !== "string" || !/^[1-9]\d*$/.test(id)
+    || typeof user?.login !== "string" || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(user.login)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+  return { id, login: user.login };
+}
+
+function parseUniqueJson(source) {
+  let index = 0;
+  const whitespace = () => { while (/\s/.test(source[index] ?? "")) index += 1; };
+  const parseString = () => {
+    const start = index;
+    if (source[index] !== '"') stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    index += 1;
+    while (index < source.length) {
+      if (source[index] === "\\") { index += 2; continue; }
+      if (source[index++] === '"') {
+        try { return JSON.parse(source.slice(start, index)); }
+        catch { stop("AUTHORITY_CONFLICT_OR_MALFORMED"); }
+      }
+    }
+    stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+  };
+  const value = () => {
+    whitespace();
+    if (source[index] === '"') return parseString();
+    if (source[index] === "[") {
+      index += 1;
+      whitespace();
+      const items = [];
+      if (source[index] === "]") { index += 1; return items; }
+      while (index < source.length) {
+        items.push(value());
+        whitespace();
+        if (source[index] === "]") { index += 1; return items; }
+        if (source[index++] !== ",") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      }
+      stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    }
+    if (source[index] === "{") {
+      index += 1;
+      whitespace();
+      const object = Object.create(null);
+      if (source[index] === "}") { index += 1; return object; }
+      while (index < source.length) {
+        whitespace();
+        const key = parseString();
+        if (Object.hasOwn(object, key)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+        whitespace();
+        if (source[index++] !== ":") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+        object[key] = value();
+        whitespace();
+        if (source[index] === "}") { index += 1; return object; }
+        if (source[index++] !== ",") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      }
+      stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    }
+    const rest = source.slice(index);
+    const literal = /^(?:true|false|null)/.exec(rest)?.[0];
+    if (literal) { index += literal.length; return JSON.parse(literal); }
+    const number = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(rest)?.[0];
+    if (number) { index += number.length; return Number(number); }
+    stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+  };
+  const parsed = value();
+  whitespace();
+  if (index !== source.length) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+  return parsed;
+}
+
 function receipt(comment, expectedRepo, expectedIssue) {
   const origin = issueOf(comment);
   if (origin.repo !== expectedRepo || origin.issue !== expectedIssue) stop("GITHUB_COMMENT_PROVENANCE_MISMATCH");
@@ -81,6 +191,11 @@ function receipt(comment, expectedRepo, expectedIssue) {
   const body = comment.body;
   if (typeof body !== "string") stop("MALFORMED_GITHUB_COMMENT");
   const type = body.split(/\r?\n/, 1)[0].trim();
+  if (type === "GITHUB_SOURCE_EVENT_V2") {
+    const parsed = parseSourceEventV2(body, id, expectedRepo, expectedIssue);
+    const user = commentUser(comment);
+    return { ...parsed, producer_github_user_id: user.id, producer_github_login: user.login };
+  }
   if (!TYPES.has(type) && type !== "GITHUB_SOURCE_EVENT_V1") return null;
   const parsed = fields(body);
   validateFields(type, parsed);
@@ -191,6 +306,33 @@ export function createGitHubAuthorityAdapter({
     return values;
   }
 
+  function producerAdmissionPolicy(raw) {
+    const parsed = parseUniqueJson(raw);
+    if (!Array.isArray(parsed)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    const grants = [];
+    const seen = new Set();
+    const common = ["origin_comment_id", "origin_body_sha256", "source_event_type", "producer_github_user_id", "producer_github_login"];
+    for (const value of parsed) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      const keys = Object.keys(value);
+      const needsExecutor = ["TERMINAL", "CONTROL_NEEDED"].includes(value.source_event_type);
+      const expected = needsExecutor ? [...common, "named_executor"] : common;
+      if (keys.length !== expected.length || keys.some((key) => !expected.includes(key))
+        || common.some((key) => typeof value[key] !== "string" || !value[key].trim())
+        || (needsExecutor && (typeof value.named_executor !== "string" || !value.named_executor.trim()))) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      if (!/^[1-9]\d*$/.test(value.origin_comment_id)
+        || !/^[1-9]\d*$/.test(value.producer_github_user_id)
+        || !/^[0-9a-f]{64}$/.test(value.origin_body_sha256)
+        || !EVENTS.has(value.source_event_type)
+        || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(value.producer_github_login)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      const key = `${value.origin_comment_id}\0${value.source_event_type}`;
+      if (seen.has(key)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      seen.add(key);
+      grants.push({ ...value });
+    }
+    return grants;
+  }
+
   function sectionedPointer(value, issue, suffix = "") {
     const match = new RegExp(`^#${issue}/([1-9]\\d*)${suffix}$`).exec(value);
     if (!match) stop("AUTHORITY_POINTER_MISMATCH");
@@ -240,38 +382,43 @@ export function createGitHubAuthorityAdapter({
     if (url.origin !== "https://chatgpt.com" || !url.pathname.endsWith(`/c/${identity}`) || url.search || url.hash) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
   }
 
-  async function sectionedAuthority(start, registry) {
+  async function sectionedAuthority(start, registry, startVersion = "V243", registryVersion = "V139") {
     const startIssue = authorityIssueNumbers.registry;
     const registryIssue = authorityIssueNumbers.switch;
     const controlIssue = authorityIssueNumbers.control;
     const startReadback = await exactIssueComment(start.id, startIssue, start.body);
     const registryReadback = await exactIssueComment(registry.id, registryIssue, registry.body);
-    const startBody = sectionedHeader(startReadback, "CURRENT_REHYDRATION_INDEX_V243", startIssue);
-    const registryBody = sectionedHeader(registryReadback, "CURRENT_REGISTRY_INDEX_V139", registryIssue);
+    const startBody = sectionedHeader(startReadback, `CURRENT_REHYDRATION_INDEX_${startVersion}`, startIssue);
+    const registryBody = sectionedHeader(registryReadback, `CURRENT_REGISTRY_INDEX_${registryVersion}`, registryIssue);
+    const isV244V140 = startVersion === "V244" && registryVersion === "V140";
     const startFields = closedFields(startBody, new Set([
       "state", "recorded_by_role", "repository", "control_generation", "supersedes", "active_control_ack",
+      ...(isV244V140 ? ["atomic_switch"] : []),
+      ...(isV244V140 ? ["old_evidence_card", "old_evidence_start", "old_evidence_terminal", "task_metadata_terminal", "parser_candidate", "producer_admission_adjudication", "current_worker_card", "runtime_activation", "generation033_lease", "matching_fresh_heartbeat", "watcher_running", "monitoring_claimed", "merge_release_deploy_workflow_dispatch", "next_action"] : []),
       "inventory_return", "active_repair_card", "owner_continuation", "operational_goal_complete",
       "startup_skill_memory_reads", "old_inventory_terminal", "old_scope_evidence", "old_event",
       "source_checkout_identity", "matching_process_state", "matching_scheduled_task_state", "activation_target",
       "user_relay_count", "readback_required", "idempotency_key",
-    ]), ["state", "recorded_by_role", "repository", "control_generation", "active_control_ack"]);
+    ]), ["state", "recorded_by_role", "repository", "control_generation", "active_control_ack", ...(isV244V140 ? ["atomic_switch"] : [])]);
     const registryFields = closedFields(registryBody, new Set([
       "state", "recorded_by_role", "repository", "control_generation", "supersedes", "current_start",
-      "active_control_id", "active_control_ack", "GitHub_sole_durable_semantic_authority", "owner_continuation",
+      "active_control_id", "active_control_ack", ...(isV244V140 ? ["atomic_switch", "producer_admission_policy"] : []), "GitHub_sole_durable_semantic_authority", "owner_continuation",
+      ...(isV244V140 ? ["old_evidence_card", "old_evidence_terminal", "task_metadata_terminal", "parser_candidate_head", "parser_candidate_tree", "producer_admission_adjudication", "current_worker_card"] : []),
       "restoration_goal_complete", "current_repair_card", "prior_inventory_terminal", "scope_evidence",
       "old_inventory_event", "executor_required", "source_checkout_identity", "matching_process_state",
       "matching_scheduled_task_state", "activation_target", "runtime_activation", "generation033_lease",
       "matching_fresh_heartbeat", "watcher_running", "monitoring_claimed", "merge_release_deploy_workflow_dispatch",
       "next_action", "user_relay_count", "readback_required", "idempotency_key",
-    ]), ["state", "recorded_by_role", "repository", "control_generation", "current_start", "active_control_id", "active_control_ack"]);
+    ]), ["state", "recorded_by_role", "repository", "control_generation", "current_start", "active_control_id", "active_control_ack", ...(isV244V140 ? ["atomic_switch", "producer_admission_policy"] : [])]);
     if (startFields.repository !== repository || registryFields.repository !== repository) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     const generation = currentGeneration(startFields.control_generation);
     if (generation !== currentGeneration(registryFields.control_generation)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     const startAckId = sectionedPointer(startFields.active_control_ack, controlIssue);
     const registryAckId = sectionedPointer(registryFields.active_control_ack, controlIssue);
     if (startAckId !== registryAckId) stop("AUTHORITY_POINTER_MISMATCH");
-    const currentStart = new RegExp(`^#${startIssue}/([1-9]\\d*) V243 exact GET matched$`).exec(registryFields.current_start);
+    const currentStart = new RegExp(`^#${startIssue}/([1-9]\\d*) ${startVersion} exact GET matched$`).exec(registryFields.current_start);
     if (!currentStart || decimal(currentStart[1]) !== decimal(startReadback.id)) stop("AUTHORITY_POINTER_MISMATCH");
+    const policy = isV244V140 ? producerAdmissionPolicy(registryFields.producer_admission_policy) : undefined;
 
     const ack = await exactComment(startAckId);
     const ackBody = sectionedHeader(ack, "ACTIVE_CONTROL_REHYDRATION_ACK_V1", controlIssue);
@@ -293,6 +440,8 @@ export function createGitHubAuthorityAdapter({
     if (registryFields.active_control_id !== ackFields.conversation_id) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     validConversationUrl(ackFields.conversation_id, ackFields.conversation_url);
     const switchId = sectionedPointer(ackFields.atomic_switch, controlIssue, " exact GET matched");
+    if (isV244V140 && (sectionedPointer(startFields.atomic_switch, controlIssue) !== switchId
+      || sectionedPointer(registryFields.atomic_switch, controlIssue) !== switchId)) stop("AUTHORITY_POINTER_MISMATCH");
 
     const active = await exactComment(switchId);
     const activeBody = sectionedHeader(active, "CONTROL_GENERATION_ATOMIC_SWITCH_V1", controlIssue);
@@ -323,7 +472,12 @@ export function createGitHubAuthorityAdapter({
       || controlFields.single_active_control !== "true") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     if (oldIdentity.toLowerCase() === controlFields.conversation_id.toLowerCase() || oldFields.conversation_url === controlFields.conversation_url) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     validConversationUrl(controlFields.conversation_id, controlFields.conversation_url);
-    return { start: startReadback, registry: registryReadback, active, control_generation: generation, active_control_conversation_id: ackFields.conversation_id };
+    return {
+      start: startReadback, registry: registryReadback, active,
+      control_generation: generation,
+      active_control_conversation_id: ackFields.conversation_id,
+      ...(isV244V140 ? { producer_admission_policy: policy } : {}),
+    };
   }
 
   async function currentAuthorityComments() {
@@ -337,9 +491,11 @@ export function createGitHubAuthorityAdapter({
     if (!start || !registry) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     const startHeader = start.body?.split(/\r?\n/, 1)[0];
     const registryHeader = registry.body?.split(/\r?\n/, 1)[0];
-    if (startHeader === "CURRENT_REHYDRATION_INDEX_V243" || registryHeader === "CURRENT_REGISTRY_INDEX_V139") {
-      if (startHeader !== "CURRENT_REHYDRATION_INDEX_V243" || registryHeader !== "CURRENT_REGISTRY_INDEX_V139") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
-      return sectionedAuthority(start, registry);
+    if (["CURRENT_REHYDRATION_INDEX_V243", "CURRENT_REHYDRATION_INDEX_V244"].includes(startHeader)
+      || ["CURRENT_REGISTRY_INDEX_V139", "CURRENT_REGISTRY_INDEX_V140"].includes(registryHeader)) {
+      if (startHeader === "CURRENT_REHYDRATION_INDEX_V244" && registryHeader === "CURRENT_REGISTRY_INDEX_V140") return sectionedAuthority(start, registry, "V244", "V140");
+      if (startHeader === "CURRENT_REHYDRATION_INDEX_V243" && registryHeader === "CURRENT_REGISTRY_INDEX_V139") return sectionedAuthority(start, registry);
+      stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     }
     const active = select(switches, /^CONTROL_GENERATION_ATOMIC_SWITCH_V1$/);
     if (!active) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
@@ -370,7 +526,12 @@ export function createGitHubAuthorityAdapter({
       producer_admission_comment_ids: admissions(comment),
       switch_conflict: false,
     });
-    return { control: item(current.start), registry: item(current.registry), switch: item(current.active) };
+    const registry = item(current.registry);
+    if (current.producer_admission_policy) {
+      registry.producer_admission_policy = current.producer_admission_policy;
+      registry.producer_admission_registry_id = registry.github_comment_id;
+    }
+    return { control: item(current.start), registry, switch: item(current.active) };
   }
   async function snapshot() {
     const issueRows = await Promise.all(supportedIssues.map((issue) => allComments(issue)));
@@ -378,7 +539,7 @@ export function createGitHubAuthorityAdapter({
   }
   async function listReceipts() {
     const rows = await snapshot();
-    return rows.filter(r => r.type !== "GITHUB_SOURCE_EVENT_V1");
+    return rows.filter(r => r.type !== "GITHUB_SOURCE_EVENT_V1" && r.type !== "GITHUB_SOURCE_EVENT_V2");
   }
   async function getReceipt(id) {
     const row = await exactComment(id);
@@ -395,7 +556,62 @@ export function createGitHubAuthorityAdapter({
     return heartbeats.at(-1) ?? null;
   }
   async function listSourceEvents() {
-    return (await snapshot()).filter(r => r.type === "GITHUB_SOURCE_EVENT_V1");
+    const current = await currentAuthorityComments();
+    if (!Array.isArray(current.producer_admission_policy)) {
+      return (await snapshot()).filter((row) => row.type === "GITHUB_SOURCE_EVENT_V1");
+    }
+    const events = [];
+    const seen = new Set();
+    let listedComments;
+    try { listedComments = await allComments(sourceIssueNumber); }
+    catch (error) {
+      if (/GITHUB_COMMENT_PROVENANCE_MISMATCH/.test(String(error?.message))) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      throw error;
+    }
+    for (const listed of listedComments) {
+      const header = listed.body?.split(/\r?\n/, 1)[0];
+      if (header !== "GITHUB_SOURCE_EVENT_V2") continue;
+      let event;
+      try {
+        const exact = await exactIssueComment(listed.id, sourceIssueNumber, listed.body);
+        event = receipt(exact, repository, sourceIssueNumber);
+      } catch (error) {
+        if (/MALFORMED_SOURCE_EVENT|MALFORMED_COMMENT_ID|GITHUB_COMMENT_PROVENANCE_MISMATCH|RECEIPT_READBACK_MISMATCH/.test(String(error?.message))) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+        throw error;
+      }
+      if (!event || event.type !== "GITHUB_SOURCE_EVENT_V2"
+        || event.producer_admission_registry_id !== decimal(current.registry.id)
+        || event.control_generation !== current.control_generation
+        || event.active_control_conversation_id !== current.active_control_conversation_id) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      const grants = current.producer_admission_policy.filter((grant) =>
+        grant.origin_comment_id === event.origin_comment_id && grant.source_event_type === event.source_event_type);
+      if (grants.length !== 1) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      const grant = grants[0];
+      const eventUser = commentUser(listed);
+      if (eventUser.id !== grant.producer_github_user_id || eventUser.login !== grant.producer_github_login) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+
+      let origin;
+      try { origin = await exactComment(event.origin_comment_id); }
+      catch (error) {
+        if (/GITHUB_COMMENT_PROVENANCE_MISMATCH|RECEIPT_READBACK_MISMATCH/.test(String(error?.message))) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+        throw error;
+      }
+      const originEnvelope = issueOf(origin);
+      if (originEnvelope.repo !== repository || originEnvelope.issue !== sourceIssueNumber
+        || typeof origin.body !== "string") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      const originUser = commentUser(origin);
+      const originHash = createHash("sha256").update(origin.body, "utf8").digest("hex");
+      if (originHash !== grant.origin_body_sha256
+        || originUser.id !== grant.producer_github_user_id || originUser.login !== grant.producer_github_login) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      if (event.source_event_type === "PROGRESS" && Object.hasOwn(grant, "named_executor")) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      if (event.source_event_type !== "PROGRESS" && event.named_executor !== grant.named_executor) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+
+      const tuple = [event.origin_comment_id, event.source_event_type, event.control_generation, event.active_control_conversation_id].join("\0");
+      if (seen.has(tuple)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      seen.add(tuple);
+      events.push({ ...event, producer_github_user_id: eventUser.id, producer_github_login: eventUser.login, origin_body_sha256: originHash });
+    }
+    return events;
   }
   function receiptBody(value) {
     if (!value || typeof value !== "object" || Array.isArray(value) || !TYPES.has(value.type)) stop("MALFORMED_RECOGNIZED_RECEIPT");

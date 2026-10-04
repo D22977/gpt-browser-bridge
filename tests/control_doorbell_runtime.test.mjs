@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -360,8 +361,8 @@ test("T20 tests exercise only in-memory adapters and never invoke runtime side e
   assert.doesNotMatch(source, /node:child_process|playwright|ScheduledTask|run\.ps1|execFile|https:\/\/api\.github\.com/);
 });
 
-function issueComment(id, issue, body, repository = "D22977/gpt-browser-bridge") {
-  return { id, issue_url: `https://api.github.com/repos/${repository}/issues/${issue}`, body };
+function issueComment(id, issue, body, repository = "D22977/gpt-browser-bridge", user = { id: 55701413, login: "D22977" }) {
+  return { id, issue_url: `https://api.github.com/repos/${repository}/issues/${issue}`, body, user: structuredClone(user) };
 }
 
 function authorityComments(repository = "D22977/gpt-browser-bridge") {
@@ -965,4 +966,416 @@ test("T29 transport stays separate and delegates to the pinned semantic core", a
   assert.match(coreSource, /export async function runOnce/);
   assert.equal(config.artifact_mapping.semantic_core_blob, "1a0c818321e64ec3dd4619e563d6845124af7c2b");
   assert.doesNotMatch(`${runtimeSource}\n${adapterSource}`, /node:child_process|@herdr|herdr\.(?:agent|pane|send|run)|browser\.(?:send|click|evaluate)|playwright|puppeteer|chrome-remote-interface|ScheduledTask|taskschd|execFile|execSync|spawn\(/i);
+});
+
+const G33_CONTROL_ID = "6abd98f5-5808-83e8-852c-f01a16cebf24";
+const G33_START_ID = "5981752154";
+const G33_REGISTRY_ID = "5981755651";
+const PRODUCER_USER = { id: 55701413, login: "D22977" };
+
+function generation033V244V140Comments(policyRaw = "[]") {
+  const previous = generation033AuthorityComments();
+  return [
+    issueComment(G33_START_ID, 43, [
+      "CURRENT_REHYDRATION_INDEX_V244",
+      "state: CURRENT_START_HERE_ACTIVE_CONTROL033_PRODUCER_ADMISSION_CARD_ACTIVE",
+      "recorded_by_role: ACTIVE_CONTROL",
+      "repository: D22977/gpt-browser-bridge",
+      "control_generation: 033 ACTIVE",
+      "supersedes: #43/5921589118 V243",
+      "active_control_ack: #88/5921541952",
+      "atomic_switch: #88/5921509976",
+      "owner_continuation: #43/5921003901",
+      "old_evidence_card: #162/5921584474 TERMINAL_DO_NOT_REDISPATCH",
+      "old_evidence_start: #162/5921662604 CONSUMED_STARTED",
+      "old_evidence_terminal: #162/5921688277 BLOCKED",
+      "task_metadata_terminal: #162/5921746707 READY_FOR_CONTROL",
+      "parser_candidate: #162/5981411959 / head 5ff358278fd24c6502e172c37cbeffadf1657d95 / tree afa2ed3d8e965f338c3d49f0dee9d631237ad67c",
+      "producer_admission_adjudication: #162/5981736759",
+      "current_worker_card: #162/5981746195",
+      "operational_goal_complete: false",
+      "runtime_activation: NOT_AUTHORIZED",
+      "generation033_lease: NONE",
+      "matching_fresh_heartbeat: NONE",
+      "watcher_running: false",
+      "monitoring_claimed: false",
+      "merge_release_deploy_workflow_dispatch: false",
+      "next_action: bind one fresh Worker for the producer admission contract",
+      "user_relay_count: 0",
+      "readback_required: true",
+      "idempotency_key: CURRENT-REHYDRATION-INDEX-033-V244-PRODUCER-ADMISSION-20261004-01",
+    ].join("\n")),
+    issueComment(G33_REGISTRY_ID, 81, [
+      "CURRENT_REGISTRY_INDEX_V140",
+      "state: CURRENT_ACTIVE_CONTROL033_PRODUCER_ADMISSION_CARD_ACTIVE",
+      "recorded_by_role: ACTIVE_CONTROL",
+      "repository: D22977/gpt-browser-bridge",
+      "control_generation: 033 ACTIVE",
+      "supersedes: #81/5921593188 V139",
+      `current_start: #43/${G33_START_ID} V244 exact GET matched`,
+      `active_control_id: ${G33_CONTROL_ID}`,
+      "active_control_ack: #88/5921541952",
+      "atomic_switch: #88/5921509976",
+      "GitHub_sole_durable_semantic_authority: true",
+      "owner_continuation: #43/5921003901",
+      "restoration_goal_complete: false",
+      "old_evidence_card: #162/5921584474 TERMINAL_DO_NOT_REDISPATCH",
+      "old_evidence_terminal: #162/5921688277 BLOCKED",
+      "task_metadata_terminal: #162/5921746707 READY_FOR_CONTROL",
+      "parser_candidate_head: 5ff358278fd24c6502e172c37cbeffadf1657d95",
+      "parser_candidate_tree: afa2ed3d8e965f338c3d49f0dee9d631237ad67c",
+      "producer_admission_adjudication: #162/5981736759",
+      "current_worker_card: #162/5981746195",
+      `producer_admission_policy: ${policyRaw}`,
+      "runtime_activation: NOT_AUTHORIZED",
+      "generation033_lease: NONE",
+      "matching_fresh_heartbeat: NONE",
+      "watcher_running: false",
+      "monitoring_claimed: false",
+      "merge_release_deploy_workflow_dispatch: false",
+      "next_action: use only the exact current producer admission policy",
+      "user_relay_count: 0",
+      "readback_required: true",
+      "idempotency_key: CURRENT-REGISTRY-033-V140-PRODUCER-ADMISSION-20261004-01",
+    ].join("\n")),
+    previous.find((row) => row.id === "5921541952"),
+    previous.find((row) => row.id === "5921509976"),
+  ];
+}
+
+function v2EventBody({
+  sourceRepo = "D22977/gpt-browser-bridge",
+  sourceIssue = 162,
+  originCommentId = "16290",
+  registryId = G33_REGISTRY_ID,
+  sourceEventType = "PROGRESS",
+  controlGeneration = "033",
+  activeControlConversationId = G33_CONTROL_ID,
+  namedExecutor,
+  extraFields = [],
+} = {}) {
+  const lines = [
+    "GITHUB_SOURCE_EVENT_V2",
+    `source_repo: ${sourceRepo}`,
+    `source_issue: ${sourceIssue}`,
+    `origin_comment_id: ${originCommentId}`,
+    `producer_admission_registry_id: ${registryId}`,
+    `source_event_type: ${sourceEventType}`,
+    `control_generation: ${controlGeneration}`,
+    `active_control_conversation_id: ${activeControlConversationId}`,
+  ];
+  if (namedExecutor !== undefined) lines.push(`named_executor: ${namedExecutor}`);
+  return [...lines, ...extraFields].join("\n");
+}
+
+function producerAdmissionCase(options = {}) {
+  const originId = options.originId ?? "16290";
+  const sourceEventType = options.sourceEventType ?? "PROGRESS";
+  const eventType = options.eventType ?? sourceEventType;
+  const eventExecutor = Object.hasOwn(options, "eventExecutor")
+    ? options.eventExecutor
+    : eventType === "PROGRESS" ? undefined : "executor-1";
+  const originBody = options.originBody ?? "synthetic producer origin\nbody";
+  const grantUser = options.grantUser ?? PRODUCER_USER;
+  const eventUser = options.eventUser ?? PRODUCER_USER;
+  const originUser = options.originUser ?? PRODUCER_USER;
+  const grant = {
+    origin_comment_id: originId,
+    origin_body_sha256: options.grantHash ?? createHash("sha256").update(originBody, "utf8").digest("hex"),
+    source_event_type: options.grantEventType ?? sourceEventType,
+    producer_github_user_id: String(options.grantUserId ?? grantUser.id),
+    producer_github_login: options.grantLogin ?? grantUser.login,
+  };
+  const grantExecutor = options.grantExecutor;
+  if (grantExecutor !== undefined) grant.named_executor = grantExecutor;
+  else if (["TERMINAL", "CONTROL_NEEDED"].includes(grant.source_event_type) && options.includeGrantExecutor !== false) grant.named_executor = "executor-1";
+  const origin = issueComment(
+    originId,
+    options.originIssue ?? 162,
+    originBody,
+    options.originRepo ?? "D22977/gpt-browser-bridge",
+    originUser,
+  );
+  const event = issueComment(
+    options.eventId ?? "16291",
+    options.eventEnvelopeIssue ?? 162,
+    v2EventBody({
+      sourceRepo: options.sourceRepo,
+      sourceIssue: options.sourceIssue,
+      originCommentId: originId,
+      registryId: options.registryId,
+      sourceEventType: eventType,
+      controlGeneration: options.controlGeneration,
+      activeControlConversationId: options.activeControlConversationId,
+      namedExecutor: eventExecutor,
+      extraFields: options.extraFields,
+    }),
+    options.eventRepo ?? "D22977/gpt-browser-bridge",
+    eventUser,
+  );
+  return { grant, origin, event, originBody };
+}
+
+async function makeV244Adapter({ policyRaw, sourceComments = [], fetchOverride } = {}) {
+  const config = await loadConfig();
+  const policy = policyRaw ?? "[]";
+  const backend = fakeGitHub({ comments: [...generation033V244V140Comments(policy), ...sourceComments] });
+  const fetchImpl = fetchOverride ? fetchOverride(backend.fetchImpl) : backend.fetchImpl;
+  const writes = { count: 0 };
+  const adapter = makeAdapter(config, {
+    fetchImpl,
+    publisher: async ({ issue, body }) => {
+      writes.count += 1;
+      return backend.add(issue, body);
+    },
+  });
+  return { config, backend, writes, adapter };
+}
+
+test("T34 exact V244/V140 chain normalizes generation, identity, and current envelope IDs", async () => {
+  const { adapter } = await makeV244Adapter();
+  const snapshot = await adapter.readAuthoritySnapshot();
+  assert.deepEqual([
+    snapshot.control.control_generation,
+    snapshot.control.active_control_conversation_id,
+    snapshot.control.github_comment_id,
+    snapshot.registry.github_comment_id,
+    snapshot.switch.github_comment_id,
+  ], ["033", G33_CONTROL_ID, G33_START_ID, G33_REGISTRY_ID, "5921509976"]);
+  assert.deepEqual(snapshot.registry.producer_admission_policy, []);
+  assert.equal(snapshot.registry.producer_admission_registry_id, G33_REGISTRY_ID);
+});
+
+test("T35 V140 producer policy is a strict closed array with unique, well-formed grants", async (t) => {
+  const validCase = producerAdmissionCase();
+  const grant = JSON.stringify(validCase.grant);
+  const invalidPolicies = [
+    ["malformed JSON", "not-json"],
+    ["not an array", JSON.stringify(validCase.grant)],
+    ["unknown grant key", `[${grant.slice(0, -1)},"wildcard":"*"}]`],
+    ["duplicate grant key", `[{"origin_comment_id":"16290","origin_comment_id":"16290","origin_body_sha256":"${validCase.grant.origin_body_sha256}","source_event_type":"PROGRESS","producer_github_user_id":"55701413","producer_github_login":"D22977"}]`],
+    ["malformed origin id", `[${JSON.stringify({ ...validCase.grant, origin_comment_id: "0" })}]`],
+    ["malformed body hash", `[${JSON.stringify({ ...validCase.grant, origin_body_sha256: "A".repeat(64) })}]`],
+    ["duplicate origin and event type", `[${grant},${grant}]`],
+    ["progress grant forbids named executor", `[${JSON.stringify({ ...validCase.grant, named_executor: "executor-1" })}]`],
+    ["terminal grant requires named executor", `[${JSON.stringify({ ...validCase.grant, source_event_type: "TERMINAL" })}]`],
+  ];
+  for (const [name, policyRaw] of invalidPolicies) {
+    await t.test(name, async () => {
+      const { adapter } = await makeV244Adapter({ policyRaw });
+      await assert.rejects(adapter.readAuthoritySnapshot(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+    });
+  }
+});
+
+test("T36 V140 empty policy admits no V2 event and malformed admission has zero write or transport effects", async () => {
+  const fixture = producerAdmissionCase();
+  const { config, adapter, backend, writes } = await makeV244Adapter({ sourceComments: [fixture.origin, fixture.event] });
+  let sends = 0;
+  const snapshot = await adapter.readAuthoritySnapshot();
+  const triggerHash = runtime.getTriggerContractHash(config);
+  const now = "2026-10-04T16:30:00.000Z";
+  const lease = {
+    ...createLease({
+      resident_instance_id: "resident-test",
+      control_generation: snapshot.control.control_generation,
+      active_control_conversation_id: snapshot.control.active_control_conversation_id,
+      trigger_contract_hash: triggerHash,
+      acquired_at: "2026-10-04T16:00:00.000Z",
+      expires_at: "2026-10-04T17:00:00.000Z",
+      watched_issue_set: ["D22977/gpt-browser-bridge#162"],
+    }),
+    github_comment_id: "9001",
+  };
+  const heartbeat = createHeartbeat({
+    lease_id: lease.lease_id,
+    resident_instance_id: "resident-test",
+    control_generation: snapshot.control.control_generation,
+    trigger_contract_hash: triggerHash,
+    observed_at: "2026-10-04T16:29:59.000Z",
+    lease_expires_at: lease.expires_at,
+    last_processed_comment_id: "16289",
+  });
+  const github = {
+    readAuthoritySnapshot: () => adapter.readAuthoritySnapshot(),
+    async listReceipts() { return [lease]; },
+    async listSourceEvents() { return adapter.listSourceEvents(); },
+    async readHeartbeat() { return heartbeat; },
+    getReceipt: (id) => adapter.getReceipt(id),
+    publishReceipt: (receipt) => adapter.publishReceipt(receipt),
+  };
+  const controller = runtime.createControlDoorbellRuntime({
+    config,
+    github,
+    residentInstanceId: "resident-test",
+    now: () => now,
+    sendPointer: async () => { sends += 1; return "unexpected"; },
+  });
+  assert.deepEqual(await controller.poll(), { state: "CONTROL_REQUIRED/NO_SEND" });
+  assert.equal(writes.count, 0);
+  assert.equal(sends, 0);
+  assert.equal(backend.calls.every((call) => call.method === "GET"), true);
+});
+
+test("T37 V2 rejects source_comment_id and github_comment_id body fields", async (t) => {
+  for (const field of ["source_comment_id: 16291", "github_comment_id: 16291"]) {
+    await t.test(field, async () => {
+      const fixture = producerAdmissionCase({ extraFields: [field] });
+      const { adapter } = await makeV244Adapter({ policyRaw: JSON.stringify([fixture.grant]), sourceComments: [fixture.origin, fixture.event] });
+      await assert.rejects(adapter.listSourceEvents(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+    });
+  }
+});
+
+test("T38 V2 normalized source ID comes only from its GitHub envelope", async () => {
+  const fixture = producerAdmissionCase({ eventId: "17001" });
+  const { adapter } = await makeV244Adapter({ policyRaw: JSON.stringify([fixture.grant]), sourceComments: [fixture.origin, fixture.event] });
+  const events = await adapter.listSourceEvents();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].source_comment_id, "17001");
+  assert.equal(events[0].github_comment_id, "17001");
+  assert.equal(events[0].origin_comment_id, fixture.origin.id);
+});
+
+test("T39 V2 must name the actual current V140 envelope ID, never V139", async (t) => {
+  for (const registryId of ["5921593188", "5981755650"]) {
+    await t.test(registryId, async () => {
+      const fixture = producerAdmissionCase({ registryId });
+      const { adapter } = await makeV244Adapter({ policyRaw: JSON.stringify([fixture.grant]), sourceComments: [fixture.origin, fixture.event] });
+      await assert.rejects(adapter.listSourceEvents(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+    });
+  }
+});
+
+test("T40 origin body SHA-256 is computed over the exact UTF-8 comment body", async () => {
+  const fixture = producerAdmissionCase({ grantHash: "0".repeat(64) });
+  const { adapter } = await makeV244Adapter({ policyRaw: JSON.stringify([fixture.grant]), sourceComments: [fixture.origin, fixture.event] });
+  await assert.rejects(adapter.listSourceEvents(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+});
+
+test("T41 event and origin GitHub user IDs and logins must match the selected grant", async (t) => {
+  const cases = [
+    ["event user ID mismatch", { eventUser: { id: 55701414, login: "D22977" } }],
+    ["event login mismatch", { eventUser: { id: 55701413, login: "other" } }],
+    ["origin user ID mismatch", { originUser: { id: 55701414, login: "D22977" } }],
+    ["origin login mismatch", { originUser: { id: 55701413, login: "other" } }],
+  ];
+  for (const [name, options] of cases) {
+    await t.test(name, async () => {
+      const fixture = producerAdmissionCase(options);
+      const { adapter } = await makeV244Adapter({ policyRaw: JSON.stringify([fixture.grant]), sourceComments: [fixture.origin, fixture.event] });
+      await assert.rejects(adapter.listSourceEvents(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+    });
+  }
+});
+
+test("T42 event and origin repository and issue provenance must match configuration", async (t) => {
+  const cases = [
+    ["event body repo", { sourceRepo: "D22977/other" }],
+    ["event body issue", { sourceIssue: 163 }],
+    ["event envelope repo", { eventRepo: "D22977/other" }],
+    ["event exact envelope issue", { exactEventIssue: 163 }],
+    ["origin envelope issue", { originIssue: 163 }],
+    ["origin envelope repo", { originRepo: "D22977/other" }],
+  ];
+  for (const [name, options] of cases) {
+    await t.test(name, async () => {
+      const fixture = producerAdmissionCase(options);
+      const fetchOverride = options.exactEventIssue === undefined ? undefined : (fetchImpl) => async (url, request) => {
+        const response = await fetchImpl(url, request);
+        if (url.endsWith(`/issues/comments/${fixture.event.id}`)) {
+          const body = await response.json();
+          return jsonResponse({ ...body, issue_url: `https://api.github.com/repos/D22977/gpt-browser-bridge/issues/${options.exactEventIssue}` });
+        }
+        return response;
+      };
+      const { adapter } = await makeV244Adapter({
+        policyRaw: JSON.stringify([fixture.grant]),
+        sourceComments: [fixture.origin, fixture.event],
+        fetchOverride,
+      });
+      await assert.rejects(adapter.listSourceEvents(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+    });
+  }
+});
+
+test("T43 V2 authority identity, event type, and named executor must match", async (t) => {
+  const cases = [
+    ["wrong generation", { controlGeneration: "032" }],
+    ["wrong Control identity", { activeControlConversationId: "old-control" }],
+    ["grant and event type mismatch", { grantEventType: "PROGRESS", eventType: "TERMINAL" }],
+    ["terminal executor mismatch", { sourceEventType: "TERMINAL", eventExecutor: "other-executor" }],
+  ];
+  for (const [name, options] of cases) {
+    await t.test(name, async () => {
+      const fixture = producerAdmissionCase(options);
+      const { adapter } = await makeV244Adapter({ policyRaw: JSON.stringify([fixture.grant]), sourceComments: [fixture.origin, fixture.event] });
+      await assert.rejects(adapter.listSourceEvents(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+    });
+  }
+});
+
+test("T44 duplicate V2 origin/type/generation/identity tuples fail closed", async () => {
+  const first = producerAdmissionCase({ eventId: "17011" });
+  const second = producerAdmissionCase({ eventId: "17012" });
+  const { adapter } = await makeV244Adapter({
+    policyRaw: JSON.stringify([first.grant]),
+    sourceComments: [first.origin, first.event, second.event],
+  });
+  await assert.rejects(adapter.listSourceEvents(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+});
+
+test("T45 valid synthetic PROGRESS grant admits the exact V2 envelope without named_executor", async () => {
+  const fixture = producerAdmissionCase();
+  const { adapter } = await makeV244Adapter({ policyRaw: JSON.stringify([fixture.grant]), sourceComments: [fixture.origin, fixture.event] });
+  const events = await adapter.listSourceEvents();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].source_event_type, "PROGRESS");
+  assert.equal("named_executor" in events[0], false);
+});
+
+test("T46 TERMINAL and CONTROL_NEEDED grants require the exact named_executor", async (t) => {
+  for (const sourceEventType of ["TERMINAL", "CONTROL_NEEDED"]) {
+    await t.test(sourceEventType, async (t2) => {
+      const valid = producerAdmissionCase({ sourceEventType, grantExecutor: "executor-1", eventExecutor: "executor-1" });
+      const { adapter: validAdapter } = await makeV244Adapter({ policyRaw: JSON.stringify([valid.grant]), sourceComments: [valid.origin, valid.event] });
+      assert.equal((await validAdapter.listSourceEvents())[0].named_executor, "executor-1");
+      for (const [name, options] of [
+        ["missing event executor", { sourceEventType, grantExecutor: "executor-1", eventExecutor: undefined }],
+        ["wrong event executor", { sourceEventType, grantExecutor: "executor-1", eventExecutor: "other" }],
+        ["missing grant executor", { sourceEventType, includeGrantExecutor: false, eventExecutor: "executor-1" }],
+      ]) {
+        await t2.test(name, async () => {
+          const fixture = producerAdmissionCase(options);
+          const { adapter } = await makeV244Adapter({ policyRaw: JSON.stringify([fixture.grant]), sourceComments: [fixture.origin, fixture.event] });
+          await assert.rejects(adapter.listSourceEvents(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+        });
+      }
+    });
+  }
+});
+
+test("T47 V1 historical source events are never admitted by the V140 policy", async () => {
+  const fixture = producerAdmissionCase();
+  const v1 = issueComment("17021", 162, [
+    "GITHUB_SOURCE_EVENT_V1",
+    "source_repo: D22977/gpt-browser-bridge",
+    "source_issue: 162",
+    `source_comment_id: ${fixture.origin.id}`,
+    "source_event_type: PROGRESS",
+    "control_generation: 033",
+    `active_control_conversation_id: ${G33_CONTROL_ID}`,
+  ].join("\n"));
+  const { adapter } = await makeV244Adapter({ policyRaw: JSON.stringify([fixture.grant]), sourceComments: [fixture.origin, v1] });
+  const events = await adapter.listSourceEvents();
+  assert.deepEqual(events, []);
+});
+
+test("T48 V244 and V140 must be recognized as a matched current-index pair", async () => {
+  const comments = generation033V244V140Comments();
+  const start = comments.find((row) => row.id === G33_START_ID);
+  start.body = start.body.replace("CURRENT_REHYDRATION_INDEX_V244", "CURRENT_REHYDRATION_INDEX_V243");
+  const backend = fakeGitHub({ comments });
+  const mismatched = makeAdapter(await loadConfig(), { fetchImpl: backend.fetchImpl });
+  await assert.rejects(mismatched.readAuthoritySnapshot(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
 });
