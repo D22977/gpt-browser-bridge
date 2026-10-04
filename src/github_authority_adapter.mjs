@@ -7,6 +7,35 @@ const TYPES = new Set([
 ]);
 const EVENTS = new Set(["TERMINAL", "CONTROL_NEEDED", "PROGRESS"]);
 const AUTHORITY = { start: /^CURRENT_REHYDRATION_INDEX_V\d+$/, registry: /^CURRENT_REGISTRY_INDEX_V\d+$/, switch: "CONTROL_GENERATION_ATOMIC_SWITCH_V1" };
+const SECTIONED_PROFILES = new Set(["V243/V139", "V244/V140", "V245/V141"]);
+const V245_START_FIELDS = [
+  "state", "recorded_by_role", "repository", "control_generation", "supersedes",
+  "active_control_id", "active_control_ack", "atomic_switch", "single_active_control", "GitHub_sole_durable_semantic_authority",
+  "schema_adjudication", "initial_candidate_ready", "initial_fresh_review", "f001_control_adjudication", "f001_repair_card",
+  "f001_worker_ready", "f001_fresh_review_card", "f001_fresh_reviewer_pass", "f001_fresh_review_return",
+  "branch", "head", "parent", "tree", "changed_path_1", "blob_1", "changed_path_2", "blob_2",
+  "src/control_doorbell_runtime.mjs", "artifact_status", "candidate_is_merged", "candidate_is_runtime_active",
+  "worker_ready_terminal", "formal_reviewer_pass_terminal", "active_control_acceptance", "G33_F001_closed_at_exact_head",
+  "fresh_independent_review_complete", "review_findings_remaining", "runtime_activation", "producer_admission_activation",
+  "real_producer_grant_event", "merge_authorized", "release_authorized", "deploy_authorized", "workflow_dispatch_authorized",
+  "lease_heartbeat_monitor_authorized", "source_mutation_authorized", "producer_admission_policy_expected_current_registry_value",
+  "physical_worker_successor", "formal_reviewer_successor", "runtime_successor", "workflow_successor", "next_action",
+  "producer_admission_contract_review_lane_complete", "operational_goal_complete", "user_relay_count", "readback_required", "idempotency_key",
+];
+const V141_REGISTRY_FIELDS = [
+  "state", "recorded_by_role", "repository", "control_generation", "supersedes",
+  "current_start", "active_control_id", "active_control_ack", "atomic_switch", "single_active_control", "GitHub_sole_durable_semantic_authority",
+  "schema_adjudication", "worker_ready_terminal", "formal_reviewer_pass_terminal", "formal_reviewer_return",
+  "active_control_pass_adjudication", "reviewed_repair_candidate_accepted", "G33_F001_closed_at_exact_head",
+  "fresh_independent_review_complete", "review_findings_remaining", "branch", "head", "parent", "tree",
+  "changed_path_1", "blob_1", "changed_path_2", "blob_2", "src/control_doorbell_runtime.mjs", "artifact_status",
+  "candidate_is_merged", "candidate_is_runtime_active", "producer_admission_policy", "policy_semantics",
+  "real_producer_grant_created", "real_GITHUB_SOURCE_EVENT_V2_created", "runtime_activation", "producer_admission_activation",
+  "generation033_lease", "matching_fresh_heartbeat", "watcher_running", "monitoring_claimed",
+  "merge_release_deploy_workflow_dispatch", "source_mutation_authorized", "physical_worker_successor",
+  "formal_reviewer_successor", "runtime_successor", "workflow_successor", "next_action",
+  "producer_admission_contract_review_lane_complete", "operational_goal_complete", "user_relay_count", "readback_required", "idempotency_key",
+];
 const REQUIRED = {
   LOCAL_CONTROL_RESIDENT_LEASE_V1: ["lease_id", "resident_instance_id", "control_generation", "active_control_conversation_id", "acquired_at", "expires_at", "watched_issue_set", "trigger_contract_hash", "idempotency_key", "readback_required"],
   LOCAL_CONTROL_RESIDENT_HEARTBEAT_V1: ["lease_id", "resident_instance_id", "control_generation", "trigger_contract_hash", "observed_at", "lease_expires_at", "last_processed_comment_id"],
@@ -294,7 +323,7 @@ export function createGitHubAuthorityAdapter({
   function closedFields(body, allowedNames, requiredNames) {
     const values = {};
     for (const line of body.split(/\r?\n/)) {
-      const match = /^([A-Za-z][A-Za-z0-9_]*): (.+)$/.exec(line);
+      const match = /^([A-Za-z][A-Za-z0-9_./]*): (.+)$/.exec(line);
       if (!match) {
         if (line.includes(":")) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
         continue;
@@ -386,21 +415,27 @@ export function createGitHubAuthorityAdapter({
     const startIssue = authorityIssueNumbers.registry;
     const registryIssue = authorityIssueNumbers.switch;
     const controlIssue = authorityIssueNumbers.control;
+    const profile = `${startVersion}/${registryVersion}`;
+    if (!SECTIONED_PROFILES.has(profile)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     const startReadback = await exactIssueComment(start.id, startIssue, start.body);
     const registryReadback = await exactIssueComment(registry.id, registryIssue, registry.body);
     const startBody = sectionedHeader(startReadback, `CURRENT_REHYDRATION_INDEX_${startVersion}`, startIssue);
     const registryBody = sectionedHeader(registryReadback, `CURRENT_REGISTRY_INDEX_${registryVersion}`, registryIssue);
     const isV244V140 = startVersion === "V244" && registryVersion === "V140";
-    const startFields = closedFields(startBody, new Set([
-      "state", "recorded_by_role", "repository", "control_generation", "supersedes", "active_control_ack",
-      ...(isV244V140 ? ["atomic_switch"] : []),
-      ...(isV244V140 ? ["old_evidence_card", "old_evidence_start", "old_evidence_terminal", "task_metadata_terminal", "parser_candidate", "producer_admission_adjudication", "current_worker_card", "runtime_activation", "generation033_lease", "matching_fresh_heartbeat", "watcher_running", "monitoring_claimed", "merge_release_deploy_workflow_dispatch", "next_action"] : []),
-      "inventory_return", "active_repair_card", "owner_continuation", "operational_goal_complete",
-      "startup_skill_memory_reads", "old_inventory_terminal", "old_scope_evidence", "old_event",
-      "source_checkout_identity", "matching_process_state", "matching_scheduled_task_state", "activation_target",
-      "user_relay_count", "readback_required", "idempotency_key",
-    ]), ["state", "recorded_by_role", "repository", "control_generation", "active_control_ack", ...(isV244V140 ? ["atomic_switch"] : [])]);
-    const registryFields = closedFields(registryBody, new Set([
+    const isV245V141 = startVersion === "V245" && registryVersion === "V141";
+    const hasProducerPolicy = isV244V140 || isV245V141;
+    const startFields = isV245V141
+      ? closedFields(startBody, new Set(V245_START_FIELDS), ["state", "recorded_by_role", "repository", "control_generation", "supersedes", "active_control_id", "active_control_ack", "atomic_switch", "single_active_control", "GitHub_sole_durable_semantic_authority", "producer_admission_policy_expected_current_registry_value"])
+      : closedFields(startBody, new Set([
+        "state", "recorded_by_role", "repository", "control_generation", "supersedes", "active_control_ack",
+        ...(isV244V140 ? ["atomic_switch"] : []),
+        ...(isV244V140 ? ["old_evidence_card", "old_evidence_start", "old_evidence_terminal", "task_metadata_terminal", "parser_candidate", "producer_admission_adjudication", "current_worker_card", "runtime_activation", "generation033_lease", "matching_fresh_heartbeat", "watcher_running", "monitoring_claimed", "merge_release_deploy_workflow_dispatch", "next_action"] : []),
+        "inventory_return", "active_repair_card", "owner_continuation", "operational_goal_complete",
+        "startup_skill_memory_reads", "old_inventory_terminal", "old_scope_evidence", "old_event",
+        "source_checkout_identity", "matching_process_state", "matching_scheduled_task_state", "activation_target",
+        "user_relay_count", "readback_required", "idempotency_key",
+      ]), ["state", "recorded_by_role", "repository", "control_generation", "active_control_ack", ...(isV244V140 ? ["atomic_switch"] : [])]);
+    const registryFields = closedFields(registryBody, isV245V141 ? new Set(V141_REGISTRY_FIELDS) : new Set([
       "state", "recorded_by_role", "repository", "control_generation", "supersedes", "current_start",
       "active_control_id", "active_control_ack", ...(isV244V140 ? ["atomic_switch", "producer_admission_policy"] : []), "GitHub_sole_durable_semantic_authority", "owner_continuation",
       ...(isV244V140 ? ["old_evidence_card", "old_evidence_terminal", "task_metadata_terminal", "parser_candidate_head", "parser_candidate_tree", "producer_admission_adjudication", "current_worker_card"] : []),
@@ -409,7 +444,20 @@ export function createGitHubAuthorityAdapter({
       "matching_scheduled_task_state", "activation_target", "runtime_activation", "generation033_lease",
       "matching_fresh_heartbeat", "watcher_running", "monitoring_claimed", "merge_release_deploy_workflow_dispatch",
       "next_action", "user_relay_count", "readback_required", "idempotency_key",
-    ]), ["state", "recorded_by_role", "repository", "control_generation", "current_start", "active_control_id", "active_control_ack", ...(isV244V140 ? ["atomic_switch", "producer_admission_policy"] : [])]);
+    ]), isV245V141
+      ? ["state", "recorded_by_role", "repository", "control_generation", "current_start", "active_control_id", "active_control_ack", "atomic_switch", "single_active_control", "GitHub_sole_durable_semantic_authority", "producer_admission_policy"]
+      : ["state", "recorded_by_role", "repository", "control_generation", "current_start", "active_control_id", "active_control_ack", ...(isV244V140 ? ["atomic_switch", "producer_admission_policy"] : [])]);
+    if (isV245V141) {
+      if (startFields.state !== "CURRENT_START_HERE_ACTIVE_CONTROL033_PRODUCER_ADMISSION_REVIEWED_ARTIFACT_ACCEPTED_NO_ACTIVATION"
+        || startFields.recorded_by_role !== "ACTIVE_CONTROL"
+        || startFields.single_active_control !== "true"
+        || startFields.GitHub_sole_durable_semantic_authority !== "true") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      if (registryFields.state !== "CURRENT_ACTIVE_CONTROL033_PRODUCER_ADMISSION_REVIEWED_ARTIFACT_ACCEPTED_NO_ACTIVATION"
+        || registryFields.recorded_by_role !== "ACTIVE_CONTROL"
+        || registryFields.single_active_control !== "true"
+        || registryFields.GitHub_sole_durable_semantic_authority !== "true"
+        || registryFields.policy_semantics !== "EMPTY_POLICY_ADMITS_NO_SOURCE_EVENT") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    }
     if (startFields.repository !== repository || registryFields.repository !== repository) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     const generation = currentGeneration(startFields.control_generation);
     if (generation !== currentGeneration(registryFields.control_generation)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
@@ -418,7 +466,7 @@ export function createGitHubAuthorityAdapter({
     if (startAckId !== registryAckId) stop("AUTHORITY_POINTER_MISMATCH");
     const currentStart = new RegExp(`^#${startIssue}/([1-9]\\d*) ${startVersion} exact GET matched$`).exec(registryFields.current_start);
     if (!currentStart || decimal(currentStart[1]) !== decimal(startReadback.id)) stop("AUTHORITY_POINTER_MISMATCH");
-    const policy = isV244V140 ? producerAdmissionPolicy(registryFields.producer_admission_policy) : undefined;
+    const policy = hasProducerPolicy ? producerAdmissionPolicy(registryFields.producer_admission_policy) : undefined;
 
     const ack = await exactComment(startAckId);
     const ackBody = sectionedHeader(ack, "ACTIVE_CONTROL_REHYDRATION_ACK_V1", controlIssue);
@@ -438,9 +486,11 @@ export function createGitHubAuthorityAdapter({
     sectionedPointer(ackFields.current_start, startIssue, " V[1-9]\\d* exact GET matched");
     sectionedPointer(ackFields.current_registry, registryIssue, " V[1-9]\\d* exact GET matched");
     if (registryFields.active_control_id !== ackFields.conversation_id) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    if (isV245V141 && (startFields.active_control_id !== ackFields.conversation_id
+      || JSON.stringify(producerAdmissionPolicy(startFields.producer_admission_policy_expected_current_registry_value)) !== JSON.stringify(policy))) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     validConversationUrl(ackFields.conversation_id, ackFields.conversation_url);
     const switchId = sectionedPointer(ackFields.atomic_switch, controlIssue, " exact GET matched");
-    if (isV244V140 && (sectionedPointer(startFields.atomic_switch, controlIssue) !== switchId
+    if ((isV244V140 || isV245V141) && (sectionedPointer(startFields.atomic_switch, controlIssue) !== switchId
       || sectionedPointer(registryFields.atomic_switch, controlIssue) !== switchId)) stop("AUTHORITY_POINTER_MISMATCH");
 
     const active = await exactComment(switchId);
@@ -476,7 +526,7 @@ export function createGitHubAuthorityAdapter({
       start: startReadback, registry: registryReadback, active,
       control_generation: generation,
       active_control_conversation_id: ackFields.conversation_id,
-      ...(isV244V140 ? { producer_admission_policy: policy } : {}),
+      ...(hasProducerPolicy ? { producer_admission_policy: policy } : {}),
     };
   }
 
@@ -491,10 +541,16 @@ export function createGitHubAuthorityAdapter({
     if (!start || !registry) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     const startHeader = start.body?.split(/\r?\n/, 1)[0];
     const registryHeader = registry.body?.split(/\r?\n/, 1)[0];
-    if (["CURRENT_REHYDRATION_INDEX_V243", "CURRENT_REHYDRATION_INDEX_V244"].includes(startHeader)
-      || ["CURRENT_REGISTRY_INDEX_V139", "CURRENT_REGISTRY_INDEX_V140"].includes(registryHeader)) {
+    const sectionedVersion = (header, prefix) => {
+      const version = new RegExp(`^${prefix}_V([0-9]+)$`).exec(header || "")?.[1];
+      return version === undefined ? 0 : Number(version);
+    };
+    // V243/V139 introduced sectioned authority records; older index schemas remain on the legacy parser.
+    if (sectionedVersion(startHeader, "CURRENT_REHYDRATION_INDEX") >= 243
+      || sectionedVersion(registryHeader, "CURRENT_REGISTRY_INDEX") >= 139) {
       if (startHeader === "CURRENT_REHYDRATION_INDEX_V244" && registryHeader === "CURRENT_REGISTRY_INDEX_V140") return sectionedAuthority(start, registry, "V244", "V140");
       if (startHeader === "CURRENT_REHYDRATION_INDEX_V243" && registryHeader === "CURRENT_REGISTRY_INDEX_V139") return sectionedAuthority(start, registry);
+      if (startHeader === "CURRENT_REHYDRATION_INDEX_V245" && registryHeader === "CURRENT_REGISTRY_INDEX_V141") return sectionedAuthority(start, registry, "V245", "V141");
       stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     }
     const active = select(switches, /^CONTROL_GENERATION_ATOMIC_SWITCH_V1$/);

@@ -971,6 +971,8 @@ test("T29 transport stays separate and delegates to the pinned semantic core", a
 const G33_CONTROL_ID = "6abd98f5-5808-83e8-852c-f01a16cebf24";
 const G33_START_ID = "5981752154";
 const G33_REGISTRY_ID = "5981755651";
+const G33_V245_START_ID = "5983092545";
+const G33_V141_REGISTRY_ID = "5983096200";
 const PRODUCER_USER = { id: 55701413, login: "D22977" };
 
 function generation033V244V140Comments(policyRaw = "[]") {
@@ -1037,6 +1039,146 @@ function generation033V244V140Comments(policyRaw = "[]") {
       "user_relay_count: 0",
       "readback_required: true",
       "idempotency_key: CURRENT-REGISTRY-033-V140-PRODUCER-ADMISSION-20261004-01",
+    ].join("\n")),
+    previous.find((row) => row.id === "5921541952"),
+    previous.find((row) => row.id === "5921509976"),
+  ];
+}
+
+function generation033V245V141Comments() {
+  const previous = generation033AuthorityComments();
+  return [
+    issueComment(G33_V245_START_ID, 43, [
+      "CURRENT_REHYDRATION_INDEX_V245",
+      "state: CURRENT_START_HERE_ACTIVE_CONTROL033_PRODUCER_ADMISSION_REVIEWED_ARTIFACT_ACCEPTED_NO_ACTIVATION",
+      "recorded_by_role: ACTIVE_CONTROL",
+      "repository: D22977/gpt-browser-bridge",
+      "control_generation: 033 ACTIVE",
+      "supersedes: #43/5981752154 V244",
+      "ACTIVE_CONTROL",
+      `active_control_id: ${G33_CONTROL_ID}`,
+      "active_control_ack: #88/5921541952",
+      "atomic_switch: #88/5921509976",
+      "single_active_control: true",
+      "GitHub_sole_durable_semantic_authority: true",
+      "PRODUCER_ADMISSION_LANE",
+      "schema_adjudication: #162/5981736759",
+      "initial_candidate_ready: #162/5982566246",
+      "initial_fresh_review: #162/5982692214 FIX_REQUIRED G33-F001",
+      "f001_control_adjudication: #162/5982712085",
+      "f001_repair_card: #162/5982719712",
+      "f001_worker_ready: #162/5982941587 READY_FOR_FRESH_REVIEW",
+      "f001_fresh_review_card: #162/5982967423",
+      "f001_fresh_reviewer_pass: #162/5983050597 PASS",
+      "f001_fresh_review_return: #162/5983058768",
+      "ACCEPTED_REVIEWED_ARTIFACT",
+      "branch: work/g33-producer-admission-f001-split-envelope-20261005-01",
+      "head: 4bac60b8f9af689e4b9802bd953ea2e1e3ca9bc7",
+      "parent: 3c437003e2f4fbba66bb5183ef29551a3adb532b",
+      "tree: 48e608621f9fb9d15dab8c2d568a8eeb8339f50f",
+      "changed_path_1: src/github_authority_adapter.mjs",
+      "blob_1: 0a1c66e26ba77585411a3a146731d9087617dbc3",
+      "changed_path_2: tests/control_doorbell_runtime.test.mjs",
+      "blob_2: 60728de47b9cf22abe1605e17b6000192d3a24e7",
+      "src/control_doorbell_runtime.mjs: unchanged",
+      "artifact_status: REVIEWED_ACCEPTED_ONLY",
+      "candidate_is_merged: false",
+      "candidate_is_runtime_active: false",
+      "TERMINAL_REVIEW_STATUS",
+      "worker_ready_terminal: #162/5982941587",
+      "formal_reviewer_pass_terminal: #162/5983050597",
+      "active_control_acceptance: #162/5983076049",
+      "G33_F001_closed_at_exact_head: true",
+      "fresh_independent_review_complete: true",
+      "review_findings_remaining: none",
+      "PRESERVED_NON_ACTIVATION",
+      "runtime_activation: NOT_AUTHORIZED",
+      "producer_admission_activation: NOT_AUTHORIZED",
+      "real_producer_grant_event: NOT_AUTHORIZED",
+      "merge_authorized: false",
+      "release_authorized: false",
+      "deploy_authorized: false",
+      "workflow_dispatch_authorized: false",
+      "lease_heartbeat_monitor_authorized: false",
+      "source_mutation_authorized: false",
+      "CURRENT_POLICY",
+      "producer_admission_policy_expected_current_registry_value: []",
+      "SUCCESSOR",
+      "physical_worker_successor: NONE",
+      "formal_reviewer_successor: NONE",
+      "runtime_successor: NONE",
+      "workflow_successor: NONE",
+      "next_action: NONE_SELECTED_CONTROL_ONLY_TERMINAL_UNTIL_NEW_DURABLE_ACTIVE_CONTROL_DECISION",
+      "STATUS",
+      "producer_admission_contract_review_lane_complete: true",
+      "operational_goal_complete: false",
+      "user_relay_count: 0",
+      "readback_required: true",
+      "idempotency_key: CURRENT-REHYDRATION-INDEX-033-V245-PRODUCER-ADMISSION-REVIEWED-ACCEPTED-20261005-01",
+    ].join("\n")),
+    issueComment(G33_V141_REGISTRY_ID, 81, [
+      "CURRENT_REGISTRY_INDEX_V141",
+      "state: CURRENT_ACTIVE_CONTROL033_PRODUCER_ADMISSION_REVIEWED_ARTIFACT_ACCEPTED_NO_ACTIVATION",
+      "recorded_by_role: ACTIVE_CONTROL",
+      "repository: D22977/gpt-browser-bridge",
+      "control_generation: 033 ACTIVE",
+      "supersedes: #81/5981755651 V140",
+      "CURRENT_START",
+      `current_start: #43/${G33_V245_START_ID} V245 exact GET matched`,
+      `active_control_id: ${G33_CONTROL_ID}`,
+      "active_control_ack: #88/5921541952",
+      "atomic_switch: #88/5921509976",
+      "single_active_control: true",
+      "GitHub_sole_durable_semantic_authority: true",
+      "PRODUCER_ADMISSION_REVIEW_TERMINAL",
+      "schema_adjudication: #162/5981736759",
+      "worker_ready_terminal: #162/5982941587 READY_FOR_FRESH_REVIEW",
+      "formal_reviewer_pass_terminal: #162/5983050597 PASS",
+      "formal_reviewer_return: #162/5983058768",
+      "active_control_pass_adjudication: #162/5983076049 PASS_ACCEPTED_EXACT_HEAD_REPAIR_REVIEW_COMPLETE",
+      "reviewed_repair_candidate_accepted: true",
+      "G33_F001_closed_at_exact_head: true",
+      "fresh_independent_review_complete: true",
+      "review_findings_remaining: none",
+      "ACCEPTED_REVIEWED_ARTIFACT",
+      "branch: work/g33-producer-admission-f001-split-envelope-20261005-01",
+      "head: 4bac60b8f9af689e4b9802bd953ea2e1e3ca9bc7",
+      "parent: 3c437003e2f4fbba66bb5183ef29551a3adb532b",
+      "tree: 48e608621f9fb9d15dab8c2d568a8eeb8339f50f",
+      "changed_path_1: src/github_authority_adapter.mjs",
+      "blob_1: 0a1c66e26ba77585411a3a146731d9087617dbc3",
+      "changed_path_2: tests/control_doorbell_runtime.test.mjs",
+      "blob_2: 60728de47b9cf22abe1605e17b6000192d3a24e7",
+      "src/control_doorbell_runtime.mjs: unchanged",
+      "artifact_status: REVIEWED_ACCEPTED_ONLY",
+      "candidate_is_merged: false",
+      "candidate_is_runtime_active: false",
+      "PRODUCER_ADMISSION_POLICY",
+      "producer_admission_policy: []",
+      "policy_semantics: EMPTY_POLICY_ADMITS_NO_SOURCE_EVENT",
+      "real_producer_grant_created: false",
+      "real_GITHUB_SOURCE_EVENT_V2_created: false",
+      "PRESERVED_NON_ACTIVATION",
+      "runtime_activation: NOT_AUTHORIZED",
+      "producer_admission_activation: NOT_AUTHORIZED",
+      "generation033_lease: NONE",
+      "matching_fresh_heartbeat: NONE",
+      "watcher_running: false",
+      "monitoring_claimed: false",
+      "merge_release_deploy_workflow_dispatch: false",
+      "source_mutation_authorized: false",
+      "SUCCESSOR",
+      "physical_worker_successor: NONE",
+      "formal_reviewer_successor: NONE",
+      "runtime_successor: NONE",
+      "workflow_successor: NONE",
+      "next_action: NONE_SELECTED_CONTROL_ONLY_TERMINAL_UNTIL_NEW_DURABLE_ACTIVE_CONTROL_DECISION",
+      "STATUS",
+      "producer_admission_contract_review_lane_complete: true",
+      "operational_goal_complete: false",
+      "user_relay_count: 0",
+      "readback_required: true",
+      "idempotency_key: CURRENT-REGISTRY-033-V141-PRODUCER-ADMISSION-REVIEWED-ACCEPTED-20261005-01",
     ].join("\n")),
     previous.find((row) => row.id === "5921541952"),
     previous.find((row) => row.id === "5921509976"),
@@ -1131,6 +1273,138 @@ async function makeV244Adapter({ policyRaw, sourceComments = [], fetchOverride }
   });
   return { config, backend, writes, adapter };
 }
+
+async function makeV245Adapter({ sourceComments = [], currentComments = generation033V245V141Comments() } = {}) {
+  const config = await loadConfig();
+  const backend = fakeGitHub({ comments: [...currentComments, ...sourceComments] });
+  const writes = { count: 0 };
+  const adapter = makeAdapter(config, {
+    fetchImpl: backend.fetchImpl,
+    publisher: async ({ issue, body }) => {
+      writes.count += 1;
+      return backend.add(issue, body);
+    },
+  });
+  return { config, backend, writes, adapter };
+}
+
+test("T52 exact V245/V141 pair normalizes the current start, registry, Control, switch, and empty policy", async () => {
+  const { adapter } = await makeV245Adapter();
+  const snapshot = await adapter.readAuthoritySnapshot();
+  assert.deepEqual([
+    snapshot.control.control_generation,
+    snapshot.control.active_control_conversation_id,
+    snapshot.control.github_comment_id,
+    snapshot.registry.github_comment_id,
+    snapshot.switch.github_comment_id,
+  ], ["033", G33_CONTROL_ID, G33_V245_START_ID, G33_V141_REGISTRY_ID, "5921509976"]);
+  assert.deepEqual(snapshot.registry.producer_admission_policy, []);
+  assert.equal(snapshot.registry.producer_admission_registry_id, G33_V141_REGISTRY_ID);
+});
+
+test("T53 V245/V141 empty policy admits no V2 event and runtime fails safe without writes or sends", async () => {
+  const fixture = producerAdmissionCase({ registryId: G33_V141_REGISTRY_ID });
+  const { config, adapter, backend, writes } = await makeV245Adapter({ sourceComments: [fixture.origin, fixture.event] });
+  const snapshot = await adapter.readAuthoritySnapshot();
+  await assert.rejects(adapter.listSourceEvents(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+  let sends = 0;
+  const triggerHash = runtime.getTriggerContractHash(config);
+  const lease = {
+    ...createLease({
+      resident_instance_id: "resident-test",
+      control_generation: snapshot.control.control_generation,
+      active_control_conversation_id: snapshot.control.active_control_conversation_id,
+      trigger_contract_hash: triggerHash,
+      acquired_at: "2026-10-04T16:00:00.000Z",
+      expires_at: "2026-10-04T17:00:00.000Z",
+      watched_issue_set: ["D22977/gpt-browser-bridge#162"],
+    }),
+    github_comment_id: "9001",
+  };
+  const heartbeat = createHeartbeat({
+    lease_id: lease.lease_id,
+    resident_instance_id: "resident-test",
+    control_generation: snapshot.control.control_generation,
+    trigger_contract_hash: triggerHash,
+    observed_at: "2026-10-04T16:29:59.000Z",
+    lease_expires_at: lease.expires_at,
+    last_processed_comment_id: "16289",
+  });
+  const github = {
+    readAuthoritySnapshot: () => adapter.readAuthoritySnapshot(),
+    async listReceipts() { return [lease]; },
+    async listSourceEvents() { return adapter.listSourceEvents(); },
+    async readHeartbeat() { return heartbeat; },
+    getReceipt: (id) => adapter.getReceipt(id),
+    publishReceipt: (receipt) => adapter.publishReceipt(receipt),
+  };
+  const controller = runtime.createControlDoorbellRuntime({
+    config,
+    github,
+    residentInstanceId: "resident-test",
+    now: () => "2026-10-04T16:30:00.000Z",
+    sendPointer: async () => { sends += 1; return "unexpected"; },
+  });
+  assert.deepEqual(await controller.poll(), { state: "CONTROL_REQUIRED/NO_SEND" });
+  assert.equal(writes.count, 0);
+  assert.equal(sends, 0);
+  assert.equal(backend.calls.every((call) => call.method === "GET"), true);
+});
+
+test("T54 unsupported V245/V141 family pairings fail closed with zero runtime effects", async (t) => {
+  const mismatches = [
+    ["V245/V140", "V245", "V140"],
+    ["V244/V141", "V244", "V141"],
+    ["V245/V139", "V245", "V139"],
+    ["V243/V141", "V243", "V141"],
+  ];
+  for (const [name, startVersion, registryVersion] of mismatches) {
+    await t.test(name, async () => {
+      const comments = structuredClone(generation033V245V141Comments());
+      const start = comments.find((row) => row.id === G33_V245_START_ID);
+      const registry = comments.find((row) => row.id === G33_V141_REGISTRY_ID);
+      start.body = start.body.replace(/^CURRENT_REHYDRATION_INDEX_V\d+/, `CURRENT_REHYDRATION_INDEX_${startVersion}`);
+      registry.body = registry.body.replace(/^CURRENT_REGISTRY_INDEX_V\d+/, `CURRENT_REGISTRY_INDEX_${registryVersion}`);
+      await pollInvalidAuthorityWithoutEffects(comments);
+    });
+  }
+});
+
+test("T55 newest unsupported current-index pair cannot fall back to an older supported pair", async () => {
+  const comments = generation033V244V140Comments();
+  const newer = structuredClone(generation033V245V141Comments().find((row) => row.id === G33_V245_START_ID));
+  newer.id = "5989990001";
+  comments.push(newer);
+  await pollInvalidAuthorityWithoutEffects(comments);
+});
+
+test("T56 malformed V245/V141 required bindings fail closed with zero runtime effects", async (t) => {
+  const cases = [
+    ["missing V245 active Control ACK", (comments) => {
+      const start = comments.find((row) => row.id === G33_V245_START_ID);
+      start.body = start.body.replace(/^active_control_ack: .*\n/m, "");
+    }],
+    ["wrong V141 current-start envelope ID", (comments) => {
+      const registry = comments.find((row) => row.id === G33_V141_REGISTRY_ID);
+      registry.body = registry.body.replace(`#43/${G33_V245_START_ID} V245 exact GET matched`, "#43/5983092546 V245 exact GET matched");
+    }],
+    ["V245 active Control ID mismatch", (comments) => {
+      const start = comments.find((row) => row.id === G33_V245_START_ID);
+      start.body = start.body.replace(`active_control_id: ${G33_CONTROL_ID}`, "active_control_id: 00000000-0000-0000-0000-000000000000");
+    }],
+    ["V141 atomic switch mismatch", (comments) => {
+      const registry = comments.find((row) => row.id === G33_V141_REGISTRY_ID);
+      registry.body = registry.body.replace("atomic_switch: #88/5921509976", "atomic_switch: #88/5921502165");
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const comments = structuredClone(generation033V245V141Comments());
+      mutate(comments);
+      await pollInvalidAuthorityWithoutEffects(comments);
+    });
+  }
+});
 
 test("T34 exact V244/V140 chain normalizes generation, identity, and current envelope IDs", async () => {
   const { adapter } = await makeV244Adapter();
