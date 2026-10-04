@@ -1379,3 +1379,101 @@ test("T48 V244 and V140 must be recognized as a matched current-index pair", asy
   const mismatched = makeAdapter(await loadConfig(), { fetchImpl: backend.fetchImpl });
   await assert.rejects(mismatched.readAuthoritySnapshot(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
 });
+
+async function assertSplitEnvelopeProducerMismatchFailsClosed(exactEventUser) {
+  const fixture = producerAdmissionCase();
+  const fetchOverride = (fetchImpl) => async (url, request) => {
+    const response = await fetchImpl(url, request);
+    if (url.endsWith(`/issues/comments/${fixture.event.id}`)) {
+      return jsonResponse({ ...(await response.json()), user: exactEventUser });
+    }
+    return response;
+  };
+  const { config, adapter, backend, writes } = await makeV244Adapter({
+    policyRaw: JSON.stringify([fixture.grant]),
+    sourceComments: [fixture.origin, fixture.event],
+    fetchOverride,
+  });
+
+  await assert.rejects(adapter.listSourceEvents(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+
+  const snapshot = await adapter.readAuthoritySnapshot();
+  const triggerHash = runtime.getTriggerContractHash(config);
+  const now = "2026-10-04T16:30:00.000Z";
+  const lease = {
+    ...createLease({
+      resident_instance_id: "resident-test",
+      control_generation: snapshot.control.control_generation,
+      active_control_conversation_id: snapshot.control.active_control_conversation_id,
+      trigger_contract_hash: triggerHash,
+      acquired_at: "2026-10-04T16:00:00.000Z",
+      expires_at: "2026-10-04T17:00:00.000Z",
+      watched_issue_set: ["D22977/gpt-browser-bridge#162"],
+    }),
+    github_comment_id: "9001",
+  };
+  const heartbeat = createHeartbeat({
+    lease_id: lease.lease_id,
+    resident_instance_id: "resident-test",
+    control_generation: snapshot.control.control_generation,
+    trigger_contract_hash: triggerHash,
+    observed_at: "2026-10-04T16:29:59.000Z",
+    lease_expires_at: lease.expires_at,
+    last_processed_comment_id: "16289",
+  });
+  const github = {
+    readAuthoritySnapshot: () => adapter.readAuthoritySnapshot(),
+    async listReceipts() { return [lease]; },
+    async listSourceEvents() { return adapter.listSourceEvents(); },
+    async readHeartbeat() { return heartbeat; },
+    getReceipt: (id) => adapter.getReceipt(id),
+    publishReceipt: (receipt) => adapter.publishReceipt(receipt),
+  };
+  let sends = 0;
+  const controller = runtime.createControlDoorbellRuntime({
+    config,
+    github,
+    residentInstanceId: "resident-test",
+    now: () => now,
+    sendPointer: async () => { sends += 1; return "unexpected"; },
+  });
+
+  assert.deepEqual(await controller.poll(), { state: "CONTROL_REQUIRED/NO_SEND" });
+  assert.equal(writes.count, 0);
+  assert.equal(sends, 0);
+  assert.equal(backend.calls.every((call) => call.method === "GET"), true);
+}
+
+test("T49 F001-A exact event GET user.id mismatch fails closed with zero runtime effects", async () => {
+  await assertSplitEnvelopeProducerMismatchFailsClosed({ id: 55701414, login: "D22977" });
+});
+
+test("T50 F001-B exact event GET login mismatch fails closed with zero runtime effects", async () => {
+  await assertSplitEnvelopeProducerMismatchFailsClosed({ id: 55701413, login: "other" });
+});
+
+test("T51 exact event GET producer identity survives a mismatching listed row", async () => {
+  const fixture = producerAdmissionCase();
+  const listedUser = { id: 55701414, login: "other" };
+  const fetchOverride = (fetchImpl) => async (url, request) => {
+    const response = await fetchImpl(url, request);
+    if (new URL(url).pathname.endsWith("/issues/162/comments")) {
+      const comments = await response.json();
+      return jsonResponse(comments.map((comment) => String(comment.id) === String(fixture.event.id)
+        ? { ...comment, user: listedUser }
+        : comment));
+    }
+    return response;
+  };
+  const { adapter } = await makeV244Adapter({
+    policyRaw: JSON.stringify([fixture.grant]),
+    sourceComments: [fixture.origin, fixture.event],
+    fetchOverride,
+  });
+
+  const events = await adapter.listSourceEvents();
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].producer_github_user_id, fixture.grant.producer_github_user_id);
+  assert.equal(events[0].producer_github_login, fixture.grant.producer_github_login);
+});

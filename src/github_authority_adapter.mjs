@@ -587,8 +587,8 @@ export function createGitHubAuthorityAdapter({
         grant.origin_comment_id === event.origin_comment_id && grant.source_event_type === event.source_event_type);
       if (grants.length !== 1) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
       const grant = grants[0];
-      const eventUser = commentUser(listed);
-      if (eventUser.id !== grant.producer_github_user_id || eventUser.login !== grant.producer_github_login) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      if (event.producer_github_user_id !== grant.producer_github_user_id
+        || event.producer_github_login !== grant.producer_github_login) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
 
       let origin;
       try { origin = await exactComment(event.origin_comment_id); }
@@ -609,7 +609,7 @@ export function createGitHubAuthorityAdapter({
       const tuple = [event.origin_comment_id, event.source_event_type, event.control_generation, event.active_control_conversation_id].join("\0");
       if (seen.has(tuple)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
       seen.add(tuple);
-      events.push({ ...event, producer_github_user_id: eventUser.id, producer_github_login: eventUser.login, origin_body_sha256: originHash });
+      events.push({ ...event, origin_body_sha256: originHash });
     }
     return events;
   }
