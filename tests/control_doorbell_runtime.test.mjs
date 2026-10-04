@@ -614,6 +614,7 @@ async function pollInvalidAuthorityWithoutEffects(records, fetchOverride) {
     now: () => "2026-10-04T13:00:42.000Z",
     sendPointer: async () => { transportCalls += 1; return "transport-called"; },
   });
+  await assert.rejects(adapter.readAuthoritySnapshot());
   assert.deepEqual(await controller.poll(), { state: "CONTROL_REQUIRED/NO_SEND" });
   assert.equal(publisherCalls, 0);
   assert.equal(transportCalls, 0);
@@ -846,6 +847,23 @@ test("T31 malformed exact generation 033 pointers and identities fail closed wit
     ["stale ACK identity", (rows) => replaceRecordText(rows, "5921541952", "conversation_id: 6abd98f5-5808-83e8-852c-f01a16cebf24", "conversation_id: 6ab86a5c-b190-83e8-9c60-c50b4ae8507e")],
     ["switch URL mismatch", (rows) => replaceSectionField(rows, "5921509976", "NEW_CONTROL", "PRESERVED_WORK", "conversation_url", "https://chatgpt.com/other/c/6abd98f5-5808-83e8-852c-f01a16cebf24")],
     ["ambiguous NEW_CONTROL section", (rows) => replaceRecordText(rows, "5921509976", "NEW_CONTROL\ngeneration: 033", "NEW_CONTROL\nNEW_CONTROL\ngeneration: 033")],
+    ["OLD_CONTROL remains active", (rows) => replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "status_after", "ACTIVE")],
+    ["missing OLD_CONTROL status_after", (rows) => replaceRecordText(rows, "5921509976", "status_after: RETIRED\nconversation_id:", "conversation_id:")],
+    ["duplicate OLD_CONTROL status_after", (rows) => replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "status_after", "RETIRED\nstatus_after: RETIRED")],
+    ["malformed OLD_CONTROL status_after", (rows) => replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "status_after", "retired")],
+    ["unknown OLD_CONTROL field", (rows) => replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "status_after", "RETIRED\nunexpected: field")],
+    ["malformed OLD_CONTROL generation", (rows) => replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "generation", "031x")],
+    ["OLD_CONTROL generation matches NEW_CONTROL", (rows) => replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "generation", "033")],
+    ["malformed OLD_CONTROL conversation ID", (rows) => {
+      replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "conversation_id", "not-a-uuid");
+      replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "conversation_url", "https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhu-an/c/not-a-uuid");
+    }],
+    ["OLD_CONTROL conversation URL identity mismatch", (rows) => replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "conversation_url", "https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhu-an/c/33333333-3333-3333-3333-333333333333")],
+    ["OLD_CONTROL identity duplicates NEW_CONTROL", (rows) => {
+      replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "conversation_id", "6abd98f5-5808-83e8-852c-f01a16cebf24");
+      replaceSectionField(rows, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "conversation_url", "https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhu-an/c/6abd98f5-5808-83e8-852c-f01a16cebf24");
+    }],
+    ["ambiguous OLD_CONTROL section", (rows) => replaceRecordText(rows, "5921509976", "OLD_CONTROL\ngeneration: 031", "OLD_CONTROL\nOLD_CONTROL\ngeneration: 031")],
     ["pointer comment is absent", (rows) => replaceRecordText(rows, "5921589118", "active_control_ack: #88/5921541952", "active_control_ack: #88/5999999999")],
   ];
   for (const [name, mutate] of mutations) {
@@ -901,7 +919,7 @@ test("T33 parser selects NEW_CONTROL and accepts a different current generation"
   replaceSectionField(records, "5921509976", "NEW_CONTROL", "PRESERVED_WORK", "conversation_id", nextIdentity);
   replaceSectionField(records, "5921509976", "NEW_CONTROL", "PRESERVED_WORK", "conversation_url", nextUrl);
   replaceSectionField(records, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "generation", "099");
-  replaceSectionField(records, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "status_after", "ACTIVE");
+  replaceSectionField(records, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "status_after", "RETIRED");
 
   const backend = fakeGitHub({ comments: records });
   const adapter = makeAdapter(config, { fetchImpl: backend.fetchImpl });

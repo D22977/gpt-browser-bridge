@@ -207,21 +207,34 @@ export function createGitHubAuthorityAdapter({
   function uniqueSection(body, name, precedingName, followingName) {
     const headings = [...body.matchAll(/^([A-Z][A-Z0-9_]*)$/gm)];
     const named = (value) => headings.filter((heading) => heading[1] === value);
-    const previous = named(precedingName), current = named(name), next = named(followingName);
-    if (previous.length !== 1 || current.length !== 1 || next.length !== 1
-      || previous[0].index >= current[0].index || current[0].index >= next[0].index) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    const previous = precedingName ? named(precedingName) : [];
+    const current = named(name), next = named(followingName);
+    if (current.length !== 1 || next.length !== 1 || current[0].index >= next[0].index
+      || (precedingName && (previous.length !== 1 || previous[0].index >= current[0].index))
+      || (!precedingName && headings[0] !== current[0])) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     const nextHeading = headings.find((heading) => heading.index > current[0].index);
     if (nextHeading !== next[0]) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     return body.slice(current[0].index + current[0][0].length, next[0].index);
   }
 
+  function validGeneration(value) {
+    if (!/^[0-9]{3}$/.test(value) || value === "000") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    return value;
+  }
+
   function currentGeneration(value) {
     const match = /^([0-9]{3}) ACTIVE$/.exec(value);
-    if (!match || match[1] === "000") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
-    return match[1];
+    if (!match) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    return validGeneration(match[1]);
+  }
+
+  function validConversationId(value) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    return value;
   }
 
   function validConversationUrl(identity, value) {
+    validConversationId(identity);
     let url;
     try { url = new URL(value); } catch { stop("AUTHORITY_CONFLICT_OR_MALFORMED"); }
     if (url.origin !== "https://chatgpt.com" || !url.pathname.endsWith(`/c/${identity}`) || url.search || url.hash) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
@@ -293,6 +306,14 @@ export function createGitHubAuthorityAdapter({
       "current_start_before_switch", "current_registry_before_switch", "current_handoff_before_switch",
     ]), ["state", "recorded_by_role", "repository", "rotation_id", "idempotency_key"]);
     if (topFields.repository !== repository) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    const oldControl = uniqueSection(activeBody.slice(activeBody.indexOf("\n") + 1), "OLD_CONTROL", null, "NEW_CONTROL");
+    const oldFields = closedFields(oldControl, new Set([
+      "generation", "status_before", "status_after", "conversation_id", "conversation_url",
+    ]), ["generation", "status_after", "conversation_id", "conversation_url"]);
+    const oldGeneration = validGeneration(oldFields.generation);
+    const oldIdentity = validConversationId(oldFields.conversation_id);
+    if (oldGeneration === generation || oldFields.status_after !== "RETIRED") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    validConversationUrl(oldIdentity, oldFields.conversation_url);
     const newControl = uniqueSection(activeBody, "NEW_CONTROL", "OLD_CONTROL", "PRESERVED_WORK");
     const controlFields = closedFields(newControl, new Set([
       "generation", "display_name", "status_before", "status_after", "conversation_id", "conversation_url", "single_active_control", "generation032",
@@ -300,6 +321,7 @@ export function createGitHubAuthorityAdapter({
     if (controlFields.generation !== generation || controlFields.status_after !== "ACTIVE"
       || controlFields.conversation_id !== ackFields.conversation_id || controlFields.conversation_url !== ackFields.conversation_url
       || controlFields.single_active_control !== "true") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    if (oldIdentity === controlFields.conversation_id || oldFields.conversation_url === controlFields.conversation_url) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     validConversationUrl(controlFields.conversation_id, controlFields.conversation_url);
     return { start: startReadback, registry: registryReadback, active, control_generation: generation, active_control_conversation_id: ackFields.conversation_id };
   }
