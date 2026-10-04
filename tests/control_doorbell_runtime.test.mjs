@@ -392,6 +392,234 @@ function authorityComments(repository = "D22977/gpt-browser-bridge") {
   ];
 }
 
+function generation033AuthorityComments() {
+  const repository = "D22977/gpt-browser-bridge";
+  return [
+    issueComment("5921589118", 43, [
+      "CURRENT_REHYDRATION_INDEX_V243",
+      "state: CURRENT_START_HERE_ACTIVE_CONTROL033_EVIDENCE_ACCESS_REPAIR_CARD_ACTIVE",
+      "recorded_by_role: ACTIVE_CONTROL",
+      `repository: ${repository}`,
+      "control_generation: 033 ACTIVE",
+      "supersedes: #43/5921517363 V242",
+      "active_control_ack: #88/5921541952",
+      "inventory_return: #162/5921557196",
+      "active_repair_card: #162/5921584474",
+      "owner_continuation: #43/5921003901",
+      "operational_goal_complete: false",
+      "SCOPE_ADJUDICATION",
+      "startup_skill_memory_reads: accepted only as nonauthoritative bootstrap read exception",
+      "old_inventory_terminal: #162/5921329668 BLOCKED preserved",
+      "old_scope_evidence: #162/5921201586 adjudicated by #162/5921584474",
+      "old_event: consumed once never replay",
+      "CURRENT_GAP",
+      "source_checkout_identity: UNKNOWN_PENDING_REPAIR",
+      "matching_process_state: UNKNOWN_PENDING_REPAIR",
+      "matching_scheduled_task_state: UNKNOWN_PENDING_REPAIR",
+      "activation_target: NOT_DETERMINABLE",
+      "CURRENT_NEXT",
+      "Bind exactly one current-user native read-only evidence/access Worker under #162/5921584474, then durable binding/readback + dispatch/readback + one minimal pointer.",
+      "No activation, lease, heartbeat, monitor, review, product dispatch, merge, release, deploy, or workflow dispatch is authorized.",
+      "user_relay_count: 0",
+      "readback_required: true",
+      "idempotency_key: CURRENT-REHYDRATION-INDEX-033-V243-EVIDENCE-ACCESS-REPAIR-20261001-01",
+    ].join("\n"), repository),
+    issueComment("5921593188", 81, [
+      "CURRENT_REGISTRY_INDEX_V139",
+      "state: CURRENT_ACTIVE_CONTROL033_EVIDENCE_ACCESS_REPAIR_CARD_ACTIVE",
+      "recorded_by_role: ACTIVE_CONTROL",
+      `repository: ${repository}`,
+      "control_generation: 033 ACTIVE",
+      "supersedes: #81/5921522813 V138",
+      "current_start: #43/5921589118 V243 exact GET matched",
+      "active_control_id: 6abd98f5-5808-83e8-852c-f01a16cebf24",
+      "active_control_ack: #88/5921541952",
+      "GitHub_sole_durable_semantic_authority: true",
+      "owner_continuation: #43/5921003901",
+      "restoration_goal_complete: false",
+      "current_repair_card: #162/5921584474",
+      "prior_inventory_terminal: #162/5921329668 BLOCKED",
+      "scope_evidence: #162/5921201586 adjudicated by current repair card",
+      "old_inventory_event: consumed once never replay",
+      "executor_required: separately bound CURRENT_USER_NATIVE_READ_ONLY evidence/access Worker",
+      "source_checkout_identity: UNKNOWN",
+      "matching_process_state: UNKNOWN",
+      "matching_scheduled_task_state: UNKNOWN",
+      "activation_target: NOT_DETERMINABLE",
+      "runtime_activation: NOT_AUTHORIZED",
+      "generation033_lease: NONE",
+      "matching_fresh_heartbeat: NONE",
+      "watcher_running: false",
+      "monitoring_claimed: false",
+      "merge_release_deploy_workflow_dispatch: false",
+      "next_action: bind/readback one exact evidence/access Worker under #162/5921584474; then dispatch/readback and one minimal pointer",
+      "user_relay_count: 0",
+      "readback_required: true",
+      "idempotency_key: CURRENT-REGISTRY-033-V139-EVIDENCE-ACCESS-REPAIR-20261001-01",
+    ].join("\n"), repository),
+    issueComment("5921541952", 88, [
+      "ACTIVE_CONTROL_REHYDRATION_ACK_V1",
+      "state: ACTIVE_REHYDRATED_ACKNOWLEDGED",
+      "recorded_by_role: ACTIVE_CONTROL",
+      `repository: ${repository}`,
+      "generation: 033",
+      "display_name: 控制塔-033",
+      "conversation_id: 6abd98f5-5808-83e8-852c-f01a16cebf24",
+      "conversation_url: https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhuan-an/c/6abd98f5-5808-83e8-852c-f01a16cebf24",
+      "request: #88/5921532548 exact GET matched",
+      "atomic_switch: #88/5921509976 exact GET matched",
+      "current_start: #43/5921517363 V242 exact GET matched",
+      "current_registry: #81/5921522813 V138 exact GET matched",
+      "current_handoff: #81/5921528371 V91 exact GET matched",
+      "binding: #88/5921437836 exact GET matched",
+      "sole_active_control_generation: 033",
+      "sole_active_control_identity_match: true",
+      "generation031: RETIRED",
+      "generation032: EXHAUSTED_NEVER_ACTIVE",
+      "state_pointer_consistency: matched",
+      "preserved_inventory_card: #162/5921088577",
+      "preserved_worker_start: #162/5921222417",
+      "preserved_worker_terminal: #162/5921329668 BLOCKED",
+      "preserved_scope_evidence: #162/5921201586 unadjudicated",
+      "preserved_return_request: #162/5921365073",
+      "prior_inventory_event_replay: FORBIDDEN",
+      "fresh_review: NOT_STARTED",
+      "semantic_adjudication_performed: false",
+      "successor_authorized_or_dispatched: false",
+      "review_performed: false",
+      "runtime_activation_performed: false",
+      "generation033_lease: NONE",
+      "matching_fresh_heartbeat: NONE",
+      "watcher_running: false",
+      "monitoring_claimed: false",
+      "idempotency_key: GBB-CONTROL-G33-ACTIVE-REHYDRATION-ACK-20261001-01",
+      "user_relay_count: 0",
+      "readback_required: true",
+    ].join("\n"), repository),
+    issueComment("5921509976", 88, [
+      "CONTROL_GENERATION_ATOMIC_SWITCH_V1",
+      "state: ACTIVE_SWITCH_COMMITTED_READBACK_REQUIRED",
+      "recorded_by_role: LOCAL_CONTROL_TRANSPORT",
+      `repository: ${repository}`,
+      "rotation_id: GBB-CONTROL-ROTATION-031-033-20261001-01",
+      "idempotency_key: GBB-CONTROL-ROTATION-031-033-ATOMIC-SWITCH-20261001-01",
+      "source_previous_active_switch: #88/5851638517",
+      "source_route_correction: #88/5880567553",
+      "source_rotation: #88/5921408923",
+      "candidate_binding: #88/5921437836",
+      "candidate_generation_ACK: #88/5921461828",
+      "candidate_continuity_ACK: #88/5921466370",
+      "candidate_route_PASS: #88/5921489518",
+      "independent_Local_Transport_R3: #88/5921502165 PASS / exact GET readback matched",
+      "current_start_before_switch: #43/5921097721 V241",
+      "current_registry_before_switch: #81/5921102843 V137",
+      "current_handoff_before_switch: #81/5921106003 V90",
+      "OLD_CONTROL",
+      "generation: 031",
+      "status_before: ACTIVE_UNTIL_ATOMIC_SWITCH_LIMIT_REACHED",
+      "status_after: RETIRED",
+      "conversation_id: 6ab86a5c-b190-83e8-9c60-c50b4ae8507e",
+      "conversation_url: https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhuan-an/c/6ab86a5c-b190-83e8-9c60-c50b4ae8507e",
+      "NEW_CONTROL",
+      "generation: 033",
+      "display_name: 控制塔-033",
+      "status_before: CANDIDATE_ACKED_CONTINUITY_ROUTE_PROVEN_NOT_ACTIVE",
+      "status_after: ACTIVE",
+      "conversation_id: 6abd98f5-5808-83e8-852c-f01a16cebf24",
+      "conversation_url: https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhuan-an/c/6abd98f5-5808-83e8-852c-f01a16cebf24",
+      "single_active_control: true",
+      "generation032: EXHAUSTED_NEVER_ACTIVE / #88/5921401034 / do not send",
+      "PRESERVED_WORK",
+      "owner_restoration_goal: #43/5921003901 / NOT_COMPLETE",
+      "inventory_card: #162/5921088577",
+      "Worker_start: #162/5921222417",
+      "Worker_terminal: #162/5921329668 BLOCKED",
+      "return_request: #162/5921365073",
+      "scope_evidence: #162/5921201586 unadjudicated",
+      "event_consumed_once_never_replay: true",
+      "fresh_review: not started, BLOCKED not READY",
+      "historical_unresolved_lanes_errors: preserved by #81/5921106003 and prior lineage; no resets",
+      "new_rotation_failures: old031 reactive hard limit; candidate032 reached limit before activation, rejection preserved",
+      "MONITOR",
+      "generation033_lease: NONE",
+      "matching_fresh_heartbeat: NONE",
+      "watcher_running: false",
+      "monitoring_claimed: false",
+      "POST_SWITCH",
+      "next_action: exact GET this switch, publish/readback post-switch #43/#81 current indexes bound to this switch, then exactly one minimal active-rehydration pointer to new033",
+      "require_new_Control_own_ACTIVE_CONTROL_REHYDRATION_ACK_V1_readback_before_semantic_work: true",
+      "old031_or032_send: FORBIDDEN; stale routing is NO_OP_RETIRED/NO_OP_NEVER_ACTIVE without physical send",
+      "runtime_product_mutation_activation_review_merge_release_deploy: false",
+      "user_relay_count: 0",
+      "readback_required: true",
+    ].join("\n"), repository),
+  ];
+}
+
+function mutateAuthorityRecord(records, id, mutate) {
+  const row = records.find((comment) => comment.id === id);
+  assert.ok(row, `missing fixture comment ${id}`);
+  row.body = mutate(row.body);
+}
+
+function replaceRecordText(records, id, before, after) {
+  mutateAuthorityRecord(records, id, (body) => {
+    assert.equal(body.split(before).length - 1, 1, `expected one ${before} in ${id}`);
+    return body.replace(before, after);
+  });
+}
+
+function replaceFirstRecordText(records, id, before, after) {
+  mutateAuthorityRecord(records, id, (body) => {
+    assert.ok(body.includes(before), `expected ${before} in ${id}`);
+    return body.replace(before, after);
+  });
+}
+
+function setRecordField(records, id, field, value) {
+  mutateAuthorityRecord(records, id, (body) => {
+    const pattern = new RegExp(`^${field}: .*?$`, "gm");
+    const matches = [...body.matchAll(pattern)];
+    assert.equal(matches.length, 1, `expected one ${field} in ${id}`);
+    return body.replace(pattern, `${field}: ${value}`);
+  });
+}
+
+function replaceSectionField(records, id, section, nextSection, field, value) {
+  mutateAuthorityRecord(records, id, (body) => {
+    const start = body.indexOf(`${section}\n`);
+    const end = body.indexOf(`\n${nextSection}\n`, start);
+    assert.ok(start >= 0 && end > start, `missing ${section} section in ${id}`);
+    const sectionBody = body.slice(start, end);
+    const fieldPattern = new RegExp(`^${field}: .*?$`, "m");
+    assert.equal((sectionBody.match(new RegExp(`^${field}: .*?$`, "gm")) ?? []).length, 1, `expected one ${field} in ${section}`);
+    const updated = sectionBody.replace(fieldPattern, `${field}: ${value}`);
+    return `${body.slice(0, start)}${updated}${body.slice(end)}`;
+  });
+}
+
+async function pollInvalidAuthorityWithoutEffects(records, fetchOverride) {
+  const config = await loadConfig();
+  const backend = fakeGitHub({ comments: records });
+  let publisherCalls = 0;
+  let transportCalls = 0;
+  const adapter = makeAdapter(config, {
+    fetchImpl: fetchOverride ? fetchOverride(backend) : backend.fetchImpl,
+    publisher: async () => { publisherCalls += 1; return "99999"; },
+  });
+  const controller = runtime.createControlDoorbellRuntime({
+    config,
+    github: adapter,
+    residentInstanceId: config.resident_instance_id,
+    now: () => "2026-10-04T13:00:42.000Z",
+    sendPointer: async () => { transportCalls += 1; return "transport-called"; },
+  });
+  assert.deepEqual(await controller.poll(), { state: "CONTROL_REQUIRED/NO_SEND" });
+  assert.equal(publisherCalls, 0);
+  assert.equal(transportCalls, 0);
+  assert.equal(backend.calls.some((call) => call.method !== "GET"), false);
+}
+
 function fakeGitHub({ repository = "D22977/gpt-browser-bridge", comments = authorityComments(repository) } = {}) {
   const rows = new Map(comments.map((comment) => [String(comment.id), structuredClone(comment)]));
   const calls = [];
@@ -572,6 +800,115 @@ test("T27 GitHub adapter exact-reads authority and publishes then exact-reads a 
   assert.ok(backend.rows.get(String(id)));
   assert.ok(backend.calls.some((call) => call.url.endsWith(`/issues/comments/${id}`)));
   assert.ok(backend.calls.every((call) => call.headers.Authorization === "Bearer test-token"));
+});
+
+test("T30 exact generation 033 records normalize V243/V139, ACK, and NEW_CONTROL switch", async () => {
+  const config = await loadConfig();
+  const backend = fakeGitHub({ comments: generation033AuthorityComments() });
+  const adapter = makeAdapter(config, { fetchImpl: backend.fetchImpl });
+  const snapshot = await adapter.readAuthoritySnapshot();
+
+  assert.deepEqual([
+    snapshot.control.control_generation,
+    snapshot.control.active_control_conversation_id,
+    snapshot.control.github_comment_id,
+    snapshot.registry.github_comment_id,
+    snapshot.switch.github_comment_id,
+  ], [
+    "033",
+    "6abd98f5-5808-83e8-852c-f01a16cebf24",
+    "5921589118",
+    "5921593188",
+    "5921509976",
+  ]);
+  assert.deepEqual(snapshot.control.producer_admission_comment_ids, []);
+  assert.deepEqual(snapshot.registry.producer_admission_comment_ids, []);
+  assert.deepEqual(snapshot.switch.producer_admission_comment_ids, []);
+  assert.equal(backend.calls.every((call) => call.method === "GET"), true);
+  for (const id of ["5921589118", "5921593188", "5921541952", "5921509976"]) {
+    assert.ok(backend.calls.some((call) => call.method === "GET" && call.url.endsWith(`/issues/comments/${id}`)), `missing exact GET for ${id}`);
+  }
+});
+
+test("T31 malformed exact generation 033 pointers and identities fail closed without side effects", async (t) => {
+  const mutations = [
+    ["missing start ACK pointer", (rows) => replaceRecordText(rows, "5921589118", "active_control_ack: #88/5921541952", "")],
+    ["duplicate start ACK pointer", (rows) => replaceRecordText(rows, "5921589118", "active_control_ack: #88/5921541952", "active_control_ack: #88/5921541952\nactive_control_ack: #88/5921541952")],
+    ["unrecognized pointer alias", (rows) => replaceRecordText(rows, "5921589118", "active_control_ack: #88/5921541952", "active_control_ack_id: #88/5921541952")],
+    ["missing registry current start", (rows) => replaceRecordText(rows, "5921593188", "current_start: #43/5921589118 V243 exact GET matched", "")],
+    ["missing registry identity", (rows) => replaceRecordText(rows, "5921593188", "active_control_id: 6abd98f5-5808-83e8-852c-f01a16cebf24", "")],
+    ["wrong current start issue", (rows) => replaceRecordText(rows, "5921593188", "current_start: #43/5921589118 V243 exact GET matched", "current_start: #81/5921589118 V243 exact GET matched")],
+    ["malformed trailing text in switch pointer", (rows) => replaceRecordText(rows, "5921541952", "atomic_switch: #88/5921509976 exact GET matched", "atomic_switch: #88/5921509976 trailing text")],
+    ["malformed historical ACK snapshot pointer", (rows) => replaceRecordText(rows, "5921541952", "current_start: #43/5921517363 V242 exact GET matched", "current_start: #81/5921517363 V242 exact GET matched")],
+    ["ACK points to itself as switch", (rows) => replaceRecordText(rows, "5921541952", "atomic_switch: #88/5921509976 exact GET matched", "atomic_switch: #88/5921541952 exact GET matched")],
+    ["wrong repository", (rows) => replaceRecordText(rows, "5921593188", "repository: D22977/gpt-browser-bridge", "repository: D22977/other")],
+    ["index generation mismatch", (rows) => replaceRecordText(rows, "5921593188", "control_generation: 033 ACTIVE", "control_generation: 034 ACTIVE")],
+    ["stale ACK identity", (rows) => replaceRecordText(rows, "5921541952", "conversation_id: 6abd98f5-5808-83e8-852c-f01a16cebf24", "conversation_id: 6ab86a5c-b190-83e8-9c60-c50b4ae8507e")],
+    ["switch URL mismatch", (rows) => replaceSectionField(rows, "5921509976", "NEW_CONTROL", "PRESERVED_WORK", "conversation_url", "https://chatgpt.com/other/c/6abd98f5-5808-83e8-852c-f01a16cebf24")],
+    ["ambiguous NEW_CONTROL section", (rows) => replaceRecordText(rows, "5921509976", "NEW_CONTROL\ngeneration: 033", "NEW_CONTROL\nNEW_CONTROL\ngeneration: 033")],
+    ["pointer comment is absent", (rows) => replaceRecordText(rows, "5921589118", "active_control_ack: #88/5921541952", "active_control_ack: #88/5999999999")],
+  ];
+  for (const [name, mutate] of mutations) {
+    await t.test(name, async () => {
+      const records = generation033AuthorityComments();
+      mutate(records);
+      await pollInvalidAuthorityWithoutEffects(records);
+    });
+  }
+});
+
+test("T32 exact GET envelope, ID, and body mismatches fail closed", async (t) => {
+  const cases = [
+    ["wrong exact comment ID", (backend) => async (url, options) => {
+      const response = await backend.fetchImpl(url, options);
+      if (url.endsWith("/issues/comments/5921589118")) return jsonResponse({ ...(await response.json()), id: 5921589119 });
+      return response;
+    }],
+    ["wrong exact repository envelope", (backend) => async (url, options) => {
+      const response = await backend.fetchImpl(url, options);
+      if (url.endsWith("/issues/comments/5921589118")) return jsonResponse({ ...(await response.json()), issue_url: "https://api.github.com/repos/D22977/other/issues/43" });
+      return response;
+    }],
+    ["wrong exact issue envelope", (backend) => async (url, options) => {
+      const response = await backend.fetchImpl(url, options);
+      if (url.endsWith("/issues/comments/5921589118")) return jsonResponse({ ...(await response.json()), issue_url: "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/81" });
+      return response;
+    }],
+    ["exact body differs from listed body", (backend) => async (url, options) => {
+      const response = await backend.fetchImpl(url, options);
+      if (url.endsWith("/issues/comments/5921589118")) return jsonResponse({ ...(await response.json()), body: `${(await response.json()).body}\ntrailing` });
+      return response;
+    }],
+  ];
+  for (const [name, override] of cases) {
+    await t.test(name, async () => pollInvalidAuthorityWithoutEffects(generation033AuthorityComments(), override));
+  }
+});
+
+test("T33 parser selects NEW_CONTROL and accepts a different current generation", async () => {
+  const config = await loadConfig();
+  const records = generation033AuthorityComments();
+  const nextIdentity = "9e33e932-3952-49b6-a37b-443242bea2ee";
+  const nextUrl = `https://chatgpt.com/g/g-p-6a7b34dba7448191ac48d7789054813b-kong-zhi-ta-zhu-an/c/${nextIdentity}`;
+  replaceRecordText(records, "5921589118", "control_generation: 033 ACTIVE", "control_generation: 034 ACTIVE");
+  replaceRecordText(records, "5921593188", "control_generation: 033 ACTIVE", "control_generation: 034 ACTIVE");
+  replaceRecordText(records, "5921593188", "active_control_id: 6abd98f5-5808-83e8-852c-f01a16cebf24", `active_control_id: ${nextIdentity}`);
+  replaceFirstRecordText(records, "5921541952", "generation: 033", "generation: 034");
+  setRecordField(records, "5921541952", "conversation_id", nextIdentity);
+  setRecordField(records, "5921541952", "conversation_url", nextUrl);
+  replaceRecordText(records, "5921541952", "sole_active_control_generation: 033", "sole_active_control_generation: 034");
+  replaceSectionField(records, "5921509976", "NEW_CONTROL", "PRESERVED_WORK", "generation", "034");
+  replaceSectionField(records, "5921509976", "NEW_CONTROL", "PRESERVED_WORK", "conversation_id", nextIdentity);
+  replaceSectionField(records, "5921509976", "NEW_CONTROL", "PRESERVED_WORK", "conversation_url", nextUrl);
+  replaceSectionField(records, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "generation", "099");
+  replaceSectionField(records, "5921509976", "OLD_CONTROL", "NEW_CONTROL", "status_after", "ACTIVE");
+
+  const backend = fakeGitHub({ comments: records });
+  const adapter = makeAdapter(config, { fetchImpl: backend.fetchImpl });
+  const snapshot = await adapter.readAuthoritySnapshot();
+  assert.equal(snapshot.control.control_generation, "034");
+  assert.equal(snapshot.control.active_control_conversation_id, nextIdentity);
+  assert.equal(snapshot.switch.github_comment_id, "5921509976");
 });
 
 test("T28 pointer delivery request is deterministic and duplicate publishing is idempotent", async () => {

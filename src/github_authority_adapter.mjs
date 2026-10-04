@@ -175,6 +175,135 @@ export function createGitHubAuthorityAdapter({
     if (!Array.isArray(ids)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     return ids.map(decimal);
   }
+
+  function closedFields(body, allowedNames, requiredNames) {
+    const values = {};
+    for (const line of body.split(/\r?\n/)) {
+      const match = /^([A-Za-z][A-Za-z0-9_]*): (.+)$/.exec(line);
+      if (!match) {
+        if (line.includes(":")) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+        continue;
+      }
+      if (!allowedNames.has(match[1]) || Object.hasOwn(values, match[1])) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      values[match[1]] = match[2];
+    }
+    if (requiredNames.some((name) => !Object.hasOwn(values, name))) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    return values;
+  }
+
+  function sectionedPointer(value, issue, suffix = "") {
+    const match = new RegExp(`^#${issue}/([1-9]\\d*)${suffix}$`).exec(value);
+    if (!match) stop("AUTHORITY_POINTER_MISMATCH");
+    return decimal(match[1]);
+  }
+
+  function sectionedHeader(comment, type, issue) {
+    const origin = issueOf(comment);
+    if (origin.repo !== repository || origin.issue !== issue || typeof comment.body !== "string"
+      || comment.body.split(/\r?\n/, 1)[0] !== type) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    return comment.body;
+  }
+
+  function uniqueSection(body, name, precedingName, followingName) {
+    const headings = [...body.matchAll(/^([A-Z][A-Z0-9_]*)$/gm)];
+    const named = (value) => headings.filter((heading) => heading[1] === value);
+    const previous = named(precedingName), current = named(name), next = named(followingName);
+    if (previous.length !== 1 || current.length !== 1 || next.length !== 1
+      || previous[0].index >= current[0].index || current[0].index >= next[0].index) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    const nextHeading = headings.find((heading) => heading.index > current[0].index);
+    if (nextHeading !== next[0]) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    return body.slice(current[0].index + current[0][0].length, next[0].index);
+  }
+
+  function currentGeneration(value) {
+    const match = /^([0-9]{3}) ACTIVE$/.exec(value);
+    if (!match || match[1] === "000") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    return match[1];
+  }
+
+  function validConversationUrl(identity, value) {
+    let url;
+    try { url = new URL(value); } catch { stop("AUTHORITY_CONFLICT_OR_MALFORMED"); }
+    if (url.origin !== "https://chatgpt.com" || !url.pathname.endsWith(`/c/${identity}`) || url.search || url.hash) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+  }
+
+  async function sectionedAuthority(start, registry) {
+    const startIssue = authorityIssueNumbers.registry;
+    const registryIssue = authorityIssueNumbers.switch;
+    const controlIssue = authorityIssueNumbers.control;
+    const startReadback = await exactIssueComment(start.id, startIssue, start.body);
+    const registryReadback = await exactIssueComment(registry.id, registryIssue, registry.body);
+    const startBody = sectionedHeader(startReadback, "CURRENT_REHYDRATION_INDEX_V243", startIssue);
+    const registryBody = sectionedHeader(registryReadback, "CURRENT_REGISTRY_INDEX_V139", registryIssue);
+    const startFields = closedFields(startBody, new Set([
+      "state", "recorded_by_role", "repository", "control_generation", "supersedes", "active_control_ack",
+      "inventory_return", "active_repair_card", "owner_continuation", "operational_goal_complete",
+      "startup_skill_memory_reads", "old_inventory_terminal", "old_scope_evidence", "old_event",
+      "source_checkout_identity", "matching_process_state", "matching_scheduled_task_state", "activation_target",
+      "user_relay_count", "readback_required", "idempotency_key",
+    ]), ["state", "recorded_by_role", "repository", "control_generation", "active_control_ack"]);
+    const registryFields = closedFields(registryBody, new Set([
+      "state", "recorded_by_role", "repository", "control_generation", "supersedes", "current_start",
+      "active_control_id", "active_control_ack", "GitHub_sole_durable_semantic_authority", "owner_continuation",
+      "restoration_goal_complete", "current_repair_card", "prior_inventory_terminal", "scope_evidence",
+      "old_inventory_event", "executor_required", "source_checkout_identity", "matching_process_state",
+      "matching_scheduled_task_state", "activation_target", "runtime_activation", "generation033_lease",
+      "matching_fresh_heartbeat", "watcher_running", "monitoring_claimed", "merge_release_deploy_workflow_dispatch",
+      "next_action", "user_relay_count", "readback_required", "idempotency_key",
+    ]), ["state", "recorded_by_role", "repository", "control_generation", "current_start", "active_control_id", "active_control_ack"]);
+    if (startFields.repository !== repository || registryFields.repository !== repository) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    const generation = currentGeneration(startFields.control_generation);
+    if (generation !== currentGeneration(registryFields.control_generation)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    const startAckId = sectionedPointer(startFields.active_control_ack, controlIssue);
+    const registryAckId = sectionedPointer(registryFields.active_control_ack, controlIssue);
+    if (startAckId !== registryAckId) stop("AUTHORITY_POINTER_MISMATCH");
+    const currentStart = new RegExp(`^#${startIssue}/([1-9]\\d*) V243 exact GET matched$`).exec(registryFields.current_start);
+    if (!currentStart || decimal(currentStart[1]) !== decimal(startReadback.id)) stop("AUTHORITY_POINTER_MISMATCH");
+
+    const ack = await exactComment(startAckId);
+    const ackBody = sectionedHeader(ack, "ACTIVE_CONTROL_REHYDRATION_ACK_V1", controlIssue);
+    const ackFields = closedFields(ackBody, new Set([
+      "state", "recorded_by_role", "repository", "generation", "display_name", "conversation_id", "conversation_url",
+      "request", "atomic_switch", "current_start", "current_registry", "current_handoff", "binding",
+      "sole_active_control_generation", "sole_active_control_identity_match", "generation031", "generation032",
+      "state_pointer_consistency", "preserved_inventory_card", "preserved_worker_start", "preserved_worker_terminal",
+      "preserved_scope_evidence", "preserved_return_request", "prior_inventory_event_replay", "fresh_review",
+      "semantic_adjudication_performed", "successor_authorized_or_dispatched", "review_performed",
+      "runtime_activation_performed", "generation033_lease", "matching_fresh_heartbeat", "watcher_running",
+      "monitoring_claimed", "idempotency_key", "user_relay_count", "readback_required",
+    ]), ["state", "repository", "generation", "conversation_id", "conversation_url", "atomic_switch", "sole_active_control_generation", "sole_active_control_identity_match"]);
+    if (ackFields.repository !== repository || ackFields.state !== "ACTIVE_REHYDRATED_ACKNOWLEDGED"
+      || ackFields.generation !== generation || ackFields.sole_active_control_generation !== generation
+      || ackFields.sole_active_control_identity_match !== "true") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    sectionedPointer(ackFields.current_start, startIssue, " V[1-9]\\d* exact GET matched");
+    sectionedPointer(ackFields.current_registry, registryIssue, " V[1-9]\\d* exact GET matched");
+    if (registryFields.active_control_id !== ackFields.conversation_id) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    validConversationUrl(ackFields.conversation_id, ackFields.conversation_url);
+    const switchId = sectionedPointer(ackFields.atomic_switch, controlIssue, " exact GET matched");
+
+    const active = await exactComment(switchId);
+    const activeBody = sectionedHeader(active, "CONTROL_GENERATION_ATOMIC_SWITCH_V1", controlIssue);
+    const oldHeading = /^OLD_CONTROL$/gm;
+    const oldMatches = [...activeBody.matchAll(oldHeading)];
+    if (oldMatches.length !== 1) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    const topFields = closedFields(activeBody.slice(0, oldMatches[0].index), new Set([
+      "state", "recorded_by_role", "repository", "rotation_id", "idempotency_key", "source_previous_active_switch",
+      "source_route_correction", "source_rotation", "candidate_binding", "candidate_generation_ACK",
+      "candidate_continuity_ACK", "candidate_route_PASS", "independent_Local_Transport_R3",
+      "current_start_before_switch", "current_registry_before_switch", "current_handoff_before_switch",
+    ]), ["state", "recorded_by_role", "repository", "rotation_id", "idempotency_key"]);
+    if (topFields.repository !== repository) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    const newControl = uniqueSection(activeBody, "NEW_CONTROL", "OLD_CONTROL", "PRESERVED_WORK");
+    const controlFields = closedFields(newControl, new Set([
+      "generation", "display_name", "status_before", "status_after", "conversation_id", "conversation_url", "single_active_control", "generation032",
+    ]), ["generation", "display_name", "status_before", "status_after", "conversation_id", "conversation_url", "single_active_control"]);
+    if (controlFields.generation !== generation || controlFields.status_after !== "ACTIVE"
+      || controlFields.conversation_id !== ackFields.conversation_id || controlFields.conversation_url !== ackFields.conversation_url
+      || controlFields.single_active_control !== "true") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    validConversationUrl(controlFields.conversation_id, controlFields.conversation_url);
+    return { start: startReadback, registry: registryReadback, active, control_generation: generation, active_control_conversation_id: ackFields.conversation_id };
+  }
+
   async function currentAuthorityComments() {
     const [starts, registries, switches] = await Promise.all([
       allComments(authorityIssueNumbers.registry),
@@ -182,8 +311,16 @@ export function createGitHubAuthorityAdapter({
       allComments(authorityIssueNumbers.control),
     ]);
     const select = (rows, pattern) => rows.filter(c => pattern.test(c.body?.split(/\r?\n/, 1)[0] || "")).at(-1);
-    const start = select(starts, AUTHORITY.start), registry = select(registries, AUTHORITY.registry), active = select(switches, /^CONTROL_GENERATION_ATOMIC_SWITCH_V1$/);
-    if (!start || !registry || !active) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    const start = select(starts, AUTHORITY.start), registry = select(registries, AUTHORITY.registry);
+    if (!start || !registry) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+    const startHeader = start.body?.split(/\r?\n/, 1)[0];
+    const registryHeader = registry.body?.split(/\r?\n/, 1)[0];
+    if (startHeader === "CURRENT_REHYDRATION_INDEX_V243" || registryHeader === "CURRENT_REGISTRY_INDEX_V139") {
+      if (startHeader !== "CURRENT_REHYDRATION_INDEX_V243" || registryHeader !== "CURRENT_REGISTRY_INDEX_V139") stop("AUTHORITY_CONFLICT_OR_MALFORMED");
+      return sectionedAuthority(start, registry);
+    }
+    const active = select(switches, /^CONTROL_GENERATION_ATOMIC_SWITCH_V1$/);
+    if (!active) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
     for (const [row, issue] of [[start, authorityIssueNumbers.registry], [registry, authorityIssueNumbers.switch], [active, authorityIssueNumbers.control]]) {
       if (issueOf(row).repo !== repository || issueOf(row).issue !== issue || !row.body.includes(`repository: ${repository}`)) stop("AUTHORITY_CONFLICT_OR_MALFORMED");
       const fetched = await exactIssueComment(row.id, issue, row.body);
