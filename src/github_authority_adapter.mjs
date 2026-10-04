@@ -13,6 +13,7 @@ const V245_START_FIELDS = [
   "active_control_id", "active_control_ack", "atomic_switch", "single_active_control", "GitHub_sole_durable_semantic_authority",
   "schema_adjudication", "initial_candidate_ready", "initial_fresh_review", "f001_control_adjudication", "f001_repair_card",
   "f001_worker_ready", "f001_fresh_review_card", "f001_fresh_reviewer_pass", "f001_fresh_review_return",
+  "f001_pass_control_adjudication",
   "branch", "head", "parent", "tree", "changed_path_1", "blob_1", "changed_path_2", "blob_2",
   "src/control_doorbell_runtime.mjs", "artifact_status", "candidate_is_merged", "candidate_is_runtime_active",
   "worker_ready_terminal", "formal_reviewer_pass_terminal", "active_control_acceptance", "G33_F001_closed_at_exact_head",
@@ -32,7 +33,8 @@ const V141_REGISTRY_FIELDS = [
   "candidate_is_merged", "candidate_is_runtime_active", "producer_admission_policy", "policy_semantics",
   "real_producer_grant_created", "real_GITHUB_SOURCE_EVENT_V2_created", "runtime_activation", "producer_admission_activation",
   "generation033_lease", "matching_fresh_heartbeat", "watcher_running", "monitoring_claimed",
-  "merge_release_deploy_workflow_dispatch", "source_mutation_authorized", "physical_worker_successor",
+  "merge_authorized", "release_authorized", "deploy_authorized", "workflow_dispatch_authorized",
+  "source_mutation_authorized", "physical_worker_successor",
   "formal_reviewer_successor", "runtime_successor", "workflow_successor", "next_action",
   "producer_admission_contract_review_lane_complete", "operational_goal_complete", "user_relay_count", "readback_required", "idempotency_key",
 ];
@@ -425,7 +427,7 @@ export function createGitHubAuthorityAdapter({
     const isV245V141 = startVersion === "V245" && registryVersion === "V141";
     const hasProducerPolicy = isV244V140 || isV245V141;
     const startFields = isV245V141
-      ? closedFields(startBody, new Set(V245_START_FIELDS), ["state", "recorded_by_role", "repository", "control_generation", "supersedes", "active_control_id", "active_control_ack", "atomic_switch", "single_active_control", "GitHub_sole_durable_semantic_authority", "producer_admission_policy_expected_current_registry_value"])
+      ? closedFields(startBody, new Set(V245_START_FIELDS), ["state", "recorded_by_role", "repository", "control_generation", "supersedes", "active_control_id", "active_control_ack", "atomic_switch", "single_active_control", "GitHub_sole_durable_semantic_authority", "f001_pass_control_adjudication", "producer_admission_policy_expected_current_registry_value"])
       : closedFields(startBody, new Set([
         "state", "recorded_by_role", "repository", "control_generation", "supersedes", "active_control_ack",
         ...(isV244V140 ? ["atomic_switch"] : []),
@@ -445,7 +447,7 @@ export function createGitHubAuthorityAdapter({
       "matching_fresh_heartbeat", "watcher_running", "monitoring_claimed", "merge_release_deploy_workflow_dispatch",
       "next_action", "user_relay_count", "readback_required", "idempotency_key",
     ]), isV245V141
-      ? ["state", "recorded_by_role", "repository", "control_generation", "current_start", "active_control_id", "active_control_ack", "atomic_switch", "single_active_control", "GitHub_sole_durable_semantic_authority", "producer_admission_policy"]
+      ? ["state", "recorded_by_role", "repository", "control_generation", "current_start", "active_control_id", "active_control_ack", "atomic_switch", "single_active_control", "GitHub_sole_durable_semantic_authority", "merge_authorized", "release_authorized", "deploy_authorized", "workflow_dispatch_authorized", "producer_admission_policy"]
       : ["state", "recorded_by_role", "repository", "control_generation", "current_start", "active_control_id", "active_control_ack", ...(isV244V140 ? ["atomic_switch", "producer_admission_policy"] : [])]);
     if (isV245V141) {
       if (startFields.state !== "CURRENT_START_HERE_ACTIVE_CONTROL033_PRODUCER_ADMISSION_REVIEWED_ARTIFACT_ACCEPTED_NO_ACTIVATION"

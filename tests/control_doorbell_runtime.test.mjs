@@ -1071,6 +1071,7 @@ function generation033V245V141Comments() {
       "f001_fresh_review_card: #162/5982967423",
       "f001_fresh_reviewer_pass: #162/5983050597 PASS",
       "f001_fresh_review_return: #162/5983058768",
+      "f001_pass_control_adjudication: #162/5983076049 PASS_ACCEPTED_EXACT_HEAD_REPAIR_REVIEW_COMPLETE",
       "ACCEPTED_REVIEWED_ARTIFACT",
       "branch: work/g33-producer-admission-f001-split-envelope-20261005-01",
       "head: 4bac60b8f9af689e4b9802bd953ea2e1e3ca9bc7",
@@ -1165,7 +1166,10 @@ function generation033V245V141Comments() {
       "matching_fresh_heartbeat: NONE",
       "watcher_running: false",
       "monitoring_claimed: false",
-      "merge_release_deploy_workflow_dispatch: false",
+      "merge_authorized: false",
+      "release_authorized: false",
+      "deploy_authorized: false",
+      "workflow_dispatch_authorized: false",
       "source_mutation_authorized: false",
       "SUCCESSOR",
       "physical_worker_successor: NONE",
@@ -1288,7 +1292,88 @@ async function makeV245Adapter({ sourceComments = [], currentComments = generati
   return { config, backend, writes, adapter };
 }
 
-test("T52 exact V245/V141 pair normalizes the current start, registry, Control, switch, and empty policy", async () => {
+function recordFieldNames(body) {
+  return body.split(/\r?\n/).flatMap((line) => {
+    const match = /^([A-Za-z][A-Za-z0-9_./]*): (.+)$/.exec(line);
+    return match ? [match[1]] : [];
+  }).sort();
+}
+
+async function acceptedProfileFieldNames(profile) {
+  const source = await readFile(new URL("../src/github_authority_adapter.mjs", import.meta.url), "utf8");
+  const declaration = new RegExp(`const ${profile} = \\[([\\s\\S]*?)\\];`).exec(source);
+  assert.ok(declaration, `${profile} declaration must exist`);
+  return [...declaration[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]).sort();
+}
+
+function assertExactFieldParity(profile, liveRecord, acceptedFields) {
+  const liveFields = recordFieldNames(liveRecord.body);
+  const missing = liveFields.filter((name) => !acceptedFields.includes(name));
+  const unauthorized = acceptedFields.filter((name) => !liveFields.includes(name));
+  assert.deepEqual({ missing, unauthorized }, { missing: [], unauthorized: [] },
+    `${profile} field parity mismatch: ${JSON.stringify({ missing, unauthorized })}`);
+}
+
+test("LP01 exact durable V245 field-name set equals the strict accepted profile", async () => {
+  const start = generation033V245V141Comments().find((row) => row.id === G33_V245_START_ID);
+  assert.ok(start);
+  assertExactFieldParity("V245_START_FIELDS", start, await acceptedProfileFieldNames("V245_START_FIELDS"));
+});
+
+test("LP02 exact durable V141 field-name set equals the strict accepted profile", async () => {
+  const registry = generation033V245V141Comments().find((row) => row.id === G33_V141_REGISTRY_ID);
+  assert.ok(registry);
+  assertExactFieldParity("V141_REGISTRY_FIELDS", registry, await acceptedProfileFieldNames("V141_REGISTRY_FIELDS"));
+});
+
+test("LP04 V245 requires the exact live f001 pass adjudication field", async () => {
+  const currentComments = generation033V245V141Comments();
+  const start = currentComments.find((row) => row.id === G33_V245_START_ID);
+  start.body = start.body.replace(/^f001_pass_control_adjudication: .*\r?\n/m, "");
+  const { adapter } = await makeV245Adapter({ currentComments });
+  await assert.rejects(adapter.readAuthoritySnapshot(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+});
+
+test("LP05 V245 rejects an unauthorized extra field", async () => {
+  const currentComments = generation033V245V141Comments();
+  const start = currentComments.find((row) => row.id === G33_V245_START_ID);
+  start.body += "\nunauthorized_live_field: true";
+  const { adapter } = await makeV245Adapter({ currentComments });
+  await assert.rejects(adapter.readAuthoritySnapshot(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+});
+
+test("LP06 V141 requires each live separate authorization field", async (t) => {
+  for (const field of ["merge_authorized", "release_authorized", "deploy_authorized", "workflow_dispatch_authorized"]) {
+    await t.test(field, async () => {
+      const currentComments = generation033V245V141Comments();
+      const registry = currentComments.find((row) => row.id === G33_V141_REGISTRY_ID);
+      registry.body = registry.body.replace(new RegExp(`^${field}: .*\\r?\\n`, "m"), "");
+      const { adapter } = await makeV245Adapter({ currentComments });
+      await assert.rejects(adapter.readAuthoritySnapshot(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+    });
+  }
+});
+
+test("LP07 V141 rejects the synthetic combined authorization field", async () => {
+  const currentComments = generation033V245V141Comments();
+  const registry = currentComments.find((row) => row.id === G33_V141_REGISTRY_ID);
+  registry.body = registry.body.replace(
+    /^merge_authorized: false\r?\nrelease_authorized: false\r?\ndeploy_authorized: false\r?\nworkflow_dispatch_authorized: false\r?\n/m,
+    "merge_release_deploy_workflow_dispatch: false\n",
+  );
+  const { adapter } = await makeV245Adapter({ currentComments });
+  await assert.rejects(adapter.readAuthoritySnapshot(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+});
+
+test("LP08 V141 rejects an unauthorized extra field", async () => {
+  const currentComments = generation033V245V141Comments();
+  const registry = currentComments.find((row) => row.id === G33_V141_REGISTRY_ID);
+  registry.body += "\nunauthorized_live_field: true";
+  const { adapter } = await makeV245Adapter({ currentComments });
+  await assert.rejects(adapter.readAuthoritySnapshot(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+});
+
+test("LP03 exact V245/V141 pair normalizes the current start, registry, Control, switch, and empty policy", async () => {
   const { adapter } = await makeV245Adapter();
   const snapshot = await adapter.readAuthoritySnapshot();
   assert.deepEqual([
@@ -1302,7 +1387,7 @@ test("T52 exact V245/V141 pair normalizes the current start, registry, Control, 
   assert.equal(snapshot.registry.producer_admission_registry_id, G33_V141_REGISTRY_ID);
 });
 
-test("T53 V245/V141 empty policy admits no V2 event and runtime fails safe without writes or sends", async () => {
+test("LP09-LP10 V245/V141 empty policy admits no V2 event and runtime fails safe without writes or sends", async () => {
   const fixture = producerAdmissionCase({ registryId: G33_V141_REGISTRY_ID });
   const { config, adapter, backend, writes } = await makeV245Adapter({ sourceComments: [fixture.origin, fixture.event] });
   const snapshot = await adapter.readAuthoritySnapshot();
