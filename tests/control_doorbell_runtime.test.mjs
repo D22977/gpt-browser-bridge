@@ -314,10 +314,45 @@ test("T19 artifact mapping is deterministic and preserves the adopted core blob"
     adapter_runtime: "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/watcher.mjs",
     config_source: "config/control_doorbell_runtime.json",
     config_runtime: "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/config.json",
+    github_authority_adapter_source: "src/github_authority_adapter.mjs",
+    github_authority_adapter_runtime: "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/github_authority_adapter.mjs",
     semantic_core_source: "src/github_authority_resident.mjs",
     semantic_core_runtime: "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/github_authority_resident.mjs",
     semantic_core_blob: "1a0c818321e64ec3dd4619e563d6845124af7c2b",
   });
+});
+
+test("T30 direct watcher sibling production imports have explicit artifact mappings", async () => {
+  const source = await readFile(new URL("../src/control_doorbell_runtime.mjs", import.meta.url), "utf8");
+  const config = await loadConfig();
+  const importSpecifiers = [...source.matchAll(/from\s+"(\.\/[^\"]+)"/g)].map(([, specifier]) => specifier);
+  const expected = new Map([
+    ["./github_authority_resident.mjs", [
+      "semantic_core_source",
+      "src/github_authority_resident.mjs",
+      "semantic_core_runtime",
+      "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/github_authority_resident.mjs",
+    ]],
+    ["./github_authority_adapter.mjs", [
+      "github_authority_adapter_source",
+      "src/github_authority_adapter.mjs",
+      "github_authority_adapter_runtime",
+      "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/github_authority_adapter.mjs",
+    ]],
+  ]);
+  const assertMappings = (mapping) => {
+    assert.deepEqual(importSpecifiers, [...expected.keys()]);
+    for (const [specifier, [sourceKey, sourcePath, runtimeKey, runtimePath]] of expected) {
+      assert.equal(mapping[sourceKey], sourcePath, `${specifier} must have an explicit source mapping`);
+      assert.equal(mapping[runtimeKey], runtimePath, `${specifier} must have an explicit runtime mapping`);
+    }
+  };
+
+  assertMappings(config.artifact_mapping);
+  const withoutAdapterPair = { ...config.artifact_mapping };
+  delete withoutAdapterPair.github_authority_adapter_source;
+  delete withoutAdapterPair.github_authority_adapter_runtime;
+  assert.throws(() => assertMappings(withoutAdapterPair), /github_authority_adapter\.mjs/);
 });
 
 test("T20 tests exercise only in-memory adapters and never invoke runtime side effects", async () => {

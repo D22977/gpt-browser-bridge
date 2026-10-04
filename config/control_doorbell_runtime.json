@@ -18,6 +18,8 @@
     "adapter_runtime": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/watcher.mjs",
     "config_source": "config/control_doorbell_runtime.json",
     "config_runtime": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/config.json",
+    "github_authority_adapter_source": "src/github_authority_adapter.mjs",
+    "github_authority_adapter_runtime": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/github_authority_adapter.mjs",
     "semantic_core_source": "src/github_authority_resident.mjs",
     "semantic_core_runtime": "D:/AIWORK_RUNTIME/GPT_BROWSER_BRIDGE/control-doorbell/github_authority_resident.mjs",
     "semantic_core_blob": "1a0c818321e64ec3dd4619e563d6845124af7c2b"
