@@ -1463,6 +1463,95 @@ test("T55 newest unsupported current-index pair cannot fall back to an older sup
   await pollInvalidAuthorityWithoutEffects(comments);
 });
 
+test("T57 matched newest V246/V142 pair fails closed through runtime poll without older fallback or effects", async () => {
+  const sharedAuthorityIds = new Set(["5921541952", "5921509976"]);
+  const comments = [
+    ...generation033AuthorityComments().filter((row) => !sharedAuthorityIds.has(row.id)),
+    ...generation033V244V140Comments().filter((row) => !sharedAuthorityIds.has(row.id)),
+    ...generation033V245V141Comments().filter((row) => !sharedAuthorityIds.has(row.id)),
+  ];
+  const futureStart = structuredClone(generation033V245V141Comments().find((row) => row.id === G33_V245_START_ID));
+  futureStart.id = "5989990001";
+  futureStart.body = futureStart.body
+    .replaceAll("V245", "V246")
+    .replace("supersedes: #43/5981752154 V244", `supersedes: #43/${G33_V245_START_ID} V245`);
+  const futureRegistry = structuredClone(generation033V245V141Comments().find((row) => row.id === G33_V141_REGISTRY_ID));
+  futureRegistry.id = "5989990002";
+  futureRegistry.body = futureRegistry.body
+    .replaceAll("V141", "V142")
+    .replace("supersedes: #81/5981755651 V140", `supersedes: #81/${G33_V141_REGISTRY_ID} V141`)
+    .replace(`current_start: #43/${G33_V245_START_ID} V245 exact GET matched`, `current_start: #43/${futureStart.id} V246 exact GET matched`);
+  comments.push(futureStart, futureRegistry);
+
+  assert.match(futureStart.body, /^CURRENT_REHYDRATION_INDEX_V246/m);
+  assert.match(futureRegistry.body, /^CURRENT_REGISTRY_INDEX_V142/m);
+  assert.match(futureRegistry.body, new RegExp(`current_start: #43/${futureStart.id} V246 exact GET matched`));
+  assert.match(futureRegistry.body, /producer_admission_policy: \[\]/);
+
+  const fixture = producerAdmissionCase({ registryId: futureRegistry.id });
+  const { config, backend, writes, adapter } = await makeV245Adapter({
+    currentComments: comments,
+    sourceComments: [fixture.origin, fixture.event],
+  });
+  await assert.rejects(adapter.readAuthoritySnapshot(), /AUTHORITY_CONFLICT_OR_MALFORMED/);
+
+  const now = "2026-10-04T16:30:00.000Z";
+  const triggerHash = runtime.getTriggerContractHash(config);
+  const lease = {
+    ...createLease({
+      resident_instance_id: config.resident_instance_id,
+      control_generation: "033",
+      active_control_conversation_id: G33_CONTROL_ID,
+      trigger_contract_hash: triggerHash,
+      acquired_at: "2026-10-04T16:00:00.000Z",
+      expires_at: "2026-10-04T17:00:00.000Z",
+      watched_issue_set: ["D22977/gpt-browser-bridge#162"],
+    }),
+    github_comment_id: "9001",
+  };
+  const heartbeat = createHeartbeat({
+    lease_id: lease.lease_id,
+    resident_instance_id: config.resident_instance_id,
+    control_generation: "033",
+    trigger_contract_hash: triggerHash,
+    observed_at: "2026-10-04T16:29:59.000Z",
+    lease_expires_at: lease.expires_at,
+    last_processed_comment_id: "16289",
+  });
+  const github = {
+    readAuthoritySnapshot: () => adapter.readAuthoritySnapshot(),
+    async listReceipts() { return [lease]; },
+    listSourceEvents: () => adapter.listSourceEvents(),
+    async readHeartbeat() { return heartbeat; },
+    getReceipt: (id) => adapter.getReceipt(id),
+    publishReceipt: (receipt) => adapter.publishReceipt(receipt),
+  };
+  let sends = 0;
+  const controller = runtime.createControlDoorbellRuntime({
+    config,
+    github,
+    residentInstanceId: config.resident_instance_id,
+    now: () => now,
+    sendPointer: async () => { sends += 1; return "unexpected"; },
+  });
+
+  assert.deepEqual(await controller.poll(), { state: "CONTROL_REQUIRED/NO_SEND" });
+  assert.equal(writes.count, 0);
+  assert.equal(sends, 0);
+  assert.equal(backend.calls.every((call) => call.method === "GET"), true);
+  const exactGetIds = backend.calls.flatMap((call) => {
+    const match = /^\/repos\/D22977\/gpt-browser-bridge\/issues\/comments\/(\d+)$/.exec(new URL(call.url).pathname);
+    return call.method === "GET" && match ? [match[1]] : [];
+  });
+  for (const [pair, ids] of [
+    ["V245/V141", [G33_V245_START_ID, G33_V141_REGISTRY_ID]],
+    ["V244/V140", [G33_START_ID, G33_REGISTRY_ID]],
+    ["V243/V139", ["5921589118", "5921593188"]],
+  ]) {
+    for (const id of ids) assert.equal(exactGetIds.includes(id), false, `must not fall back to ${pair} record ${id}`);
+  }
+});
+
 test("T56 malformed V245/V141 required bindings fail closed with zero runtime effects", async (t) => {
   const cases = [
     ["missing V245 active Control ACK", (comments) => {
