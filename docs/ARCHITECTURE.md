@@ -23,7 +23,7 @@ Supervisor (deterministic Node process, no model)
         ▼
 Control Tower Agent        (single decision point; never edits source directly)
         │
-        ├─ Worker        — edits source inside allowed paths, runs tests, reports, commits
+        ├─ Worker        — edits within allowed paths; code cards run required tests; documentation-only cards explicitly marked NOT_RUN_BY_SCOPE do not run tests; reports and commits
         ├─ Reviewer      — fresh context, different agent/model family; conclusion only
         ├─ Browser Action Runner — browser writes only (send / approved continue / approved re-open)
         └─ Read-only Watcher — browser reads only, writes reply.md + result.json atomically

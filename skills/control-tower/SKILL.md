@@ -343,7 +343,7 @@ At minimum a maintained handoff should point to:
 - active Control generation/switch receipt when generation semantics apply;
 - current P0/BEST_NEXT;
 - exact current candidate/product identity;
-- card states using the four lifecycle states in §7;
+- card states using the six lifecycle states in §7: `CARD_EXISTS`, `DISPATCH_REQUEST_WRITTEN`, `CONSUMED_STARTED`, `TERMINAL_RESULT`, `FRESH_REVIEW` (when required), and `CONTROL_ACK`;
 - capability registry / architecture pointer;
 - proven route references relevant to the critical path;
 - local wake-consumer binding/liveness pointer when needed;
