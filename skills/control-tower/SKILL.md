@@ -192,17 +192,46 @@ new orchestrator:
 Historical PASS proves bounded mechanism design; target binding/liveness is still checked
 at execution time without re-admitting the mechanism itself.
 
-## 7. Dispatch lifecycle — never collapse states
+## 7. Dispatch lifecycle and Worker lanes — never collapse states
 
 Report only the highest state supported by durable evidence:
 
-`CARD_EXISTS -> DISPATCH_REQUEST_WRITTEN -> CONSUMED_STARTED -> TERMINAL_RESULT`
+`CARD_EXISTS -> DISPATCH_REQUEST_WRITTEN -> CONSUMED_STARTED -> TERMINAL_RESULT -> FRESH_REVIEW (when required) -> CONTROL_ACK`
 
 - `CARD_EXISTS` is not execution.
 - GitHub dispatch/wake prose is not execution.
 - `CONSUMED_STARTED` requires executor-authored durable evidence bound to executor and
   session/pane/runtime identity where applicable.
 - `TERMINAL_RESULT` requires the exact terminal durable receipt.
+
+Govern cards as a dependency DAG with a default maximum of two concurrent Worker lanes.
+A lane may start only after its explicit accepted terminal/review prerequisites are met.
+Keep exactly one semantic Control owner and one deterministic Recovery Supervisor;
+Worker concurrency does not authorize parallel Control or Supervisor instances.
+
+Parallelize only cards with independent dependencies and isolated worktrees, disjoint
+allowed paths, separate artifacts, unique card/run/idempotency identities, and
+executor-authored receipts. Serialize same-path edits, shared mutable resources, and
+dependent cards. A terminal alone never advances a dependent lane.
+
+At phase closeout, Control reconciles every required lane's exact head, changed paths,
+terminal, fresh review, conflicts, and blockers; updates durable state/indexes; then
+issues only exact legal successors. Independent proven lanes may continue while a
+non-dependent lane is blocked.
+
+Control scheduler semantics remain separate from Worker concurrency. The canonical
+Control task is GBB_G13_RESIDENT / IgnoreNew; GBB_TEMP_CONTROL_DOORBELL is disabled and
+preserved per Issue #162 receipt 6017178735. Do not add a parallel Control/Supervisor,
+router, generic queue, second authority store, or scheduler.
+
+Preserve fail-closed behavior, no-blind-retry, exact base/head binding, fresh independent
+reviews, and zero user task/result relay across every lane.
+
+The current project_state/contracts/Supervisor runtime supports one active run only.
+Multi-lane runtime support is NOT_IMPLEMENTED. A separate reviewed implementation card
+must extend multi-lane state, recovery, deduplication, and stage-closeout receipts before
+runtime adoption or any multi-lane capability claim. This skill defines governance; it
+does not claim runtime support.
 
 If dispatch ages without a valid local consumer, stop creating more dependent product
 cards and repair/admit the physical wake binding. Independent proven lanes may continue

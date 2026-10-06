@@ -17,7 +17,7 @@
   * Node.js
   * Playwright
   * 網頁版 ChatGPT
-* **執行模式**：單線串行，不追求並行
+* **治理模式**：單一語意決策指揮塔管理 card dependency DAG；獨立 Worker lane 可依明確依賴與隔離規則並行，預設上限兩條。依賴卡仍按先決條件串行。這是治理目標；現行 project_state/contracts/Supervisor 僅支援單一 active run，runtime 多 lane 尚未實作。
 * **決策角色**：指揮塔 Agent 是唯一自動化決策點
 * **預估工程量**：
 
@@ -627,7 +627,9 @@ D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\
 
 # 10. Project State
 
-`project_state.json` 是專案進度唯一真相。
+`project_state.json` 是目前 legacy runtime 的單一 active run 進度快照，不是 card lifecycle、review 或 Control ACK 的授權來源。派送、消費、terminal、review 與 ACK 以 GitHub durable Control card 和 executor-authored receipts 為準；不得增設第二個權威狀態庫。
+
+現行 project_state/contracts/Supervisor 只表示一個 active run，尚不支援多 lane state、recovery、deduplication 或 phase-closeout receipts；runtime multi-lane support 為 NOT_IMPLEMENTED。任何 runtime adoption 或 multi-lane capability claim 前，必須先有獨立審查的 implementation card 擴充上述狀態、恢復、去重與 closeout receipts。
 
 最小範例：
 
@@ -695,7 +697,15 @@ GBB-005
 GBB-PKG-01 完成
 ```
 
-不平行施工。
+本節的 GBB-001 → GBB-005 清單仍是有 review 先決條件的依賴鏈，所以這些卡維持串行。全專案以 dependency DAG 管理；預設最多兩條 Worker lane。只有明確 dependencies 的 accepted terminal/review prerequisites 均已滿足時，該 lane 才可開始。
+
+只可並行處理相互獨立的卡，且各卡必須使用隔離 worktree、互斥的 allowed paths、分離 artifacts、唯一 card/run/idempotency identities，以及由各自 executor 撰寫的 receipts。相同路徑、共享可變資源或有依賴關係的卡必須串行。
+
+完整生命週期為 CARD_EXISTS → DISPATCH_REQUEST_WRITTEN → CONSUMED_STARTED → TERMINAL_RESULT → FRESH_REVIEW（需要時）→ CONTROL_ACK。terminal 本身不能解鎖依賴 lane。每階段結束時，唯一 Control 必須核對各必要 lane 的 exact head、changed paths、terminal、fresh review、conflicts 與 blockers，更新 durable state/indexes，再只派發 exact legal successors。非依賴 lane 被 blocker 擋住時，已有證據且不依賴該 lane 的工作可以繼續。
+
+Worker 並行不代表 Control 或 Supervisor 並行：語意決策者固定只有一個，Recovery Supervisor 仍為 deterministic recovery executor。Control scheduler 固定使用 GBB_G13_RESIDENT / IgnoreNew；GBB_TEMP_CONTROL_DOORBELL 依 Issue #162 receipt 6017178735 維持 disabled 並保留。不得新增平行 Control/Supervisor instances、router、generic queue、第二權威狀態庫或新 scheduler。
+
+所有 lane 都保留 fail-closed、no-blind-retry、exact base/head binding、fresh independent reviews 與 user_relay_count=0；Worker 不代替 Control 接受結果，也不轉交使用者傳遞任務或結果。
 
 ---
 
@@ -1476,7 +1486,7 @@ blocked_reason=<明確原因>
 ```text
 你是 GPT_BROWSER_BRIDGE 專案的 Control Tower。
 
-你的唯一任務是依 plans/GBB_PARENT_WORK_ORDER.md 串行推進
+你的唯一任務是依 plans/GBB_PARENT_WORK_ORDER.md 管理 dependency DAG 與 phase closeout
 GBB-001 → Reviewer → GBB-002 → Reviewer → GBB-003 → Reviewer
 → GBB-004 → Reviewer → GBB-005 → Final Reviewer。
 
@@ -1484,20 +1494,24 @@ GBB-001 → Reviewer → GBB-002 → Reviewer → GBB-003 → Reviewer
 
 1. 你是唯一自動決策點，但不得直接修改 source code。
 2. 每張卡只能有一個 Worker，完成後由不同 agent／不同模型家族 Reviewer 審查。
-3. 不平行施工。
-4. 不修改 D:\AIWORK\MEP工程管理系統 或其他既有專案。
-5. 不 reset、stash、clean、刪除或移動來源不明檔案。
-6. 不自動重送網頁 GPT prompt。
-7. 不自動按 Continue。
-8. Watcher 必須只讀。
-9. 所有進度先寫入 durable project_state.json，再輸出 terminal 訊息。
-10. terminal handle 不是永久 ID，使用 run_id 與 terminal title 恢復。
-11. 同一卡 Worker 自動修正最多兩次；第三次標記 NEEDS_HUMAN。
-12. 任何登入牆、CAPTCHA、dirty attribution 不明、權限不足或反覆 crash 都必須 fail closed。
-13. 即使今晚未完成，也必須維持 heartbeat、checkpoint 與 morning_summary.md。
-14. 如果 Supervisor 或 terminal 曾中斷，先讀 project_state.json、events.ndjson、
-    worktree git status 與既有 reports，再決定是否恢復。
-15. 不得重複詢問父工單已提供的資訊。
+3. 每卡仍只有一位 Worker；預設最多兩條 Worker lane，且只在明確依賴的 accepted terminal/review prerequisites 已滿足、worktree 隔離、allowed paths 互斥、artifacts 分離、card/run/idempotency identities 唯一時並行。相同路徑、共享可變資源與依賴卡一律串行；上方 GBB-001 至 GBB-005 鏈因 review prerequisites 仍按序執行。
+4. 保留 CARD_EXISTS → DISPATCH_REQUEST_WRITTEN → CONSUMED_STARTED → TERMINAL_RESULT → FRESH_REVIEW（需要時）→ CONTROL_ACK；terminal 不單獨解鎖依賴卡。
+5. Phase closeout 由唯一 Control 核對每條必要 lane 的 exact head、changed paths、terminal、fresh review、conflicts、blockers，更新 durable state/indexes，再派發 exact legal successors。非依賴 lane 受阻時，已有證據且獨立的 lane 可繼續。
+6. Control 與 deterministic Supervisor 不得多實例並行。Control scheduler 為 GBB_G13_RESIDENT / IgnoreNew；GBB_TEMP_CONTROL_DOORBELL 依 Issue #162 receipt 6017178735 維持 disabled 並保留。
+7. 現行 project_state/contracts/Supervisor 是 single-active-run legacy runtime；multi-lane runtime 為 NOT_IMPLEMENTED。另需獨立審查的 implementation card 擴充 multi-lane state、recovery、deduplication 與 stage-closeout receipts，才可 runtime adoption 或宣稱支援多 lane。保留 fail-closed、no-blind-retry、exact base/head binding、fresh independent reviews 與 user_relay_count=0；不得增加 router、generic queue、第二權威狀態庫或新 scheduler。
+8. 不修改 D:\AIWORK\MEP工程管理系統 或其他既有專案。
+9. 不 reset、stash、clean、刪除或移動來源不明檔案。
+10. 不自動重送網頁 GPT prompt。
+11. 不自動按 Continue。
+12. Watcher 必須只讀。
+13. Legacy runtime checkpoint 依現行 project_state.json contract 更新後才輸出 terminal；它只是單一 active-run snapshot，不能取代 GitHub durable card/receipts 的 lifecycle、review 或 Control ACK。
+14. terminal handle 不是永久 ID，使用 run_id 與 terminal title 恢復。
+15. 同一卡 Worker 自動修正最多兩次；第三次標記 NEEDS_HUMAN。
+16. 任何登入牆、CAPTCHA、dirty attribution 不明、權限不足或反覆 crash 都必須 fail closed。
+17. 即使今晚未完成，也必須維持 heartbeat、checkpoint 與 morning_summary.md。
+18. 如果 Supervisor 或 terminal 曾中斷，先讀 project_state.json、events.ndjson、
+     worktree git status 與既有 reports，再決定是否恢復。
+19. 不得重複詢問父工單已提供的資訊。
 
 開始時：
 

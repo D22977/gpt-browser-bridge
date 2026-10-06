@@ -31,9 +31,15 @@ Control Tower Agent        (single decision point; never edits source directly)
 
 Principles:
 
-- Single-line serial execution (no parallelism between cards).
+- One semantic Control Tower owns card DAG decisions and phase closeout. Worker lane concurrency never creates parallel Control or Supervisor authority.
+- The default limit is two concurrent Worker lanes. A lane starts only after its explicit accepted terminal/review prerequisites; the GBB-001–GBB-005 chain remains sequential because of those dependencies.
+- Parallel cards require isolated worktrees, disjoint allowed paths, separate artifacts, unique card/run/idempotency identities, and executor-authored receipts. Same-path edits, shared mutable resources, and dependent cards are serialized.
+- Lifecycle: CARD_EXISTS → DISPATCH_REQUEST_WRITTEN → CONSUMED_STARTED → TERMINAL_RESULT → FRESH_REVIEW (when required) → CONTROL_ACK. A terminal alone never unlocks a dependent lane.
+- At phase closeout, Control reconciles each required lane's exact head, changed paths, terminal, fresh review, conflicts, and blockers; updates durable state/indexes; and issues only exact legal successors. Independent proven lanes may continue while a non-dependent lane is blocked.
+- Control scheduler semantics stay separate from Worker concurrency: the canonical task is GBB_G13_RESIDENT / IgnoreNew; GBB_TEMP_CONTROL_DOORBELL remains disabled and preserved per Issue #162 receipt 6017178735. No parallel Control/Supervisor instances, router, generic queue, second authority store, or new scheduler.
 - Control Tower is the **only** decision point.
-- All durable progress is written to the runtime tree **before** any terminal message.
+- Preserve fail-closed behavior, no-blind-retry, exact base/head binding, fresh independent reviews, and zero user task/result relay.
+- Runtime checkpoints are written before terminal messages; they do not replace the GitHub card lifecycle receipts.
 - Terminal handles are not permanent IDs; recovery uses `run_id` + terminal title.
 - Watcher source must never contain browser write APIs.
 - Supervisor only recovers; it never decides pass/rework and never resends.
@@ -47,8 +53,10 @@ Principles:
 | Runtime | `D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\` | **no** (ignored) |
 | This worktree | `C:\Users\Lupun\orca\workspaces\GPT_BROWSER_BRIDGE\gbb-001-a1` | yes (branch `gbb-001-a1`) |
 
-The runtime tree (`state/`, `locks/`, `jobs/`, `runs/`, `events/`, `logs/`) is the
-single source of truth for project progress. It is never committed.
+The runtime tree (`state/`, `locks/`, `jobs/`, `runs/`, `events/`, `logs/`) is
+the current legacy runtime snapshot for its single active run. It is never committed.
+GitHub Control cards and executor-authored receipts govern card lifecycle, review, and
+Control ACK; no second authority store is introduced.
 
 ## 3. Runtime structure
 
@@ -65,6 +73,12 @@ D:\AIWORK_RUNTIME\GPT_BROWSER_BRIDGE\
 `project_state.json` legal states: `INITIALIZING`, `RUNNING`, `WAITING_WORKER`,
 `WAITING_REVIEWER`, `WAITING_BROWSER`, `REWORK`, `NEEDS_HUMAN`, `COMPLETED`,
 `CANCELLED`. Supervisor must never move `NEEDS_HUMAN → RUNNING` on its own.
+
+The current project_state/contracts/Supervisor implementation supports one active run.
+Multi-lane runtime support is NOT_IMPLEMENTED. A separate reviewed implementation card
+must extend multi-lane state, recovery, deduplication, and stage-closeout receipts before
+runtime adoption or any multi-lane capability claim. This governance document does not
+authorize runtime or scheduler changes.
 
 ## 4. Repo structure (intended)
 
