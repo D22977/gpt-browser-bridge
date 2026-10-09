@@ -170,6 +170,35 @@ Never route only by model family. Never ask a CLI lane to prove a Desktop-only b
 surface. Never reuse another executor's browser profile/session to manufacture PASS.
 Wrong-target, stale, malformed, conflicting, or ambiguous bindings fail closed.
 
+### 5.1 Windows Herdr agent and pane lifecycle
+
+Before targeting, recovering, or cleaning up a Windows Herdr agent, read both
+`herdr agent list` and `herdr pane list --workspace $env:HERDR_WORKSPACE_ID` for the
+current workspace, repeat both reads, and require an exact matching tuple; use
+`herdr agent get <pane-id>` for that candidate. Bind the card, agent name, model/effort invocation,
+native session, workspace, pane, terminal, cwd, status, and observation time. A shell
+pane, display title, stale receipt, raw PID, or missing parent PID is not executor
+identity.
+
+Reconcile WORKING, IDLE, terminal, and unresolved card states separately. An idle
+pane is not automatically stale, and a terminal GitHub receipt does not prove the
+pane closed. Reconcile each idle pane to its exact durable card before reuse. Do not
+infer process leaks from counts or absent parent PIDs. If the mapping is uncertain,
+preserve the pane and publish a typed `CONTROL_REQUIRED` blocker.
+
+Never broadly kill Codex/`node_repl` processes or close panes as housekeeping. An
+exact native Herdr stop/close action requires a fresh exact pane/session binding, an
+exact Worker terminal, no authorized same-session recovery, and durable Control
+authority for that specific cleanup; read back agent and pane inventories afterward.
+After reboot, rehydrate GitHub first and acquire fresh identities. No prompt, retry,
+sandbox escalation, resume, or replacement from an idle/uncertain pane without exact
+card authority. A helper failure before process creation is not evidence of a Herdr
+multi-agent limit. See [`docs/HERDR_RUNBOOK.md`](../../docs/HERDR_RUNBOOK.md) for the
+Windows managed-start evidence and bounded explicit-`codex.cmd` recovery. The bare
+`codex` executable selected by `Start-Process` remains UNKNOWN; shim selection is
+only an inference. The explicit pane route does not fix the managed path, which
+requires a separate reviewed change.
+
 ## 6. Restart-safe GitHub pull/wake pattern
 
 When a local Worker/agent must resume from GitHub, prefer the proven patterns from
