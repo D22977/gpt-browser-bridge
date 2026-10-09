@@ -186,10 +186,21 @@ pane closed. Reconcile each idle pane to its exact durable card before reuse. Do
 infer process leaks from counts or absent parent PIDs. If the mapping is uncertain,
 preserve the pane and publish a typed `CONTROL_REQUIRED` blocker.
 
-Never broadly kill Codex/`node_repl` processes or close panes as housekeeping. An
-exact native Herdr stop/close action requires a fresh exact pane/session binding, an
-exact Worker terminal, no authorized same-session recovery, and durable Control
-authority for that specific cleanup; read back agent and pane inventories afterward.
+Never broadly kill Codex/`node_repl` processes or close panes as housekeeping. For a
+pane with a current native session, an exact native Herdr stop/close action requires
+fresh matching inventories plus `agent get`, the exact Worker or Reviewer terminal for
+the bound card, no authorized same-session recovery, and durable Control authority for
+that specific pane/session; read back agent and pane inventories afterward. A shell
+pane with no native session is not a bound agent: cleanup requires a Control card naming
+that exact pane and terminal, fresh inventories confirming it remains idle with no
+`agent_session`, and GitHub evidence of its corresponding Worker terminal/blocker with
+no unfinished continuation. Use only the card's exact native pane close and read back
+the pane inventory. If any check is missing or conflicts, preserve the pane and
+publish `CONTROL_REQUIRED`; never infer cleanup authority or identity from PIDs or
+process counts. The bounded example in
+[#195/6080489374](https://github.com/D22977/gpt-browser-bridge/issues/195#issuecomment-6080489374)
+includes sessionless blocked-worker panes w3:pR and w3:pT and session-bound Reviewer
+pane w3:pV with the #199 FIX_REQUIRED terminal; it does not broaden the generic rules.
 After reboot, rehydrate GitHub first and acquire fresh identities. No prompt, retry,
 sandbox escalation, resume, or replacement from an idle/uncertain pane without exact
 card authority. A helper failure before process creation is not evidence of a Herdr

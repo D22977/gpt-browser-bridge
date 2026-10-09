@@ -74,20 +74,29 @@ records this distinction and the unresolved card mappings.
 ## Safe cleanup boundary
 
 Never broadly terminate Codex, `node_repl`, or other processes, and never close an
-existing pane as housekeeping. Cleanup is allowed only when all of these conditions
-hold:
+existing pane as housekeeping. Cleanup requires a durable Control card naming the
+exact pane and native close action, followed by a post-close inventory readback. Apply
+the matching gate for the pane type:
 
-1. Two fresh matching inventories and the exact agent get bind the current pane,
-   terminal, native session, and cwd.
-2. The same card has an exact Worker terminal, and no same-session recovery remains
-   authorized.
-3. A durable Control card explicitly authorizes cleanup of that exact pane/session.
+- **Pane with a current native session:** two fresh matching inventories and
+  `agent get` must bind the pane, terminal, session, and cwd. The bound card must have
+  its exact Worker or Reviewer terminal, and no same-session recovery may remain
+  authorized. The Control card must explicitly authorize cleanup of that exact
+  pane/session. Then use only its named native Herdr stop/close action and read back
+  the agent and pane inventories.
+- **Shell pane with no native session:** do not treat it as a bound agent. The Control
+  card must explicitly name the pane and terminal; fresh inventories must confirm the
+  same pane remains idle with no `agent_session`; and GitHub must show its corresponding
+  Worker terminal/blocker with no unfinished continuation. Use only the exact native
+  pane close named by the card, then read back the pane inventory. Do not infer identity
+  or completion from PIDs or process counts.
 
-Then use only the exact native Herdr stop/close action named by that authority, and
-read back the agent and pane inventories. If any condition is missing or conflicts,
-preserve the pane and publish `CONTROL_REQUIRED`. Never substitute PID-based or
-broad process cleanup. See [#195/6080489374](https://github.com/D22977/gpt-browser-bridge/issues/195#issuecomment-6080489374)
-for a bounded exact-pane example.
+If any required mapping, terminal, authorization, or liveness check is missing or
+conflicts, preserve the pane and publish `CONTROL_REQUIRED`. The bounded example in
+[#195/6080489374](https://github.com/D22977/gpt-browser-bridge/issues/195#issuecomment-6080489374)
+includes sessionless blocked-worker panes w3:pR and w3:pT, plus session-bound Reviewer
+pane w3:pV with the #199 FIX_REQUIRED terminal; that receipt authorizes only its named
+panes and does not broaden this cleanup rule.
 
 ## Dispatch and reboot recovery
 
