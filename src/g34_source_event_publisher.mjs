@@ -2,15 +2,15 @@ import { createHash } from "node:crypto";
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import writeFileAtomic from "write-file-atomic";
-import { githubCommentIdentity, parseG34ReceiptFields, sourceEventSchema } from "./g34_contract.mjs";
+import { g34Field, githubCommentIdentity, parseG34ReceiptFields, sourceEventSchema } from "./g34_contract.mjs";
 
 const sha256Hex = (value) => createHash("sha256").update(value, "utf8").digest("hex");
 const eventFields = [
   "marker", "event_id", "control_generation", "active_control_id", "control_conversation_id",
   "event_kind", "source_comment_id", "source_body_sha256", "repository", "card_comment_id",
-  "binding_comment_id", "dispatch_comment_id", "agent_name", "agent_session", "pane",
+  "binding_comment_id", "dispatch_comment_id", "claim_comment_id", "claim_acceptance_comment_id", "attempt_id", "lease_id", "lease_generation", "agent_name", "agent_session", "pane",
   "terminal", "cwd", "model", "reasoning_effort", "state", "branch", "base_sha", "head_sha",
-  "terminal_comment_id", "review_comment_id", "user_relay_count",
+  "terminal_comment_id", "start_receipt_comment_id", "review_comment_id", "user_relay_count",
 ];
 
 function eventBody(event) {
@@ -25,6 +25,19 @@ function requireBoundValue(receipt, binding, key, label = key) {
   }
 }
 
+function executorReceiptFields(sourceComment) {
+  const parsed = parseG34ReceiptFields(sourceComment);
+  const keys = [
+    "state", "control_generation", "control_conversation_id", "repository", "card_comment_id", "binding_comment_id",
+    "dispatch_comment_id", "claim_comment_id", "claim_acceptance_comment_id", "start_receipt_comment_id",
+    "attempt_id", "lease_id", "lease_generation", "agent_name", "agent_session", "pane", "terminal", "cwd",
+    "model", "reasoning_effort", "branch", "base_sha", "head_sha", "user_relay_count", "review_comment_id",
+  ];
+  return Object.fromEntries([["marker", parsed.marker], ...keys.map((key) => [
+    key, g34Field(parsed, key, ["EXECUTOR_IDENTITY", "EXECUTOR_BINDING", "EXECUTOR", "TICKET", "CLAIM_CHAIN", "RESULT"]),
+  ])]);
+}
+
 function validateExecutorReceipt({ sourceComment, sourceIssueNumber, sourceRepositoryFullName, eventKind, binding, branch, baseSha, headSha, state, terminalCommentId, reviewCommentId }) {
   const identity = githubCommentIdentity(sourceComment, "source executor comment");
   if (identity.issue_number !== sourceIssueNumber || sourceRepositoryFullName !== "D22977/gpt-browser-bridge") {
@@ -33,7 +46,7 @@ function validateExecutorReceipt({ sourceComment, sourceIssueNumber, sourceRepos
   if (!binding?.worker_author || sourceComment.user?.login !== binding.worker_author) {
     throw new Error("source executor comment author is not the bound Worker");
   }
-  const receipt = parseG34ReceiptFields(sourceComment);
+  const receipt = executorReceiptFields(sourceComment);
   const expectedMarker = eventKind === "WORKER_STARTED"
     ? "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1"
     : "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1";
@@ -41,6 +54,11 @@ function validateExecutorReceipt({ sourceComment, sourceIssueNumber, sourceRepos
   if (receipt.control_generation !== "034" || receipt.control_conversation_id !== binding.control_conversation_id) {
     throw new Error("source executor receipt Control identity does not match its binding");
   }
+  requireBoundValue(receipt, binding, "card_comment_id");
+  requireBoundValue(receipt, binding, "binding_comment_id");
+  requireBoundValue(receipt, binding, "dispatch_comment_id");
+  requireBoundValue(receipt, binding, "claim_comment_id");
+  requireBoundValue(receipt, binding, "claim_acceptance_comment_id");
   requireBoundValue(receipt, binding, "repository");
   for (const key of [
     "card_comment_id", "binding_comment_id", "dispatch_comment_id", "agent_name",
@@ -53,6 +71,9 @@ function validateExecutorReceipt({ sourceComment, sourceIssueNumber, sourceRepos
     throw new Error("event Git binding does not match the accepted Worker binding");
   }
   if (receipt.user_relay_count !== "0") throw new Error("source executor receipt must bind user_relay_count=0");
+  requireBoundValue(receipt, binding, "attempt_id");
+  requireBoundValue(receipt, binding, "lease_id");
+  requireBoundValue(receipt, binding, "lease_generation");
   if (eventKind === "WORKER_STARTED") {
     if (identity.id !== binding.start_comment_id || state !== "CONSUMED_STARTED") {
       throw new Error("start receipt id/state does not match the accepted Worker start chain");
@@ -91,6 +112,11 @@ export function createSourceEvent({ sourceComment, sourceIssueNumber, sourceRepo
     card_comment_id: receipt.card_comment_id,
     binding_comment_id: receipt.binding_comment_id,
     dispatch_comment_id: receipt.dispatch_comment_id,
+    claim_comment_id: receipt.claim_comment_id,
+    claim_acceptance_comment_id: receipt.claim_acceptance_comment_id,
+    attempt_id: receipt.attempt_id,
+    lease_id: receipt.lease_id,
+    lease_generation: receipt.lease_generation,
     agent_name: receipt.agent_name,
     agent_session: receipt.agent_session,
     pane: receipt.pane,
@@ -103,6 +129,7 @@ export function createSourceEvent({ sourceComment, sourceIssueNumber, sourceRepo
     base_sha: receipt.base_sha,
     head_sha: receipt.head_sha,
     ...(terminalCommentId ? { terminal_comment_id: String(terminalCommentId) } : {}),
+    ...(receipt.start_receipt_comment_id ? { start_receipt_comment_id: String(receipt.start_receipt_comment_id) } : {}),
     ...(reviewCommentId ? { review_comment_id: String(reviewCommentId) } : {}),
     user_relay_count: 0,
   });
@@ -285,6 +312,10 @@ export async function beginSuccessorDelivery({ eventId, sourceCommentId, control
       control_comment_id: String(controlCommentId),
       successor_comment_id: String(successor.comment_id),
       successor_issue_number: String(successor.issue_number),
+      successor_agent_session: successor.agent_session,
+      successor_pane: successor.pane,
+      successor_terminal: successor.terminal,
+      successor_worker_author: successor.worker_author,
     };
     await saveLedger(file, ledger);
     return { state: "SUCCESSOR_SEND_ATTEMPTED" };
@@ -301,7 +332,13 @@ export async function recordSuccessorDelivery({ eventId, sourceCommentId, delive
   if (!prior || prior.source_comment_id !== String(sourceCommentId) || prior.state !== "SUCCESSOR_SEND_ATTEMPTED") {
     throw new Error("no matching successor delivery attempt is pending");
   }
-  if (delivery?.state !== "DELIVERED" || !/^[A-Za-z0-9._:-]{1,200}$/.test(String(delivery.receipt_id ?? ""))) {
+  if (delivery?.state !== "DELIVERED" || !/^[A-Za-z0-9._:-]{1,200}$/.test(String(delivery.receipt_id ?? "")) ||
+      String(delivery.comment_id ?? "") !== prior.successor_comment_id ||
+      String(delivery.issue_number ?? "") !== prior.successor_issue_number ||
+      String(delivery.agent_session ?? "") !== prior.successor_agent_session ||
+      String(delivery.pane ?? "") !== prior.successor_pane ||
+      String(delivery.terminal ?? "") !== prior.successor_terminal ||
+      String(delivery.worker_author ?? "") !== prior.successor_worker_author) {
     ledger[eventId] = { ...prior, state: "SUCCESSOR_UNCERTAIN" };
     await saveLedger(file, ledger);
     return { state: "UNCERTAIN_DELIVERY" };
@@ -327,6 +364,9 @@ export async function reconcileSuccessorDelivery({ eventId, sourceCommentId, evi
       String(evidence.comment_id ?? "") !== prior.successor_comment_id ||
       String(evidence.issue_number ?? "") !== prior.successor_issue_number ||
       String(evidence.control_comment_id ?? "") !== prior.control_comment_id ||
+      String(evidence.agent_session ?? "") !== prior.successor_agent_session ||
+      String(evidence.pane ?? "") !== prior.successor_pane ||
+      String(evidence.terminal ?? "") !== prior.successor_terminal ||
       !/^[A-Za-z0-9._:-]{1,200}$/.test(String(evidence.receipt_id ?? ""))) {
     ledger[eventId] = { ...prior, state: "SUCCESSOR_UNCERTAIN" };
     await saveLedger(file, ledger);
@@ -337,7 +377,8 @@ export async function reconcileSuccessorDelivery({ eventId, sourceCommentId, evi
   return { state: "SUCCESSOR_DELIVERED_AWAITING_RECEIPT" };
 }
 
-export async function markSourceEventConsumed({ eventId, sourceCommentId, controlCommentId, runtimeRoot, workerReceipt, expectedWorkerAuthor }) {
+export async function markSourceEventConsumed({ eventId, sourceCommentId, controlCommentId, runtimeRoot, workerReceipt, expectedWorkerAuthor, successor, github }) {
+  if (typeof github?.getIssueComment !== "function") throw new Error("exact GitHub client is required to verify Worker consumption");
   const file = ledgerPathFor(runtimeRoot);
   const ledger = await readLedger(file);
   const prior = ledger[eventId];
@@ -351,18 +392,34 @@ export async function markSourceEventConsumed({ eventId, sourceCommentId, contro
     return { state: "NO_OP" };
   }
   if (prior.state !== "SUCCESSOR_DELIVERED" || prior.control_comment_id !== String(controlCommentId) ||
-      !expectedWorkerAuthor || workerReceipt?.user?.login !== expectedWorkerAuthor) {
+      !expectedWorkerAuthor || workerReceipt?.user?.login !== expectedWorkerAuthor ||
+      !successor || String(successor.comment_id) !== prior.successor_comment_id ||
+        String(successor.issue_number) !== prior.successor_issue_number ||
+        String(successor.agent_session) !== prior.successor_agent_session ||
+        String(successor.pane) !== prior.successor_pane || String(successor.terminal) !== prior.successor_terminal) {
     throw new Error("cannot consume before verified delivery and bound Worker receipt");
   }
-  const identity = githubCommentIdentity(workerReceipt, "successor Worker receipt");
-  const receipt = parseG34ReceiptFields(workerReceipt);
+  const listedIdentity = githubCommentIdentity(workerReceipt, "listed successor Worker receipt");
+  if (listedIdentity.issue_number !== Number(prior.successor_issue_number)) throw new Error("successor Worker receipt issue does not match delivery target");
+  const exactWorkerReceipt = await github.getIssueComment(listedIdentity.id);
+  const identity = githubCommentIdentity(exactWorkerReceipt, "exact successor Worker receipt");
+  if (identity.id !== listedIdentity.id || identity.issue_number !== listedIdentity.issue_number ||
+      exactWorkerReceipt.body !== workerReceipt.body || exactWorkerReceipt.user?.login !== workerReceipt.user?.login) {
+    throw new Error("successor Worker receipt exact GET differs from its listing");
+  }
+  if (exactWorkerReceipt.user?.login !== expectedWorkerAuthor) throw new Error("successor Worker receipt author does not match the bound target");
+  const receipt = parseG34ReceiptFields(exactWorkerReceipt);
   if (
     identity.issue_number !== Number(prior.successor_issue_number) ||
     receipt.marker !== "GBB_G34_SUCCESSOR_CONSUMED_V1" ||
     receipt.state !== "CONSUMED" ||
     receipt.source_event_id !== eventId ||
     receipt.control_acceptance_comment_id !== String(controlCommentId) ||
-    receipt.successor_comment_id !== prior.successor_comment_id
+    receipt.successor_comment_id !== prior.successor_comment_id ||
+    receipt.source_comment_id !== String(sourceCommentId) ||
+    receipt.agent_session !== prior.successor_agent_session ||
+    receipt.pane !== prior.successor_pane ||
+    receipt.terminal !== prior.successor_terminal
   ) throw new Error("successor Worker consumption receipt does not match the accepted delivery");
   ledger[eventId] = {
     ...prior, state: "CONSUMED", worker_receipt_id: identity.id,

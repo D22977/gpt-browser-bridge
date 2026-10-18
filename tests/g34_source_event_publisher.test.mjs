@@ -13,6 +13,11 @@ const binding = {
   binding_comment_id: "6083287293",
   dispatch_comment_id: "6083292578",
   start_comment_id: "6083328488",
+  claim_comment_id: "6083307695",
+  claim_acceptance_comment_id: "6083317057",
+  attempt_id: "attempt-20261009-01",
+  lease_id: "lease-20261009-01",
+  lease_generation: "1",
   worker_author: "worker-login",
   control_conversation_id: "6ac3b22a-a830-83e8-852c-f01a16cebf24",
   agent_name: "gbb_g34_source_1009a",
@@ -47,6 +52,11 @@ function workerStartReceipt(overrides = {}) {
     card_comment_id: binding.card_comment_id,
     binding_comment_id: binding.binding_comment_id,
     dispatch_comment_id: binding.dispatch_comment_id,
+    claim_comment_id: binding.claim_comment_id,
+    claim_acceptance_comment_id: binding.claim_acceptance_comment_id,
+    attempt_id: binding.attempt_id,
+    lease_id: binding.lease_id,
+    lease_generation: binding.lease_generation,
     agent_name: binding.agent_name,
     agent_session: binding.agent_session,
     pane: binding.pane,
@@ -65,7 +75,7 @@ function workerStartReceipt(overrides = {}) {
     url: "https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-" + binding.start_comment_id,
     issue_url: "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/202",
     user: { login: binding.worker_author },
-    body: ["GBB_G34_EXECUTOR_CONSUMED_STARTED_V1", ...Object.entries(fields).map(([k, v]) => `${k}: ${v}`)].join("\n"),
+    body: ["GBB_G34_EXECUTOR_CONSUMED_STARTED_V1", "EXECUTOR", ...Object.entries(fields).map(([k, v]) => `${k}: ${v}`)].join("\n"),
   };
 }
 
@@ -126,6 +136,8 @@ test("source event id is deterministic and body binds the upstream receipt ident
   assert.equal(first.event_id, expectedId);
   assert.equal(second.body, first.body);
   assert.equal(first.source_comment_id, "6083328488");
+  assert.equal(first.claim_comment_id, binding.claim_comment_id);
+  assert.equal(first.claim_acceptance_comment_id, binding.claim_acceptance_comment_id);
   assert.equal("event_comment_id" in first, false);
   assert.doesNotMatch(first.body, /event_comment_id/);
   assert.equal(first.source_body_sha256, createHash("sha256").update(workerStartReceipt().body, "utf8").digest("hex"));
@@ -188,19 +200,21 @@ test("delivered event is consumed only after a verified Control-authorized Worke
   const args = { eventId: event.event_id, sourceCommentId: event.source_comment_id, controlCommentId: "8001", runtimeRoot };
   await beginSuccessorDelivery({
     ...args,
-    successor: { comment_id: "7002", issue_number: 7002 },
+    successor: { comment_id: "7002", issue_number: 7002, agent_session: "session-2", pane: "w3:p11", terminal: "term-2", worker_author: "worker-login" },
   });
-  await recordSuccessorDelivery({ ...args, delivery: { state: "DELIVERED", receipt_id: "transport-1" } });
+  await recordSuccessorDelivery({ ...args, delivery: { state: "DELIVERED", receipt_id: "transport-1", comment_id: "7002", issue_number: 7002, agent_session: "session-2", pane: "w3:p11", terminal: "term-2", worker_author: "worker-login" } });
   const consumedArgs = {
     ...args,
     expectedWorkerAuthor: "worker-login",
+    successor: { comment_id: "7002", issue_number: 7002, agent_session: "session-2", pane: "w3:p11", terminal: "term-2", worker_author: "worker-login" },
     workerReceipt: {
       id: "9002",
       url: "https://github.com/D22977/gpt-browser-bridge/issues/7002#issuecomment-9002",
       issue_url: "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/7002",
       user: { login: "worker-login" },
-      body: ["GBB_G34_SUCCESSOR_CONSUMED_V1", "state: CONSUMED", `source_event_id: ${event.event_id}`, "control_acceptance_comment_id: 8001", "successor_comment_id: 7002"].join("\n"),
+      body: ["GBB_G34_SUCCESSOR_CONSUMED_V1", "state: CONSUMED", `source_event_id: ${event.event_id}`, `source_comment_id: ${event.source_comment_id}`, "control_acceptance_comment_id: 8001", "successor_comment_id: 7002", "agent_session: session-2", "pane: w3:p11", "terminal: term-2"].join("\n"),
     },
+    github: { async getIssueComment(id) { assert.equal(id, "9002"); return consumedArgs.workerReceipt; } },
   };
   assert.equal((await markSourceEventConsumed(consumedArgs)).state, "CONSUMED");
   assert.equal((await markSourceEventConsumed(consumedArgs)).state, "NO_OP");

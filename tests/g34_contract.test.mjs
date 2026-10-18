@@ -107,6 +107,9 @@ const realAck = githubComment(5997220300, 88, [
   "issue: 88",
   "generation: 034",
   "conversation_id: " + activeId,
+  "atomic_switch: #88/5997153160 exact GET matched",
+  "current_start: #43/5997180468 V246 exact GET matched",
+  "current_registry: #81/5997189759 V142 exact GET matched",
   "",
   "ACTIVE_STATE",
   "sole_active_control_generation: 034",
@@ -168,4 +171,32 @@ test("authority rejects duplicate fields within a section and inconsistent GitHu
   assert.throws(() => parseActiveControlAuthority({
     switchReceipt: realSwitch, index43: realStartIndex, index81: realRegistryIndex, rehydrationAck: wrongCommentUrl,
   }), /exact|identity/i);
+});
+
+test("the live sectioned 035 switch, indexes, and ACK cannot be mistaken for active 034 authority", () => {
+  assertImplemented();
+  const currentId = "6ad34c37-975c-83e8-9fb7-6881e04d0c84";
+  const switch035 = githubComment(6233003577, 88, [
+    "CONTROL_GENERATION_SWITCH_034_TO_035_V1", "state: ATOMIC_SWITCHED", "GENERATION_STATE",
+    "old_generation: 034", "old_generation_status: RETIRED", "new_generation: 035",
+    "new_generation_status: ACTIVE", `new_conversation_id: ${currentId}`,
+  ].join("\n"));
+  const ack035 = githubComment(6243902173, 88, [
+    "ACTIVE_CONTROL_REHYDRATION_ACK_V1", "state: ACTIVE_REHYDRATED_ACKNOWLEDGED",
+    "generation: 035", `conversation_id: ${currentId}`, "current_control_index: #43/6233155285 V287",
+    "current_registry_index: #81/6233157935 V163", "active_switch: #88/6233003577",
+  ].join("\n"));
+  const startIndex035 = githubComment(6233155285, 43, [
+    "CURRENT_REHYDRATION_INDEX_V287", "state: CONTROL_REQUIRED_ACTIVE_REHYDRATION_ACK_GITHUB_WRITE_BLOCKED",
+    "active_control_generation: 035", `active_control_conversation_id: ${currentId}`,
+    "atomic_switch: #88/6233003577 exact GET matched", "candidate_owned_active_rehydration_ACK: NOT_PUBLISHED",
+  ].join("\n"));
+  const registry035 = githubComment(6233157935, 81, [
+    "CURRENT_REGISTRY_INDEX_V163", "state: G34_CONTROL_035_ACTIVE_REHYDRATION_ACK_GITHUB_WRITE_BLOCKED",
+    "ACTIVE_CONTROL", "generation: 035 ACTIVE", `conversation_id: ${currentId}`,
+    "switch: #88/6233003577 exact GET matched", "candidate_owned_active_rehydration_ACK: NOT_PUBLISHED",
+  ].join("\n"));
+  assert.throws(() => parseActiveControlAuthority({
+    switchReceipt: switch035, index43: startIndex035, index81: registry035, rehydrationAck: ack035,
+  }), /G34|034|active Control/i);
 });
