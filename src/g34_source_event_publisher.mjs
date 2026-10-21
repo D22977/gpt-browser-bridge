@@ -211,6 +211,14 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
     return { state: "NO_OP", comment_id: String(exact.id) };
   }
 
+  if (prior?.state === "SUCCESSOR_SEND_ATTEMPTED" || prior?.state === "SUCCESSOR_DELIVERY_UNCERTAIN") {
+    const exact = await findMatch({ ...validated, body, expected_author: expectedAuthor }, issueNumber, repositoryFullName, github);
+    if (!exact || String(exact.id) !== String(prior.comment_id)) {
+      throw new Error("UNCERTAIN_SUCCESSOR_DELIVERY: source event must retain its pending successor state");
+    }
+    return { state: "DELIVERY_UNCERTAIN", comment_id: String(exact.id) };
+  }
+
   const existing = await findMatch({ ...validated, body, expected_author: expectedAuthor }, issueNumber, repositoryFullName, github);
   if (existing) {
     ledger[validated.event_id] = { state: "DELIVERED", source_comment_id: validated.source_comment_id, comment_id: String(existing.id) };
@@ -278,14 +286,34 @@ export async function beginSuccessorDelivery({ eventId, sourceCommentId, eventCo
   return { state: "READY_TO_DELIVER" };
 }
 
-export async function recordSuccessorDelivery({ eventId, receiptId, uncertain, runtimeRoot }) {
+export async function recordSuccessorDelivery({ eventId, receiptId, event, controlCommentId, successor, github, uncertain, runtimeRoot }) {
   const file = ledgerPathFor(runtimeRoot);
   const ledger = await readLedger(file);
   const prior = ledger[eventId];
   if (!prior || !["SUCCESSOR_SEND_ATTEMPTED", "SUCCESSOR_DELIVERY_UNCERTAIN"].includes(prior.state)) {
     throw new Error("no pending successor delivery attempt to reconcile");
   }
-  if (uncertain || !/^[1-9][0-9]*$/.test(String(receiptId ?? ""))) {
+  let exact = null;
+  if (!uncertain && /^[1-9][0-9]*$/.test(String(receiptId ?? "")) && typeof github?.getIssueComment === "function") {
+    const id = String(receiptId);
+    try {
+      const first = await github.getIssueComment(id);
+      const second = await github.getIssueComment(id);
+      if (first && second && String(first.id) === id && String(second.id) === id &&
+          first.url === second.url && first.body === second.body &&
+          first.user?.login === "D22977" && second.user?.login === "D22977" &&
+          first.url === `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${id}`) {
+        exact = parseG34ReceiptFields(second);
+        if (exact.marker !== "GBB_G34_SUCCESSOR_DELIVERY_RECEIPT_V1" || exact.state !== "DELIVERED" ||
+            exact.event_id !== eventId || exact.source_event_comment_id !== String(event?.comment_id ?? "") ||
+            exact.control_comment_id !== String(controlCommentId ?? "") || exact.successor_comment_id !== String(successor?.comment_id ?? "") ||
+            exact.successor_agent_session !== successor?.agent_session ||
+            exact.control_comment_id !== prior.control_comment_id || exact.successor_comment_id !== prior.successor_comment_id ||
+            Number(id) <= Number(controlCommentId)) exact = null;
+      }
+    } catch { exact = null; }
+  }
+  if (uncertain || !exact) {
     ledger[eventId] = { ...prior, state: "SUCCESSOR_DELIVERY_UNCERTAIN" };
     await saveLedger(file, ledger);
     return { state: "DELIVERY_UNCERTAIN" };

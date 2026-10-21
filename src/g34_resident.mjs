@@ -61,13 +61,13 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
       !event.body.includes(`source_body_sha256=${event.source_body_sha256}`)) {
     throw new Error("delivered source event exact reread mismatch");
   }
-  const readLinkedReceipt = async (commentId) => {
+  const readLinkedReceipt = async (commentId, issueNumber) => {
     if (!/^[1-9][0-9]*$/.test(String(commentId ?? ""))) throw new Error("linked review/adjudication receipt ID is missing");
     const listed = await github.getIssueComment(String(commentId));
     const match = typeof listed?.url === "string"
       ? /^https:\/\/github\.com\/D22977\/gpt-browser-bridge\/issues\/(\d+)#issuecomment-(\d+)$/.exec(listed.url)
       : null;
-    if (!match || match[2] !== String(commentId) || String(listed.id) !== String(commentId) ||
+    if (!match || Number(match[1]) !== issueNumber || match[2] !== String(commentId) || String(listed.id) !== String(commentId) ||
         listed.user?.login !== liveAuthority.publisher_login) {
       throw new Error("linked review/adjudication receipt metadata is not exact and authenticated");
     }
@@ -78,8 +78,13 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     }
     return { ...parseG34ReceiptFields(exact), id: String(exact.id) };
   };
-  const review = await readLinkedReceipt(receipt.independent_review_comment_id);
-  const adjudication = await readLinkedReceipt(receipt.adjudication_comment_id);
+  const review = await readLinkedReceipt(receipt.independent_review_comment_id, Number(receipt.independent_review_card_issue_number));
+  const reviewerBinding = await readLinkedReceipt(receipt.independent_reviewer_binding_comment_id, Number(receipt.independent_review_card_issue_number));
+  const adjudication = await readLinkedReceipt(receipt.adjudication_comment_id, 211);
+  if (typeof github.getIssue !== "function") throw new Error("exact independent review card read is required");
+  const reviewCard = await github.getIssue(Number(receipt.independent_review_card_issue_number));
+  const exactReviewCard = await github.getIssue(Number(receipt.independent_review_card_issue_number));
+  const reviewCardFields = reviewCard ? parseG34ReceiptFields(reviewCard) : {};
   const currentControlPointers = liveAuthority.record_ids;
   if (
     !event || !authority || event.state !== "DELIVERED" ||
@@ -98,9 +103,33 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     receipt.current_switch_comment_id !== currentControlPointers?.switch_comment_id ||
     receipt.current_index43_comment_id !== currentControlPointers?.index43_comment_id ||
     receipt.current_index81_comment_id !== currentControlPointers?.index81_comment_id ||
+    Number(receipt.independent_review_card_issue_number) < 1 || !reviewCard ||
+    Number(reviewCard.number) !== Number(receipt.independent_review_card_issue_number) ||
+    !exactReviewCard || Number(exactReviewCard.number) !== Number(reviewCard.number) ||
+    exactReviewCard.state !== reviewCard.state || exactReviewCard.body !== reviewCard.body ||
+    !String(reviewCard.body ?? "").startsWith("GBB_G34_FRESH_REVIEW_CARD_V1") ||
+    reviewCardFields.reviewed_head_sha !== receipt.reviewed_head_sha ||
+    reviewCardFields.reviewer_binding_comment_id !== reviewerBinding.id ||
+    reviewCardFields.reviewer_identity !== reviewerBinding.reviewer_identity ||
+    !/INDEPENDENT.*REVIEW/i.test(reviewCardFields.role ?? "") ||
+    !nonEmpty(reviewCardFields.reviewer_executor_identity) ||
+    reviewCardFields.reviewer_executor_identity !== reviewerBinding.executor_identity ||
+    receipt.reviewed_head_sha !== event.head_sha ||
     review.marker !== "GBB_G34_INDEPENDENT_REVIEW_RESULT_V1" ||
     review.decision !== "PASS" || review.state !== "REVIEW_TERMINAL" ||
     !/INDEPENDENT.*REVIEW/i.test(review.role ?? "") ||
+    review.review_card_issue_number !== String(reviewCard.number) ||
+    review.reviewed_head_sha !== event.head_sha ||
+    review.reviewer_binding_comment_id !== reviewerBinding.id ||
+    review.executor_identity !== reviewerBinding.executor_identity ||
+    reviewerBinding.reviewer_identity !== reviewerBinding.executor_identity ||
+    reviewerBinding.marker !== "GBB_G34_INDEPENDENT_REVIEWER_BINDING_V1" ||
+    reviewerBinding.card_issue_number !== String(reviewCard.number) ||
+    !/INDEPENDENT.*REVIEW/i.test(reviewerBinding.role ?? "") ||
+    reviewerBinding.reviewer_identity !== review.reviewer_identity ||
+    reviewerBinding.reviewer_identity === event.agent_session || reviewerBinding.executor_identity === "D22977" ||
+    !nonEmpty(reviewerBinding.reviewer_identity) || reviewerBinding.reviewer_identity === "D22977" ||
+    !/^gpt-6-sol$/i.test(reviewerBinding.model ?? "") || reviewerBinding.reasoning_effort !== "high" ||
     receipt.independent_review_decision !== review.decision ||
     adjudication.marker !== "ACTIVE_CONTROL_ADJUDICATION_V1" ||
     adjudication.state !== "ACCEPTED" ||
@@ -108,6 +137,10 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     adjudication.active_control_id !== liveAuthority.active_control_id ||
     adjudication.source_event_id !== event.event_id ||
     adjudication.review_comment_id !== review.id ||
+    adjudication.review_card_issue_number !== String(reviewCard.number) ||
+    adjudication.reviewed_head_sha !== event.head_sha ||
+    Number(event.comment_id) >= Number(review.id) || Number(review.id) >= Number(adjudication.id) ||
+    Number(adjudication.id) >= Number(receipt.id) ||
     receipt.adjudication_state !== adjudication.state ||
     receipt.semantic_sequence !== "WORKER_RECEIPT_SOURCE_EVENT_ACTIVE_CONTROL_ADJUDICATION_INDEPENDENT_REVIEW_CURRENT_CONTROL_ACK" ||
     String(receipt.successor_count) !== "1"
@@ -133,14 +166,41 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
 
 export async function runG34ResidentCycle({ sourceComments, currentAuthority, binding, issueNumber, runtimeRoot, github, repositoryFullName = "D22977/gpt-browser-bridge", branch, baseSha, headSha, publisherAuthor }) {
   if (!Array.isArray(sourceComments)) throw new Error("exact source comments are required");
-  if (typeof github?.getIssueComment !== "function") throw new Error("GitHub client is missing getIssueComment");
+  if (typeof github?.getIssueComment !== "function" || typeof github?.getIssue !== "function") throw new Error("GitHub client is missing exact issue/comment reads");
   if (!nonEmpty(branch) || !/^[0-9a-f]{40}$/.test(String(baseSha ?? "")) ||
       !/^[0-9a-f]{40}$/.test(String(headSha ?? ""))) {
     throw new Error("exact branch, base, and current head are required");
   }
+  const card = await github.getIssue(issueNumber);
+  const cardExact = await github.getIssue(issueNumber);
+  if (!card || !cardExact || Number(card.number) !== issueNumber || Number(cardExact.number) !== issueNumber ||
+      cardExact.body !== card.body || cardExact.state !== card.state || card.state !== "open" ||
+      !String(card.body ?? "").startsWith("GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1")) {
+    throw new Error("exact open G34 work-order card is required");
+  }
   const activeAuthority = parseActiveControlAuthority(currentAuthority);
   const results = [];
   const readBack = new Map();
+  const linkedCache = new Map();
+  const readLinkedWorkerRecord = async (id) => {
+    const key = String(id ?? "");
+    if (!/^[1-9][0-9]*$/.test(key)) throw new Error("worker receipt chain link is missing");
+    if (linkedCache.has(key)) return linkedCache.get(key);
+    const first = await github.getIssueComment(key);
+    const m = typeof first?.url === "string"
+      ? new RegExp(`^https://github\\.com/${repositoryFullName.replace("/", "\\/")}/issues/${issueNumber}#issuecomment-(\\d+)$`).exec(first.url)
+      : null;
+    if (!first || String(first.id) !== key || m?.[1] !== key || first.user?.login !== "D22977") {
+      throw new Error("worker receipt chain record metadata mismatch");
+    }
+    const exact = await github.getIssueComment(key);
+    if (!exact || String(exact.id) !== key || exact.url !== first.url || exact.body !== first.body || exact.user?.login !== first.user.login) {
+      throw new Error("worker receipt chain exact reread mismatch");
+    }
+    const fields = parseG34ReceiptFields(exact);
+    linkedCache.set(key, fields);
+    return fields;
+  };
   for (const listedComment of sourceComments) {
     const sourceComment = await github.getIssueComment(String(listedComment?.id ?? ""));
     const identityUrl = sourceComment?.url;
@@ -155,6 +215,43 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       ? "WORKER_STARTED"
       : fields.marker === "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1" ? "WORKER_TERMINAL_RESULT" : null;
     if (!eventKind || !fields.state) throw new Error("unsupported G34 executor receipt");
+    const [claim, accepted, route, dispatch] = await Promise.all([
+      readLinkedWorkerRecord(fields.claim_comment_id),
+      readLinkedWorkerRecord(fields.acceptance_comment_id),
+      readLinkedWorkerRecord(fields.binding_comment_id),
+      readLinkedWorkerRecord(fields.dispatch_comment_id),
+    ]);
+    const routeBinding = route.candidate_binding;
+    if (String(fields.card_comment_id) !== String(issueNumber) ||
+        fields.claim_comment_id !== String(binding?.claim_comment_id) ||
+        fields.acceptance_comment_id !== String(binding?.acceptance_comment_id) ||
+        fields.binding_comment_id !== String(binding?.binding_comment_id) ||
+        fields.dispatch_comment_id !== String(binding?.dispatch_comment_id) ||
+        claim.marker !== "CLAIM_REQUESTED_V1" || claim.state !== "CLAIM_REQUESTED" ||
+        accepted.marker !== "CLAIM_ACCEPTED_V1" || accepted.state !== "CLAIM_ACCEPTED" ||
+        !String(accepted.accepted_claim ?? "").startsWith(`#${issueNumber}/${fields.claim_comment_id}`) ||
+        claim.work_order !== `D22977/gpt-browser-bridge#${issueNumber}` ||
+        accepted.work_order !== `D22977/gpt-browser-bridge#${issueNumber}` ||
+        claim.role !== "Worker" || claim.model_effort !== `${binding?.model} / ${binding?.reasoning_effort}` ||
+        accepted.branch !== branch || claim.branch !== branch ||
+        route.marker !== "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_V1" ||
+        route.state !== "ONE_ALTERNATE_LOW_COST_WORKER_ROUTE_AUTHORIZED" ||
+        routeBinding?.task_name !== binding?.agent_name || routeBinding?.role !== "Worker" ||
+        routeBinding?.model_effort !== `${binding?.model} / ${binding?.reasoning_effort}` ||
+        routeBinding?.runtime_surface !== fields.runtime_surface ||
+        dispatch.marker !== "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" ||
+        dispatch.attempt_id !== fields.attempt_id || dispatch.lease_id !== fields.lease_id ||
+        dispatch.branch !== branch || dispatch.exact_remote_base_sha !== baseSha ||
+        fields.executor_identity !== `collaboration task ${routeBinding?.task_name}` ||
+        fields.agent_name !== routeBinding?.task_name || fields.agent_session !== dispatch.attempt_id ||
+        !String(claim.executor_identity ?? "").startsWith(`collaboration task ${routeBinding?.task_name}`) ||
+        !String(accepted.executor_identity ?? "").startsWith(`collaboration task ${routeBinding?.task_name}`) ||
+        !(Number(fields.claim_comment_id) < Number(fields.acceptance_comment_id) &&
+          Number(fields.acceptance_comment_id) < Number(fields.dispatch_comment_id) &&
+          Number(fields.dispatch_comment_id) < Number(sourceComment.id)) ||
+        !String(dispatch.executor_identity ?? "").includes(routeBinding?.task_name ?? "!")) {
+      throw new Error("upstream receipt is not bound to the exact card, accepted claim, Worker route, and dispatch records");
+    }
     if (sourceComment.user?.login !== publisherAuthor ||
         fields.card_comment_id !== String(binding?.card_comment_id) ||
         fields.binding_comment_id !== String(binding?.binding_comment_id) ||
@@ -237,7 +334,10 @@ export async function consumeDeliveredControlSuccessor({ event, authority, contr
     if (observed?.state !== "DELIVERED" || !/^[1-9][0-9]*$/.test(String(observed.receipt_id ?? ""))) {
       return { state: "DELIVERY_UNCERTAIN", successor };
     }
-    const saved = await recordSuccessorDelivery({ eventId: event.event_id, receiptId: observed.receipt_id, runtimeRoot });
+    const saved = await recordSuccessorDelivery({
+      eventId: event.event_id, receiptId: observed.receipt_id, event, controlCommentId: controlReceipt.id,
+      successor, github, runtimeRoot,
+    });
     return { ...saved, successor };
   }
   if (typeof deliver !== "function") throw new Error("bound Worker transport is required");
@@ -252,6 +352,9 @@ export async function consumeDeliveredControlSuccessor({ event, authority, contr
     await recordSuccessorDelivery({ eventId: event.event_id, uncertain: true, runtimeRoot });
     return { state: "DELIVERY_UNCERTAIN", successor };
   }
-  const saved = await recordSuccessorDelivery({ eventId: event.event_id, receiptId: result.receipt_id, runtimeRoot });
+  const saved = await recordSuccessorDelivery({
+    eventId: event.event_id, receiptId: result.receipt_id, event, controlCommentId: controlReceipt.id,
+    successor, github, runtimeRoot,
+  });
   return { ...saved, successor };
 }

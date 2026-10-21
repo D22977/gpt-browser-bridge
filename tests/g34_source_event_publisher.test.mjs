@@ -180,6 +180,32 @@ test("uncertain send is reconciled without blindly reposting", async () => {
   assert.equal(github.calls.create, 1);
 });
 
+test("a repeated resident publication preserves uncertain successor delivery and never resets it", async () => {
+  assertImplemented();
+  const event = sampleEvent();
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-events-"));
+  await mkdir(path.join(runtimeRoot, "events"));
+  await writeFile(path.join(runtimeRoot, "events", "g34-source-events.json"), JSON.stringify({
+    [event.event_id]: {
+      state: "SUCCESSOR_DELIVERY_UNCERTAIN", source_comment_id: event.source_comment_id,
+      comment_id: "9001", control_comment_id: "8001", successor_comment_id: "8002",
+    },
+  }));
+  let creates = 0;
+  const github = {
+    async findEventComments() { return [{ id: "9001" }]; },
+    async createIssueComment() { creates++; throw new Error("must not resend"); },
+    async getIssueComment(id) {
+      assert.equal(id, "9001");
+      return { id, url: "https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-9001", user: { login: "D22977" }, body: event.body };
+    },
+  };
+  assert.equal((await publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github })).state, "DELIVERY_UNCERTAIN");
+  const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
+  assert.equal(ledger[event.event_id].state, "SUCCESSOR_DELIVERY_UNCERTAIN");
+  assert.equal(creates, 0);
+});
+
 test("duplicate source-event matches fail closed", async () => {
   assertImplemented();
   const event = sampleEvent();
