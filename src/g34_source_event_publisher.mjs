@@ -397,11 +397,13 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                   a.body !== b.body || a.user?.login !== "D22977" || b.user?.login !== "D22977") return null;
               return { ...parseG34ReceiptFields(b), id: key };
             };
-            const [claim, accepted, route, dispatch, start, selectedSuccessor] = await Promise.all([
+            const [claim, accepted, route, dispatch, start, selectedSuccessor, sourceDispatch, sourceStart] = await Promise.all([
               readWorker(ack.claim_comment_id), readWorker(ack.acceptance_comment_id),
               readWorker(ack.binding_comment_id), readWorker(ack.dispatch_comment_id),
               readWorker(ack.worker_start_comment_id),
               readWorker(successor?.comment_id),
+              readWorker(event?.dispatch_comment_id),
+              readWorker(event?.worker_start_comment_id ?? event?.source_comment_id),
             ]);
             const routeBinding = route?.candidate_binding;
             const controlFirst = await github.getIssueComment(String(controlCommentId));
@@ -487,7 +489,26 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 reviewerBinding?.marker === "GBB_G34_REVIEWER_BINDING_V1" && reviewerBinding.state === "REVIEWER_ASSIGNED" &&
                 reviewerBinding.recorded_by_role === "LOCAL_CONTROL_TOWER" &&
                 typeof reviewerBinding.control_task_identity === "string" && reviewerBinding.control_task_identity.trim() !== "" &&
-                reviewerBinding.control_task_identity === dispatch.control_task_identity &&
+                sourceDispatch?.marker === "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" &&
+                sourceDispatch.state === "SAME_WORKER_REASSIGNED_FOR_REVIEW_FIXES" &&
+                sourceDispatch.recorded_by_role === "LOCAL_CONTROL_TOWER" &&
+                typeof sourceDispatch.control_task_identity === "string" && sourceDispatch.control_task_identity.trim() !== "" &&
+                executorTaskIdentity(sourceDispatch.executor_identity) === event.agent_name &&
+                sourceDispatch.branch === event.branch &&
+                sourceStart?.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1" &&
+                sourceStart.state === "CONSUMED_STARTED" && sourceStart.card_comment_id === "211" &&
+                sourceStart.claim_comment_id === String(event?.claim_comment_id ?? "") &&
+                sourceStart.acceptance_comment_id === String(event?.acceptance_comment_id ?? "") &&
+                sourceStart.binding_comment_id === String(event?.binding_comment_id ?? "") &&
+                sourceStart.dispatch_comment_id === sourceDispatch.id &&
+                sourceStart.executor_identity === sourceDispatch.executor_identity &&
+                sourceStart.agent_name === event.agent_name && sourceStart.agent_session === event.agent_session &&
+                sourceStart.branch === event.branch && sourceStart.base_sha === event.head_sha &&
+                sourceStart.head_sha === event.head_sha && sourceStart.lease_id === sourceDispatch.lease_id &&
+                sourceStart.attempt_id === sourceDispatch.attempt_id &&
+                sourceDispatch.exact_remote_base_sha === sourceStart.base_sha &&
+                Number(sourceDispatch.id) < Number(sourceStart.id) &&
+                reviewerBinding.control_task_identity === sourceDispatch.control_task_identity &&
                 !controlIdentityIsWorker &&
                 reviewerBinding.worker_task_identity === event.agent_name &&
                 reviewerBinding.reviewer_task_identity === review.reviewer_task_identity &&
