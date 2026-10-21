@@ -2,6 +2,11 @@ import { parseG34ReceiptFields, parseActiveControlAuthority } from "./g34_contra
 import { createSourceEvent, publishSourceEvent, beginSuccessorDelivery, recordSuccessorDelivery } from "./g34_source_event_publisher.mjs";
 
 const nonEmpty = (value) => typeof value === "string" && value.trim().length > 0;
+const executorTaskIdentity = (value) => {
+  if (typeof value !== "string") return null;
+  const match = /^collaboration task (\/[^\s;()]+)(?:\s*(?:\([^()\r\n]*\)|;[^\r\n]*))?$/.exec(value.trim());
+  return match?.[1] ?? null;
+};
 
 function receiptFields(receipt) {
   const id = String(receipt?.id ?? "");
@@ -125,8 +130,12 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     reviewerBinding.state !== "REVIEWER_ASSIGNED" ||
     reviewerBinding.card_issue_number !== String(reviewCard.number) ||
     reviewerBinding.role !== "fresh independent GPT-6 Sol High read-only Reviewer" ||
+    reviewerBinding.recorded_by_role !== "LOCAL_CONTROL_TOWER" ||
     reviewerBinding.model !== "gpt-6-sol" || reviewerBinding.reasoning_effort !== "high" ||
     !nonEmpty(reviewerBinding.reviewer_task_identity) ||
+    !nonEmpty(reviewerBinding.control_task_identity) ||
+    reviewerBinding.worker_task_identity !== event.agent_name ||
+    reviewerBinding.reviewer_task_identity === reviewerBinding.control_task_identity ||
     reviewerBinding.reviewer_task_identity === event.agent_name ||
     reviewerBinding.reviewer_task_identity === event.agent_session ||
     reviewerBinding.reviewer_task_identity === receipt.executor_identity ||
@@ -135,9 +144,11 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     reviewerBinding.candidate_branch !== event.branch ||
     reviewerBinding.candidate_exact_head_sha !== event.head_sha ||
     reviewerBinding.candidate_tree_sha !== reviewCardFields.candidate_tree_sha ||
+    Number(reviewerBinding.id) >= Number(review.id) ||
     review.reviewed_repository !== "D22977/gpt-browser-bridge" ||
     review.reviewed_branch !== event.branch ||
     review.reviewed_exact_head !== event.head_sha ||
+    review.reviewed_tree !== reviewCardFields.candidate_tree_sha ||
     !/^fresh independent GPT-6 Sol High read-only Reviewer$/i.test(review.role ?? "") ||
     !nonEmpty(reviewIdentity) || reviewIdentity === event.agent_name ||
     reviewIdentity === event.agent_session || reviewIdentity === receipt.executor_identity ||
@@ -261,9 +272,9 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
         dispatch.branch === workerStart.branch && dispatch.exact_remote_base_sha === workerStart.base_sha,
       executor: workerStart.executor_identity === `collaboration task ${routeBinding?.task_name}` &&
         workerStart.agent_session === dispatch.attempt_id &&
-        String(claim.executor_identity ?? "").startsWith(`collaboration task ${routeBinding?.task_name}`) &&
-        String(accepted.executor_identity ?? "").startsWith(`collaboration task ${routeBinding?.task_name}`) &&
-        String(dispatch.executor_identity ?? "").includes(routeBinding?.task_name ?? "!"),
+        executorTaskIdentity(claim.executor_identity) === routeBinding?.task_name &&
+        executorTaskIdentity(accepted.executor_identity) === routeBinding?.task_name &&
+        executorTaskIdentity(dispatch.executor_identity) === routeBinding?.task_name,
       chronology: Number(route.id) < Number(claim.id) && Number(claim.id) < Number(accepted.id) &&
         Number(accepted.id) < Number(dispatch.id) && Number(dispatch.id) < Number(workerStart.id),
       assigned_base: workerStart.branch === branch && workerStart.base_sha === baseSha && workerStart.head_sha === workerStart.base_sha,

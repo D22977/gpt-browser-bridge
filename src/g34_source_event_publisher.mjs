@@ -5,6 +5,11 @@ import writeFileAtomic from "write-file-atomic";
 import { parseG34ReceiptFields, parseActiveControlAuthority, sourceEventSchema } from "./g34_contract.mjs";
 
 const sha256Hex = (value) => createHash("sha256").update(value, "utf8").digest("hex");
+const executorTaskIdentity = (value) => {
+  if (typeof value !== "string") return null;
+  const match = /^collaboration task (\/[^\s;()]+)(?:\s*(?:\([^()\r\n]*\)|;[^\r\n]*))?$/.exec(value.trim());
+  return match?.[1] ?? null;
+};
 function commentIssueNumber(comment, repositoryFullName) {
   const id = String(comment?.id ?? "");
   if (!/^[1-9][0-9]*$/.test(id)) return null;
@@ -323,7 +328,35 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
           first.user?.login === "D22977" && second.user?.login === "D22977" &&
           first.url === `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${id}`) {
         exact = parseG34ReceiptFields(second);
-        if (exact.marker !== "GBB_G34_SUCCESSOR_DELIVERY_RECEIPT_V1" || exact.state !== "DELIVERED" ||
+        if (exact && event?.event_id === eventId && event.source_repository_full_name === "D22977/gpt-browser-bridge" &&
+            String(event.source_issue_number) === "211" && prior.comment_id === String(event?.comment_id ?? "") &&
+            prior.source_comment_id === String(event?.source_comment_id ?? "")) {
+          const eventCommentId = String(event.comment_id ?? "");
+          const eventCommentFirst = await github.getIssueComment(eventCommentId);
+          const eventCommentSecond = await github.getIssueComment(eventCommentId);
+          const sourceUrl = `https://github.com/${event.source_repository_full_name}/issues/${event.source_issue_number}#issuecomment-${eventCommentId}`;
+          const bodyFields = new Map(String(event.body ?? "").split(/\r?\n/).map((line) => {
+            const separator = line.indexOf("=");
+            return separator < 0 ? ["", ""] : [line.slice(0, separator), line.slice(separator + 1)];
+          }));
+          const boundFields = [
+            "event_id", "control_generation", "active_control_id", "control_conversation_id", "event_kind",
+            "source_comment_id", "source_body_sha256", "card_comment_id", "claim_comment_id",
+            "acceptance_comment_id", "binding_comment_id", "dispatch_comment_id", "agent_name", "agent_session",
+            "pane", "terminal", "cwd", "model", "reasoning_effort", "state", "branch", "base_sha", "head_sha",
+            "terminal_comment_id", "worker_start_comment_id", "review_comment_id", "user_relay_count",
+          ];
+          const bodyMatchesEvent = event.body?.startsWith("marker=GITHUB_SOURCE_EVENT_V1\n") &&
+            boundFields.every((key) => event[key] === undefined || bodyFields.get(key) === String(event[key]));
+          if (!eventCommentFirst || !eventCommentSecond || String(eventCommentFirst.id) !== eventCommentId ||
+              String(eventCommentSecond.id) !== eventCommentId || eventCommentFirst.url !== sourceUrl ||
+              eventCommentSecond.url !== sourceUrl || eventCommentFirst.body !== event.body ||
+              eventCommentSecond.body !== event.body || eventCommentFirst.user?.login !== "D22977" ||
+              eventCommentSecond.user?.login !== "D22977" || !bodyMatchesEvent) {
+            exact = null;
+          }
+        } else exact = null;
+        if (exact && (exact.marker !== "GBB_G34_SUCCESSOR_DELIVERY_RECEIPT_V1" || exact.state !== "DELIVERED" ||
             exact.event_id !== eventId || exact.source_event_comment_id !== String(event?.comment_id ?? "") ||
             exact.control_comment_id !== String(controlCommentId ?? "") || exact.successor_comment_id !== String(successor?.comment_id ?? "") ||
             exact.successor_agent_name !== successor?.agent_name || exact.successor_agent_session !== successor?.agent_session ||
@@ -334,7 +367,7 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
             exact.source_dispatch_comment_id !== String(event?.dispatch_comment_id ?? "") ||
             exact.source_worker_start_comment_id !== String(event?.worker_start_comment_id ?? event?.source_comment_id ?? "") ||
             exact.control_comment_id !== prior.control_comment_id || exact.successor_comment_id !== prior.successor_comment_id ||
-            Number(id) <= Number(controlCommentId)) exact = null;
+            Number(id) <= Number(controlCommentId))) exact = null;
         if (exact && /^[1-9][0-9]*$/.test(String(exact.consumer_ack_comment_id ?? ""))) {
           const ackId = String(exact.consumer_ack_comment_id);
           const ackFirst = await github.getIssueComment(ackId);
@@ -405,12 +438,20 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
               semanticChainValid = control.marker === "CONTROL_SUCCESSOR_ACCEPTANCE_V1" &&
                 control.state === "SUCCESSOR_ACCEPTED" && control.source_event_id === eventId &&
                 control.source_event_comment_id === String(event?.comment_id ?? "") &&
+                control.worker_receipt_comment_id === String(event?.source_comment_id ?? "") &&
+                control.recorded_by_role === "ACTIVE_CONTROL" &&
                 control.control_generation === activeAuthority.control_generation &&
                 control.active_control_id === activeAuthority.active_control_id &&
                 control.current_switch_comment_id === activeAuthority.record_ids.switch_comment_id &&
                 control.current_index43_comment_id === activeAuthority.record_ids.index43_comment_id &&
                 control.current_index81_comment_id === activeAuthority.record_ids.index81_comment_id &&
                 control.independent_review_decision === "APPROVE" &&
+                control.successor_count === "1" &&
+                control.successor_comment_id === String(successor?.comment_id ?? "") &&
+                control.successor_agent_name === successor?.agent_name &&
+                control.successor_agent_session === successor?.agent_session &&
+                control.successor_pane === successor?.pane &&
+                control.successor_terminal === successor?.terminal &&
                 adjudication?.marker === "ACTIVE_CONTROL_ADJUDICATION_V1" && adjudication.state === "ACCEPTED" &&
                 adjudication.source_event_id === eventId && adjudication.source_event_comment_id === String(event?.comment_id ?? "") &&
                 review.marker === "GBB_G34_FRESH_INDEPENDENT_REVIEW_RESULT_V1" && review.decision === "APPROVE" &&
@@ -419,16 +460,23 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 review.role === "fresh independent GPT-6 Sol High read-only Reviewer" &&
                 review.reviewed_repository === event.source_repository_full_name && review.reviewed_branch === event.branch &&
                 reviewerBinding?.marker === "GBB_G34_REVIEWER_BINDING_V1" && reviewerBinding.state === "REVIEWER_ASSIGNED" &&
+                reviewerBinding.recorded_by_role === "LOCAL_CONTROL_TOWER" &&
+                typeof reviewerBinding.control_task_identity === "string" && reviewerBinding.control_task_identity.trim() !== "" &&
+                reviewerBinding.worker_task_identity === event.agent_name &&
                 reviewerBinding.reviewer_task_identity === review.reviewer_task_identity &&
+                reviewerBinding.reviewer_task_identity !== reviewerBinding.control_task_identity &&
                 reviewerBinding.role === review.role && reviewerBinding.model === "gpt-6-sol" &&
                 reviewerBinding.reasoning_effort === "high" &&
                 reviewerBinding.candidate_repository === event.source_repository_full_name &&
                 reviewerBinding.candidate_branch === event.branch &&
                 reviewerBinding.candidate_exact_head_sha === event.head_sha &&
                 reviewerBinding.candidate_tree_sha === cardFields.candidate_tree_sha &&
+                (event.tree_sha === undefined || event.tree_sha === cardFields.candidate_tree_sha) &&
+                Number(reviewerBinding.id) < Number(review.id) &&
                 reviewerBinding.reviewer_task_identity !== event.agent_name &&
                 reviewerBinding.reviewer_task_identity !== event.agent_session &&
                 review.reviewed_exact_head === event.head_sha &&
+                review.reviewed_tree === cardFields.candidate_tree_sha &&
                 Number(event.comment_id) < Number(adjudication.id) && Number(adjudication.id) < Number(review.id) &&
                 Number(review.id) < Number(controlCommentId) && Number(controlCommentId) < Number(ackId) && Number(ackId) < Number(id);
             }
@@ -450,26 +498,32 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
               accepted?.marker === "CLAIM_ACCEPTED_V1" && accepted.state === "CLAIM_ACCEPTED" &&
               accepted.work_order === "D22977/gpt-browser-bridge#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1" &&
               String(accepted.accepted_claim ?? "").startsWith(`#211/${claim?.id}`) &&
-              claim.executor_identity === `collaboration task ${successor?.agent_name}` &&
-              accepted.executor_identity?.startsWith(`collaboration task ${successor?.agent_name}`) &&
+              executorTaskIdentity(claim.executor_identity) === successor?.agent_name &&
+              executorTaskIdentity(accepted.executor_identity) === successor?.agent_name &&
               route?.marker === "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_V1" &&
               route?.state === "ONE_ALTERNATE_LOW_COST_WORKER_ROUTE_AUTHORIZED" &&
               routeBinding?.task_name === successor?.agent_name && routeBinding?.role === "Worker" &&
               dispatch?.marker === "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" &&
-              dispatch.executor_identity?.includes(successor?.agent_name ?? "!") &&
+              executorTaskIdentity(dispatch.executor_identity) === successor?.agent_name &&
               dispatch.attempt_id === start?.attempt_id && dispatch.lease_id === start?.lease_id &&
               dispatch.branch === start?.branch && dispatch.exact_remote_base_sha === start?.base_sha &&
+              dispatch.exact_remote_base_sha === event?.head_sha &&
               start?.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1" && start.state === "CONSUMED_STARTED" &&
               start.card_comment_id === "211" && start.claim_comment_id === claim?.id &&
               start.acceptance_comment_id === accepted?.id && start.binding_comment_id === route?.id &&
               start.dispatch_comment_id === dispatch?.id && start.agent_name === successor?.agent_name &&
               start.agent_session === successor?.agent_session && start.pane === successor?.pane &&
               start.terminal === successor?.terminal && start.executor_identity === `collaboration task ${successor?.agent_name}` &&
+              start.repository === event?.source_repository_full_name && start.branch === event?.branch &&
+              start.base_sha === event?.head_sha && start.head_sha === event?.head_sha &&
+              (start.source_event_id === undefined || start.source_event_id === eventId) &&
+              (start.source_event_comment_id === undefined || start.source_event_comment_id === String(event?.comment_id ?? "")) &&
               selectedSuccessor?.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1" &&
               selectedSuccessor.state === "CONSUMED_STARTED" &&
               selectedSuccessor.executor_identity === `collaboration task ${successor?.agent_name}` &&
               selectedSuccessor.agent_name === successor?.agent_name &&
               selectedSuccessor.agent_session === successor?.agent_session &&
+              selectedSuccessor.base_sha === event?.head_sha && selectedSuccessor.head_sha === event?.head_sha &&
               selectedSuccessor.pane === successor?.pane && selectedSuccessor.terminal === successor?.terminal &&
               selectedSuccessor.claim_comment_id === claim?.id && selectedSuccessor.acceptance_comment_id === accepted?.id &&
               selectedSuccessor.binding_comment_id === route?.id && selectedSuccessor.dispatch_comment_id === dispatch?.id &&
