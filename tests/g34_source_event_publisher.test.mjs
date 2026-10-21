@@ -25,6 +25,43 @@ const authority = {
   control_conversation_id: "6ac3b22a-a830-83ee-bd71-85838e5f1392",
 };
 
+const sourceBody = (overrides = {}) => {
+  const fields = {
+  marker: "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1",
+  state: "CONSUMED_STARTED",
+  card_comment_id: binding.card_comment_id,
+  binding_comment_id: binding.binding_comment_id,
+  dispatch_comment_id: binding.dispatch_comment_id,
+  control_generation: authority.control_generation,
+  control_conversation_id: authority.control_conversation_id,
+  repository: "D22977/gpt-browser-bridge",
+  branch: "work/gbb-g34-source-event-20261009-01",
+  base_sha: "c7d17550fdfe3ae3e06ecec352004ca3b7284c55",
+  head_sha: "c7d17550fdfe3ae3e06ecec352004ca3b7284c55",
+  agent_name: binding.agent_name,
+  agent_session: binding.agent_session,
+  pane: binding.pane,
+  terminal: binding.terminal,
+  cwd: binding.cwd,
+  model: binding.model,
+  reasoning_effort: binding.reasoning_effort,
+  user_relay_count: "0",
+  ...overrides,
+  };
+  const marker = fields.marker;
+  delete fields.marker;
+  return marker + "\n" + Object.entries(fields).map(([key, value]) => `${key}: ${value}`).join("\n");
+};
+
+function sourceComment(overrides = {}) {
+  return {
+    id: "6083328488",
+    url: "https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-6083328488",
+    user: { login: "D22977" },
+    body: sourceBody(overrides),
+  };
+}
+
 function assertImplemented() {
   assert.equal(typeof createSourceEvent, "function", "source event builder is not implemented");
   assert.equal(typeof publishSourceEvent, "function", "source event publisher is not implemented");
@@ -33,7 +70,7 @@ function assertImplemented() {
 
 function sampleEvent() {
   return createSourceEvent({
-    sourceComment: { id: "6083328488", issue_number: 202, issue_url: "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/202", user: { login: "D22977" }, body: "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1\nstate: CONSUMED_STARTED" },
+    sourceComment: sourceComment(),
     sourceIssueNumber: 202,
     sourceRepositoryFullName: "D22977/gpt-browser-bridge",
     eventKind: "WORKER_STARTED",
@@ -63,7 +100,7 @@ function clientFor(body, options = {}) {
       calls.exactGet++;
       assert.equal(id, "9001");
       if (options.getError) throw options.getError;
-      return { id, issue_number: 202, issue_url: "https://api.github.com/repos/D22977/gpt-browser-bridge/issues/202", user: { login: "D22977" }, body };
+      return { id, url: `https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-${id}`, user: { login: "D22977" }, body };
     },
   };
 }
@@ -85,9 +122,38 @@ test("source event id is deterministic and body binds the upstream receipt ident
   assert.equal(first.source_comment_id, "6083328488");
   assert.equal("event_comment_id" in first, false);
   assert.doesNotMatch(first.body, /event_comment_id/);
-  assert.equal(first.source_body_sha256, createHash("sha256").update("GBB_G34_EXECUTOR_CONSUMED_STARTED_V1\nstate: CONSUMED_STARTED", "utf8").digest("hex"));
+  assert.equal(first.source_body_sha256, createHash("sha256").update(sourceComment().body, "utf8").digest("hex"));
   assert.match(first.body, /marker=GITHUB_SOURCE_EVENT_V1/);
   assert.match(first.body, /source_comment_id=6083328488/);
+});
+
+test("source event rejects unrelated authors and mismatched claim, executor, state, or branch fields", () => {
+  assertImplemented();
+  const variants = [
+    { comment: { ...sourceComment(), user: { login: "unrelated" } } },
+    { comment: sourceComment({ card_comment_id: "1" }) },
+    { comment: sourceComment({ binding_comment_id: "1" }) },
+    { comment: sourceComment({ dispatch_comment_id: "1" }) },
+    { comment: sourceComment({ agent_session: "other-session" }) },
+    { comment: sourceComment({ state: "READY_FOR_FRESH_REVIEW" }) },
+    { comment: sourceComment({ branch: "other-branch" }) },
+    { comment: sourceComment({ base_sha: "d7d17550fdfe3ae3e06ecec352004ca3b7284c55" }) },
+  ];
+  for (const { comment } of variants) {
+    assert.throws(() => createSourceEvent({
+      sourceComment: comment,
+      sourceIssueNumber: 202,
+      sourceRepositoryFullName: "D22977/gpt-browser-bridge",
+      eventKind: "WORKER_STARTED",
+      authority,
+      binding,
+      branch: "work/gbb-g34-source-event-20261009-01",
+      baseSha: "c7d17550fdfe3ae3e06ecec352004ca3b7284c55",
+      headSha: "c7d17550fdfe3ae3e06ecec352004ca3b7284c55",
+      state: "CONSUMED_STARTED",
+      expectedAuthor: "D22977",
+    }));
+  }
 });
 
 test("publisher persists before sending and exact-reads the created GitHub comment", async () => {
@@ -123,17 +189,15 @@ test("duplicate source-event matches fail closed", async () => {
   assert.equal(github.calls.create, 0);
 });
 
-test("delivered event ledger advances to CONSUMED only with a bound Control ACK and then NO_OP", async () => {
+test("source event cannot be marked CONSUMED without a successor delivery attempt and confirmation", async () => {
   assertImplemented();
   const event = sampleEvent();
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-events-"));
   await publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github: clientFor(event.body) });
   const args = { eventId: event.event_id, sourceCommentId: event.source_comment_id, controlCommentId: "8001", runtimeRoot };
-  assert.equal((await markSourceEventConsumed(args)).state, "CONSUMED");
-  assert.equal((await markSourceEventConsumed(args)).state, "NO_OP");
+  await assert.rejects(() => markSourceEventConsumed(args), /successor delivery attempt/);
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
-  assert.equal(ledger[event.event_id].state, "CONSUMED");
-  assert.equal(ledger[event.event_id].control_comment_id, "8001");
+  assert.equal(ledger[event.event_id].state, "DELIVERED");
 });
 
 test("corrupt ledger fails closed before a GitHub create call", async () => {
@@ -146,3 +210,4 @@ test("corrupt ledger fails closed before a GitHub create call", async () => {
   await assert.rejects(() => publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github }), /cannot read G34 event ledger/);
   assert.equal(github.calls.create, 0);
 });
+

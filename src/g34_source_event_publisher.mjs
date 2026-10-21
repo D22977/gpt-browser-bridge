@@ -2,15 +2,29 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import writeFileAtomic from "write-file-atomic";
-import { sourceEventSchema } from "./g34_contract.mjs";
+import { parseG34ReceiptFields, sourceEventSchema } from "./g34_contract.mjs";
 
 const sha256Hex = (value) => createHash("sha256").update(value, "utf8").digest("hex");
+function commentIssueNumber(comment, repositoryFullName) {
+  const id = String(comment?.id ?? "");
+  if (!/^[1-9][0-9]*$/.test(id)) return null;
+  const web = typeof comment.url === "string"
+    ? new RegExp(`^https://github\\.com/${repositoryFullName.replace("/", "\\/")}/issues/(\\d+)#issuecomment-(\\d+)$`).exec(comment.url)
+    : null;
+  const api = typeof comment.issue_url === "string"
+    ? new RegExp(`^https://api\\.github\\.com/repos/${repositoryFullName.replace("/", "\\/")}/issues/(\\d+)$`).exec(comment.issue_url)
+    : null;
+  if (web && web[2] !== id) return null;
+  const number = web ? Number(web[1]) : api ? Number(api[1]) : null;
+  if (number !== null && comment.issue_number !== undefined && Number(comment.issue_number) !== number) return null;
+  return number;
+}
 const eventFields = [
   "marker", "event_id", "control_generation", "active_control_id", "control_conversation_id",
   "event_kind", "source_comment_id", "source_body_sha256", "card_comment_id",
   "binding_comment_id", "dispatch_comment_id", "agent_name", "agent_session", "pane",
   "terminal", "cwd", "model", "reasoning_effort", "state", "branch", "base_sha", "head_sha",
-  "terminal_comment_id", "review_comment_id", "user_relay_count",
+  "terminal_comment_id", "worker_start_comment_id", "review_comment_id", "user_relay_count",
 ];
 
 function eventBody(event) {
@@ -22,12 +36,48 @@ export function createSourceEvent({ sourceComment, sourceIssueNumber, sourceRepo
   if (!sourceComment || !/^[1-9][0-9]*$/.test(String(sourceComment.id ?? "")) || typeof sourceComment.body !== "string") {
     throw new Error("source executor comment metadata is required");
   }
+  const githubUrl = sourceComment.url;
+  const normalized = typeof githubUrl === "string"
+    ? new RegExp(`^https://github\\.com/${sourceRepositoryFullName.replace("/", "\\/")}/issues/(\\d+)#issuecomment-(\\d+)$`).exec(githubUrl)
+    : null;
+  const issueApi = sourceComment.issue_url;
+  const apiMatch = typeof issueApi === "string"
+    ? new RegExp(`^https://api\\.github\\.com/repos/${sourceRepositoryFullName.replace("/", "\\/")}/issues/(\\d+)$`).exec(issueApi)
+    : null;
+  const actualIssueNumber = normalized ? Number(normalized[1]) : apiMatch ? Number(apiMatch[1]) : null;
   if (!Number.isInteger(sourceIssueNumber) || sourceIssueNumber < 1 ||
-      Number(sourceComment.issue_number) !== sourceIssueNumber ||
-      sourceComment.issue_url !== `https://api.github.com/repos/${sourceRepositoryFullName}/issues/${sourceIssueNumber}`) {
+      actualIssueNumber !== sourceIssueNumber ||
+      (normalized && normalized[2] !== String(sourceComment.id))) {
     throw new Error("source executor comment is not bound to its exact GitHub issue");
   }
   if (typeof expectedAuthor !== "string" || !expectedAuthor.trim()) throw new Error("expected publisher GitHub author is required");
+  if (sourceComment.user?.login !== expectedAuthor) throw new Error("source executor comment has an unrelated GitHub author");
+  const receipt = parseG34ReceiptFields(sourceComment);
+  const expectedMarker = eventKind === "WORKER_STARTED"
+    ? "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1"
+    : eventKind === "WORKER_TERMINAL_RESULT" ? "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1" : null;
+  const receiptMatches = expectedMarker && receipt.marker === expectedMarker &&
+    receipt.card_comment_id === String(binding?.card_comment_id) &&
+    receipt.binding_comment_id === String(binding?.binding_comment_id) &&
+    receipt.dispatch_comment_id === String(binding?.dispatch_comment_id) &&
+    receipt.control_generation === String(authority?.control_generation) &&
+    receipt.control_conversation_id === String(authority?.control_conversation_id) &&
+    receipt.repository === sourceRepositoryFullName &&
+    receipt.agent_name === binding?.agent_name &&
+    receipt.agent_session === binding?.agent_session &&
+    receipt.pane === binding?.pane &&
+    receipt.terminal === binding?.terminal &&
+    receipt.cwd === binding?.cwd &&
+    receipt.model === binding?.model &&
+    receipt.reasoning_effort === binding?.reasoning_effort &&
+    receipt.state === state && receipt.branch === branch &&
+    receipt.base_sha === baseSha && receipt.head_sha === headSha &&
+    receipt.user_relay_count === "0";
+  if (!receiptMatches) throw new Error("upstream executor receipt does not match its exact card, binding, state, executor, or branch tuple");
+  if (eventKind === "WORKER_TERMINAL_RESULT" &&
+      (!binding?.start_comment_id || receipt.worker_start_comment_id !== String(binding.start_comment_id))) {
+    throw new Error("terminal result is not linked to its exact Worker start receipt");
+  }
   const sourceCommentId = String(sourceComment.id);
   const eventId = sha256Hex(JSON.stringify([authority?.control_generation, eventKind, sourceCommentId]));
   const parsed = sourceEventSchema.parse({
@@ -54,6 +104,7 @@ export function createSourceEvent({ sourceComment, sourceIssueNumber, sourceRepo
     base_sha: baseSha,
     head_sha: headSha,
     ...(terminalCommentId ? { terminal_comment_id: String(terminalCommentId) } : {}),
+    ...(eventKind === "WORKER_TERMINAL_RESULT" ? { worker_start_comment_id: String(binding.start_comment_id) } : {}),
     ...(reviewCommentId ? { review_comment_id: String(reviewCommentId) } : {}),
     user_relay_count: 0,
   });
@@ -74,10 +125,11 @@ async function readLedger(file) {
     if (!ledger || Array.isArray(ledger) || typeof ledger !== "object") throw new Error("invalid G34 event ledger");
     for (const [eventId, entry] of Object.entries(ledger)) {
       if (!/^[0-9a-f]{64}$/.test(eventId) || !entry || typeof entry !== "object" ||
-          !["SEEN", "CLAIMED", "SEND_ATTEMPTED", "UNCERTAIN_SEND", "DELIVERED", "CONSUMED"].includes(entry.state) ||
+          !["SEEN", "CLAIMED", "SEND_ATTEMPTED", "UNCERTAIN_SEND", "DELIVERED", "SUCCESSOR_SEND_ATTEMPTED", "SUCCESSOR_DELIVERY_UNCERTAIN", "CONSUMED"].includes(entry.state) ||
           !/^[1-9][0-9]*$/.test(String(entry.source_comment_id ?? "")) ||
           (["DELIVERED", "CONSUMED"].includes(entry.state) && !/^[1-9][0-9]*$/.test(String(entry.comment_id ?? ""))) ||
-          (entry.state === "CONSUMED" && !/^[1-9][0-9]*$/.test(String(entry.control_comment_id ?? "")))) {
+          (entry.state === "CONSUMED" && (!/^[1-9][0-9]*$/.test(String(entry.control_comment_id ?? "")) ||
+            !/^[1-9][0-9]*$/.test(String(entry.successor_delivery_receipt_id ?? ""))))) {
         throw new Error("invalid G34 event ledger entry");
       }
     }
@@ -107,8 +159,8 @@ async function verifyComment(event, issueNumber, repositoryFullName, metadata, g
   }
   const exact = await github.getIssueComment(String(metadata.id));
   if (
-    !exact || String(exact.id) !== String(metadata.id) || Number(exact.issue_number) !== issueNumber ||
-    exact.issue_url !== `https://api.github.com/repos/${repositoryFullName}/issues/${issueNumber}` ||
+    !exact || String(exact.id) !== String(metadata.id) ||
+    commentIssueNumber(exact, repositoryFullName) !== issueNumber ||
     exact.user?.login !== event.expected_author || exact.body !== event.body ||
     !exact.body.includes(`event_id=${event.event_id}`) ||
     !exact.body.includes(`source_comment_id=${event.source_comment_id}`) ||
@@ -195,10 +247,55 @@ export async function markSourceEventConsumed({ eventId, sourceCommentId, contro
     throw new Error("cannot consume an unbound source event");
   }
   if (prior.state === "CONSUMED") return { state: "NO_OP" };
-  if (prior.state !== "DELIVERED" || !/^[1-9][0-9]*$/.test(String(controlCommentId ?? ""))) {
-    throw new Error("cannot consume an undelivered event or unbound Control ACK");
+  if (prior.state !== "SUCCESSOR_SEND_ATTEMPTED" && prior.state !== "SUCCESSOR_DELIVERY_UNCERTAIN") {
+    throw new Error("cannot consume before a recorded successor delivery attempt");
   }
-  ledger[eventId] = { ...prior, state: "CONSUMED", control_comment_id: String(controlCommentId) };
-  await saveLedger(file, ledger);
-  return { state: "CONSUMED" };
+  if (!/^[1-9][0-9]*$/.test(String(controlCommentId ?? "")) ||
+      prior.control_comment_id !== String(controlCommentId)) {
+    throw new Error("cannot consume with an unbound Control acceptance");
+  }
+  throw new Error("cannot consume without an exact successor delivery confirmation receipt");
 }
+
+export async function beginSuccessorDelivery({ eventId, sourceCommentId, eventCommentId, controlCommentId, successorCommentId, runtimeRoot }) {
+  const file = ledgerPathFor(runtimeRoot);
+  const ledger = await readLedger(file);
+  const prior = ledger[eventId];
+  if (!prior || prior.source_comment_id !== String(sourceCommentId) ||
+      prior.comment_id !== String(eventCommentId)) throw new Error("cannot deliver an unbound source event successor");
+  if (prior.state === "CONSUMED") return { state: "NO_OP" };
+  if (["SUCCESSOR_SEND_ATTEMPTED", "SUCCESSOR_DELIVERY_UNCERTAIN"].includes(prior.state)) {
+    return { state: "DELIVERY_UNCERTAIN" };
+  }
+  if (prior.state !== "DELIVERED") throw new Error("cannot deliver a successor for an undelivered source event");
+  ledger[eventId] = {
+    ...prior,
+    state: "SUCCESSOR_SEND_ATTEMPTED",
+    control_comment_id: String(controlCommentId),
+    successor_comment_id: String(successorCommentId),
+  };
+  await saveLedger(file, ledger);
+  return { state: "READY_TO_DELIVER" };
+}
+
+export async function recordSuccessorDelivery({ eventId, receiptId, uncertain, runtimeRoot }) {
+  const file = ledgerPathFor(runtimeRoot);
+  const ledger = await readLedger(file);
+  const prior = ledger[eventId];
+  if (!prior || !["SUCCESSOR_SEND_ATTEMPTED", "SUCCESSOR_DELIVERY_UNCERTAIN"].includes(prior.state)) {
+    throw new Error("no pending successor delivery attempt to reconcile");
+  }
+  if (uncertain || !/^[1-9][0-9]*$/.test(String(receiptId ?? ""))) {
+    ledger[eventId] = { ...prior, state: "SUCCESSOR_DELIVERY_UNCERTAIN" };
+    await saveLedger(file, ledger);
+    return { state: "DELIVERY_UNCERTAIN" };
+  }
+  ledger[eventId] = {
+    ...prior,
+    state: "CONSUMED",
+    successor_delivery_receipt_id: String(receiptId),
+  };
+  await saveLedger(file, ledger);
+  return { state: "CONSUMED", receipt_id: String(receiptId) };
+}
+

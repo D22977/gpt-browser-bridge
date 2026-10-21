@@ -29,6 +29,7 @@ export const sourceEventSchema = z.object({
   base_sha: z.string().regex(/^[0-9a-f]{40}$/),
   head_sha: z.string().regex(/^[0-9a-f]{40}$/),
   terminal_comment_id: commentId.optional(),
+  worker_start_comment_id: commentId.optional(),
   review_comment_id: commentId.optional(),
   user_relay_count: z.literal(0),
 }).strict().superRefine((event, ctx) => {
@@ -42,16 +43,25 @@ export function parseG34ReceiptFields(record) {
     throw new Error("G34 receipt body is required");
   }
   const fields = {};
+  let section = null;
   for (const [index, line] of record.body.split(/\r?\n/).entries()) {
-    if (index === 0 && /^[A-Z][A-Z0-9_]*_V[0-9]+$/.test(line.trim())) {
-      fields.marker = line.trim();
+    const trimmed = line.trim();
+    if (index === 0 && /^[A-Z][A-Z0-9_]*_V[0-9]+$/.test(trimmed)) {
+      fields.marker = trimmed;
       continue;
     }
-    const match = /^([a-z][a-z0-9_]*):\s*(.*?)\s*$/i.exec(line);
+    if (/^[A-Z][A-Z0-9_]+$/.test(trimmed)) {
+      section = trimmed.toLowerCase();
+      if (Object.hasOwn(fields, section)) throw new Error(`duplicate G34 receipt section: ${section}`);
+      fields[section] = {};
+      continue;
+    }
+    const match = /^([a-z][a-z0-9_ ]*):\s*(.*?)\s*$/i.exec(line);
     if (!match) continue;
-    const key = match[1].toLowerCase();
-    if (Object.hasOwn(fields, key)) throw new Error(`duplicate G34 receipt field: ${key}`);
-    fields[key] = match[2];
+    const key = match[1].trim().toLowerCase();
+    const target = section ? fields[section] : fields;
+    if (Object.hasOwn(target, key)) throw new Error(`duplicate G34 receipt field: ${key}`);
+    target[key] = match[2];
   }
   return fields;
 }
@@ -60,10 +70,24 @@ function requireRecord(record, label, issueNumber) {
   if (!record || !/^[1-9][0-9]*$/.test(String(record.id ?? ""))) {
     throw new Error(`${label} exact GitHub comment record is required`);
   }
-  if (Number(record.issue_number) !== issueNumber || String(record.pointer_id) !== String(record.id)) {
-    throw new Error(`${label} is not the exact current pointer read-back`);
+  const id = String(record.id);
+  const normalizedUrl = record.url;
+  const issueUrl = record.issue_url;
+  const normalizedMatch = typeof normalizedUrl === "string"
+    ? /^https:\/\/github\.com\/D22977\/gpt-browser-bridge\/issues\/(\d+)#issuecomment-(\d+)$/.exec(normalizedUrl)
+    : null;
+  const apiMatch = typeof issueUrl === "string"
+    ? /^https:\/\/api\.github\.com\/repos\/D22977\/gpt-browser-bridge\/issues\/(\d+)$/.exec(issueUrl)
+    : null;
+  const issueFromUrl = normalizedMatch ? Number(normalizedMatch[1]) : apiMatch ? Number(apiMatch[1]) : null;
+  const idFromUrl = normalizedMatch?.[2];
+  if (issueFromUrl !== issueNumber || (idFromUrl && idFromUrl !== id)) {
+    throw new Error(`${label} is not the exact current GitHub comment read-back`);
   }
-  return parseG34ReceiptFields(record);
+  if (!normalizedMatch && (!apiMatch || !/^[1-9][0-9]*$/.test(id))) {
+    throw new Error(`${label} exact GitHub comment URL is required`);
+  }
+  return { ...parseG34ReceiptFields(record), _record_id: id, _author: record.user?.login };
 }
 
 export function parseActiveControlAuthority({ switchReceipt, index43, index81, rehydrationAck }) {
@@ -71,28 +95,61 @@ export function parseActiveControlAuthority({ switchReceipt, index43, index81, r
   const indexA = requireRecord(index43, "#43 index", 43);
   const indexB = requireRecord(index81, "#81 index", 81);
   const ack = requireRecord(rehydrationAck, "rehydration ACK", 88);
-  const activeId = switched.conversation_id;
+  const next = switched.new_control;
+  const old = switched.old_control;
+  const activeId = next?.conversation_id;
   if (
     switched.marker !== "CONTROL_GENERATION_ATOMIC_SWITCH_V1" ||
-    switched.transition !== "NEW_CONTROL" || switched.generation !== "034" ||
-    switched.status_after !== "ACTIVE" || !controlId.safeParse(activeId).success
+    switched.state !== "ACTIVE_SWITCH_COMMITTED_READBACK_REQUIRED" ||
+    old?.generation !== "033" || old.status_after !== "RETIRED" ||
+    next?.generation !== "034" || next.status_after !== "ACTIVE" ||
+    next.single_active_control !== "true" ||
+    !controlId.safeParse(activeId).success
   ) throw new Error("G34 active Control switch is invalid");
 
-  for (const [label, fields] of [["#43", indexA], ["#81", indexB]]) {
-    if (fields.generation !== "034" || fields.status !== "ACTIVE" ||
-        fields.active_control_id !== activeId || fields.single_active_control !== "true") {
-      throw new Error(`${label} current index does not confirm the sole active G34 Control`);
-    }
+  if (switched._author !== "D22977" || indexA._author !== switched._author ||
+      indexB._author !== switched._author || ack._author !== switched._author) {
+    throw new Error("G34 authority records are not authenticated Control publications");
   }
-  if (String(index43.id) === String(index81.id)) throw new Error("current index records must be distinct");
+  const generation = /^034 ACTIVE$/.test(indexA.control_generation ?? "") &&
+    /^034 ACTIVE$/.test(indexB.control_generation ?? "");
+  const switchPointer = new RegExp(`^#88/${switchReceipt.id}\\b`).test(
+    indexA.owner_restoration_authority_and_arch_reconciliation?.["active g34 switch"] ?? "",
+  );
+  const currentIndexPointer = new RegExp(`^#43/${index43.id}\\b`).test(indexB.current_control ?? "");
+  if (!generation || !switchPointer || !currentIndexPointer ||
+      indexB.active_control_id !== activeId || indexB.single_active_control !== "true" ||
+      String(index43.id) === String(index81.id)) {
+    throw new Error("current indexes do not confirm the exact sole active G34 Control");
+  }
+  const activeState = ack.active_state;
   if (
-    ack.marker !== "ACTIVE_CONTROL_REHYDRATION_ACK_V1" || ack.generation !== "034" ||
-    ack.status !== "ACTIVE" || ack.active_control_id !== activeId || ack.conversation_id !== activeId
+    ack.marker !== "ACTIVE_CONTROL_REHYDRATION_ACK_V1" ||
+    ack.state !== "ACTIVE_REHYDRATED_ACKNOWLEDGED" || ack.generation !== "034" ||
+    ack.conversation_id !== activeId ||
+    activeState?.sole_active_control_generation !== "034" ||
+    activeState.sole_active_control_identity_match !== "true" ||
+    activeState.single_active_control !== "true" ||
+    activeState.state_pointer_consistency !== "matched" ||
+    !new RegExp(`^#88/${switchReceipt.id}\\b`).test(ack.request_and_switch?.atomic_switch ?? "")
   ) throw new Error("G34 active Control rehydration ACK is invalid");
 
-  return {
+  const authority = {
     control_generation: "034",
     active_control_id: activeId,
     control_conversation_id: activeId,
+    publisher_login: switched._author,
+    record_ids: {
+      switch_comment_id: switched._record_id,
+      index43_comment_id: indexA._record_id,
+      index81_comment_id: indexB._record_id,
+      rehydration_ack_comment_id: ack._record_id,
+    },
   };
+  Object.defineProperty(authority, "source_records", {
+    value: { switchReceipt, index43, index81, rehydrationAck },
+    enumerable: false,
+  });
+  return authority;
 }
+
