@@ -255,4 +255,3 @@ export async function consumeDeliveredControlSuccessor({ event, authority, contr
   const saved = await recordSuccessorDelivery({ eventId: event.event_id, receiptId: result.receipt_id, runtimeRoot });
   return { ...saved, successor };
 }
-

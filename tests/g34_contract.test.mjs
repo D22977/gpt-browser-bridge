@@ -115,4 +115,3 @@ test("authority rejects unsectioned synthetic switch records", () => {
   };
   assert.throws(() => parseActiveControlAuthority(synthetic));
 });
-

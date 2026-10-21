@@ -322,4 +322,3 @@ test("a second delivery call without reconciliation never sends again", async ()
   assert.equal(result.state, "DELIVERY_UNCERTAIN");
   assert.equal(deliveries, 0);
 });
-

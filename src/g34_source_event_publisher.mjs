@@ -298,4 +298,3 @@ export async function recordSuccessorDelivery({ eventId, receiptId, uncertain, r
   await saveLedger(file, ledger);
   return { state: "CONSUMED", receipt_id: String(receiptId) };
 }
-

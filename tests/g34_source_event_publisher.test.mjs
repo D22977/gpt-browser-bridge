@@ -210,4 +210,3 @@ test("corrupt ledger fails closed before a GitHub create call", async () => {
   await assert.rejects(() => publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github }), /cannot read G34 event ledger/);
   assert.equal(github.calls.create, 0);
 });
-

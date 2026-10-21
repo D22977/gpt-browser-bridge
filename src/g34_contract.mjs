@@ -152,4 +152,3 @@ export function parseActiveControlAuthority({ switchReceipt, index43, index81, r
   });
   return authority;
 }
-
