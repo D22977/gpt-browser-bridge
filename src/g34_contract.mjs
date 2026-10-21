@@ -30,6 +30,7 @@ export const sourceEventSchema = z.object({
   branch: fieldText,
   base_sha: z.string().regex(/^[0-9a-f]{40}$/),
   head_sha: z.string().regex(/^[0-9a-f]{40}$/),
+  tree_sha: z.string().regex(/^[0-9a-f]{40}$/),
   terminal_comment_id: commentId.optional(),
   worker_start_comment_id: commentId.optional(),
   review_comment_id: commentId.optional(),

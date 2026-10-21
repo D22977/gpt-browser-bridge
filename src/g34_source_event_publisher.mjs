@@ -28,7 +28,7 @@ const eventFields = [
   "marker", "event_id", "control_generation", "active_control_id", "control_conversation_id",
   "event_kind", "source_comment_id", "source_body_sha256", "card_comment_id",
   "claim_comment_id", "acceptance_comment_id", "binding_comment_id", "dispatch_comment_id", "agent_name", "agent_session", "pane",
-  "terminal", "cwd", "model", "reasoning_effort", "state", "branch", "base_sha", "head_sha",
+  "terminal", "cwd", "model", "reasoning_effort", "state", "branch", "base_sha", "head_sha", "tree_sha",
   "terminal_comment_id", "worker_start_comment_id", "review_comment_id", "user_relay_count",
 ];
 
@@ -62,6 +62,13 @@ export function createSourceEvent({ sourceComment, sourceIssueNumber, sourceRepo
     ? "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1"
     : eventKind === "WORKER_TERMINAL_RESULT" ? "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1" : null;
   const receiptHead = receipt.head_sha ?? receipt.remote_commit ?? receipt.local_tested_commit;
+  const receiptTreeKeys = eventKind === "WORKER_STARTED"
+    ? ["base_tree_sha", "tree_sha"]
+    : ["tree_sha", "remote_api_tree", "remote_tree", "local_tested_tree"];
+  const declaredTrees = receiptTreeKeys.map((key) => receipt[key]).filter((value) => value !== undefined);
+  const receiptTree = declaredTrees[0];
+  const exactTree = /^[0-9a-f]{40}$/.test(String(receiptTree ?? "")) &&
+    declaredTrees.every((value) => value === receiptTree);
   const optionalTerminalBindingsMatch = [
     ["claim_comment_id", binding?.claim_comment_id],
     ["acceptance_comment_id", binding?.acceptance_comment_id],
@@ -70,7 +77,7 @@ export function createSourceEvent({ sourceComment, sourceIssueNumber, sourceRepo
     ["executor_identity", binding?.executor_identity],
     ["user_relay_count", "0"],
   ].every(([key, expected]) => receipt[key] === undefined || receipt[key] === String(expected));
-  const commonReceiptMatches = expectedMarker && receipt.marker === expectedMarker &&
+  const commonReceiptMatches = expectedMarker && exactTree && receipt.marker === expectedMarker &&
     receipt.state === state && receipt.branch === branch &&
     receipt.base_sha === baseSha && receiptHead === headSha &&
     (eventKind === "WORKER_STARTED"
@@ -126,6 +133,7 @@ export function createSourceEvent({ sourceComment, sourceIssueNumber, sourceRepo
     branch,
     base_sha: baseSha,
     head_sha: headSha,
+    tree_sha: receiptTree,
     ...(terminalCommentId ? { terminal_comment_id: String(terminalCommentId) } : {}),
     ...(eventKind === "WORKER_TERMINAL_RESULT" ? { worker_start_comment_id: String(binding.start_comment_id) } : {}),
     ...(reviewCommentId ? { review_comment_id: String(reviewCommentId) } : {}),
@@ -343,10 +351,12 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
             "event_id", "control_generation", "active_control_id", "control_conversation_id", "event_kind",
             "source_comment_id", "source_body_sha256", "card_comment_id", "claim_comment_id",
             "acceptance_comment_id", "binding_comment_id", "dispatch_comment_id", "agent_name", "agent_session",
-            "pane", "terminal", "cwd", "model", "reasoning_effort", "state", "branch", "base_sha", "head_sha",
+            "pane", "terminal", "cwd", "model", "reasoning_effort", "state", "branch", "base_sha", "head_sha", "tree_sha",
             "terminal_comment_id", "worker_start_comment_id", "review_comment_id", "user_relay_count",
           ];
-          const bodyMatchesEvent = event.body?.startsWith("marker=GITHUB_SOURCE_EVENT_V1\n") &&
+          const bodyMatchesEvent = /^[0-9a-f]{40}$/.test(String(event.tree_sha ?? "")) &&
+            event.body?.startsWith("marker=GITHUB_SOURCE_EVENT_V1\n") &&
+            bodyFields.get("tree_sha") === event.tree_sha &&
             boundFields.every((key) => event[key] === undefined || bodyFields.get(key) === String(event[key]));
           if (!eventCommentFirst || !eventCommentSecond || String(eventCommentFirst.id) !== eventCommentId ||
               String(eventCommentSecond.id) !== eventCommentId || eventCommentFirst.url !== sourceUrl ||
@@ -457,10 +467,16 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 control.successor_agent_session === successor?.agent_session &&
                 control.successor_pane === successor?.pane &&
                 control.successor_terminal === successor?.terminal &&
+                dispatch?.marker === "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" &&
+                dispatch.state === "SAME_WORKER_REASSIGNED_FOR_REVIEW_FIXES" &&
+                dispatch.recorded_by_role === "LOCAL_CONTROL_TOWER" &&
+                typeof dispatch.control_task_identity === "string" && dispatch.control_task_identity.trim() !== "" &&
+                executorTaskIdentity(dispatch.executor_identity) === event.agent_name &&
                 Number(cardIssue?.number) === Number(control.independent_review_card_issue_number) &&
                 cardFields.candidate_repository === event.source_repository_full_name &&
                 cardFields.candidate_branch === event.branch &&
                 cardFields.candidate_exact_head_sha === event.head_sha &&
+                cardFields.candidate_tree_sha === event.tree_sha &&
                 adjudication?.marker === "ACTIVE_CONTROL_ADJUDICATION_V1" && adjudication.state === "ACCEPTED" &&
                 adjudication.source_event_id === eventId && adjudication.source_event_comment_id === String(event?.comment_id ?? "") &&
                 review.marker === "GBB_G34_FRESH_INDEPENDENT_REVIEW_RESULT_V1" && review.decision === "APPROVE" &&
@@ -471,6 +487,7 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 reviewerBinding?.marker === "GBB_G34_REVIEWER_BINDING_V1" && reviewerBinding.state === "REVIEWER_ASSIGNED" &&
                 reviewerBinding.recorded_by_role === "LOCAL_CONTROL_TOWER" &&
                 typeof reviewerBinding.control_task_identity === "string" && reviewerBinding.control_task_identity.trim() !== "" &&
+                reviewerBinding.control_task_identity === dispatch.control_task_identity &&
                 !controlIdentityIsWorker &&
                 reviewerBinding.worker_task_identity === event.agent_name &&
                 reviewerBinding.reviewer_task_identity === review.reviewer_task_identity &&
@@ -486,7 +503,7 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 reviewerBinding.candidate_exact_head_sha === event.head_sha &&
                 reviewerBinding.candidate_tree_sha === cardFields.candidate_tree_sha &&
                 reviewerBinding.card_issue_number === String(cardIssue?.number) &&
-                (event.tree_sha === undefined || event.tree_sha === cardFields.candidate_tree_sha) &&
+                reviewerBinding.candidate_tree_sha === event.tree_sha &&
                 Number(reviewerBinding.id) < Number(review.id) &&
                 reviewerBinding.reviewer_task_identity !== event.agent_name &&
                 reviewerBinding.reviewer_task_identity !== event.agent_session &&

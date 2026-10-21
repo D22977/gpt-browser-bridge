@@ -91,6 +91,7 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
   const exactReviewCard = await github.getIssue(Number(receipt.independent_review_card_issue_number));
   const reviewCardFields = reviewCard ? parseG34ReceiptFields(reviewCard) : {};
   const reviewerBinding = await readLinkedReceipt(reviewCardFields.reviewer_binding_comment_id, reviewCardNumber);
+  const controlAssignment = await readLinkedReceipt(event.dispatch_comment_id, 211);
   const acceptedHead = receipt.reviewed_exact_head_sha ?? receipt.reviewed_head_sha;
   const reviewIdentity = review.reviewer_task_identity;
   const workerExecutorIdentity = event.executor_identity ?? `collaboration task ${event.agent_name}`;
@@ -101,6 +102,8 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
   const currentControlPointers = liveAuthority.record_ids;
   if (
     !event || !authority || event.state !== "DELIVERED" ||
+    !/^[0-9a-f]{40}$/.test(String(event.tree_sha ?? "")) ||
+    !event.body.includes(`tree_sha=${event.tree_sha}`) ||
     authority.control_generation !== "034" ||
     !nonEmpty(authority.active_control_id) ||
     authority.active_control_id !== authority.control_conversation_id ||
@@ -113,6 +116,12 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     receipt.source_event_id !== event.event_id ||
     receipt.source_event_comment_id !== String(event.comment_id ?? "") ||
     receipt.worker_receipt_comment_id !== String(event.source_comment_id ?? "") ||
+    controlAssignment.marker !== "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" ||
+    controlAssignment.state !== "SAME_WORKER_REASSIGNED_FOR_REVIEW_FIXES" ||
+    controlAssignment.recorded_by_role !== "LOCAL_CONTROL_TOWER" ||
+    !nonEmpty(controlAssignment.control_task_identity) ||
+    executorTaskIdentity(controlAssignment.executor_identity) !== event.agent_name ||
+    controlAssignment.branch !== event.branch ||
     receipt.current_switch_comment_id !== currentControlPointers?.switch_comment_id ||
     receipt.current_index43_comment_id !== currentControlPointers?.index43_comment_id ||
     receipt.current_index81_comment_id !== currentControlPointers?.index81_comment_id ||
@@ -141,6 +150,7 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     !nonEmpty(reviewerBinding.control_task_identity) ||
     controlIdentityIsWorker ||
     reviewerBinding.worker_task_identity !== event.agent_name ||
+    reviewerBinding.control_task_identity !== controlAssignment.control_task_identity ||
     reviewerBinding.reviewer_task_identity === reviewerBinding.control_task_identity ||
     reviewerBinding.reviewer_task_identity === event.agent_name ||
     reviewerBinding.reviewer_task_identity === event.agent_session ||
@@ -152,6 +162,7 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     reviewerBinding.candidate_branch !== event.branch ||
     reviewerBinding.candidate_exact_head_sha !== event.head_sha ||
     reviewerBinding.candidate_tree_sha !== reviewCardFields.candidate_tree_sha ||
+    reviewCardFields.candidate_tree_sha !== event.tree_sha ||
     Number(reviewerBinding.id) >= Number(review.id) ||
     review.reviewed_repository !== "D22977/gpt-browser-bridge" ||
     review.reviewed_branch !== event.branch ||
@@ -395,7 +406,21 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
 }
 
 export async function consumeDeliveredControlSuccessor({ event, authority, controlReceipt, runtimeRoot, github, deliver, reconcile }) {
-  const successor = await authorizeControlSuccessor({ event, authority, controlReceipt, github });
+  let successor;
+  try {
+    successor = await authorizeControlSuccessor({ event, authority, controlReceipt, github });
+  } catch (error) {
+    const prior = await beginSuccessorDelivery({
+      eventId: event.event_id,
+      sourceCommentId: event.source_comment_id,
+      eventCommentId: event.comment_id,
+      controlCommentId: controlReceipt?.id,
+      successorCommentId: controlReceipt?.successor_comment_id,
+      runtimeRoot,
+    });
+    if (prior.state === "DELIVERY_UNCERTAIN") return { state: "DELIVERY_UNCERTAIN" };
+    throw error;
+  }
   const opened = await beginSuccessorDelivery({
     eventId: event.event_id,
     sourceCommentId: event.source_comment_id,
