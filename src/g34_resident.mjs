@@ -78,13 +78,15 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     }
     return { ...parseG34ReceiptFields(exact), id: String(exact.id) };
   };
-  const review = await readLinkedReceipt(receipt.independent_review_comment_id, Number(receipt.independent_review_card_issue_number));
-  const reviewerBinding = await readLinkedReceipt(receipt.independent_reviewer_binding_comment_id, Number(receipt.independent_review_card_issue_number));
+  const reviewCardNumber = Number(receipt.independent_review_card_issue_number);
+  const review = await readLinkedReceipt(receipt.independent_review_comment_id, reviewCardNumber);
   const adjudication = await readLinkedReceipt(receipt.adjudication_comment_id, 211);
   if (typeof github.getIssue !== "function") throw new Error("exact independent review card read is required");
   const reviewCard = await github.getIssue(Number(receipt.independent_review_card_issue_number));
   const exactReviewCard = await github.getIssue(Number(receipt.independent_review_card_issue_number));
   const reviewCardFields = reviewCard ? parseG34ReceiptFields(reviewCard) : {};
+  const acceptedHead = receipt.reviewed_exact_head_sha ?? receipt.reviewed_head_sha;
+  const reviewIdentity = review.reviewer_task_identity;
   const currentControlPointers = liveAuthority.record_ids;
   if (
     !event || !authority || event.state !== "DELIVERED" ||
@@ -107,39 +109,30 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     Number(reviewCard.number) !== Number(receipt.independent_review_card_issue_number) ||
     !exactReviewCard || Number(exactReviewCard.number) !== Number(reviewCard.number) ||
     exactReviewCard.state !== reviewCard.state || exactReviewCard.body !== reviewCard.body ||
-    !String(reviewCard.body ?? "").startsWith("GBB_G34_FRESH_REVIEW_CARD_V1") ||
-    reviewCardFields.reviewed_head_sha !== receipt.reviewed_head_sha ||
-    reviewCardFields.reviewer_binding_comment_id !== reviewerBinding.id ||
-    reviewCardFields.reviewer_identity !== reviewerBinding.reviewer_identity ||
-    !/INDEPENDENT.*REVIEW/i.test(reviewCardFields.role ?? "") ||
-    !nonEmpty(reviewCardFields.reviewer_executor_identity) ||
-    reviewCardFields.reviewer_executor_identity !== reviewerBinding.executor_identity ||
-    receipt.reviewed_head_sha !== event.head_sha ||
-    review.marker !== "GBB_G34_INDEPENDENT_REVIEW_RESULT_V1" ||
+    !String(reviewCard.body ?? "").startsWith("GBB_G34_FRESH_REVIEW_REMEDIATION_WORK_ORDER_V1") ||
+    reviewCardFields.candidate_repository !== "D22977/gpt-browser-bridge" ||
+    reviewCardFields.candidate_branch !== event.branch ||
+    reviewCardFields.candidate_exact_head_sha !== event.head_sha ||
+    !/^[0-9a-f]{40}$/.test(String(reviewCardFields.candidate_tree_sha ?? "")) ||
+    (event.tree_sha !== undefined && reviewCardFields.candidate_tree_sha !== event.tree_sha) ||
+    acceptedHead !== event.head_sha ||
+    review.marker !== "GBB_G34_FRESH_INDEPENDENT_REVIEW_RESULT_V1" ||
     review.decision !== "PASS" || review.state !== "REVIEW_TERMINAL" ||
-    !/INDEPENDENT.*REVIEW/i.test(review.role ?? "") ||
-    review.review_card_issue_number !== String(reviewCard.number) ||
-    review.reviewed_head_sha !== event.head_sha ||
-    review.reviewer_binding_comment_id !== reviewerBinding.id ||
-    review.executor_identity !== reviewerBinding.executor_identity ||
-    reviewerBinding.reviewer_identity !== reviewerBinding.executor_identity ||
-    reviewerBinding.marker !== "GBB_G34_INDEPENDENT_REVIEWER_BINDING_V1" ||
-    reviewerBinding.card_issue_number !== String(reviewCard.number) ||
-    !/INDEPENDENT.*REVIEW/i.test(reviewerBinding.role ?? "") ||
-    reviewerBinding.reviewer_identity !== review.reviewer_identity ||
-    reviewerBinding.reviewer_identity === event.agent_session || reviewerBinding.executor_identity === "D22977" ||
-    !nonEmpty(reviewerBinding.reviewer_identity) || reviewerBinding.reviewer_identity === "D22977" ||
-    !/^gpt-6-sol$/i.test(reviewerBinding.model ?? "") || reviewerBinding.reasoning_effort !== "high" ||
+    review.card !== `#${reviewCard.number}` ||
+    review.reviewed_repository !== "D22977/gpt-browser-bridge" ||
+    review.reviewed_branch !== event.branch ||
+    review.reviewed_exact_head !== event.head_sha ||
+    !/^fresh independent GPT-6 Sol High read-only Reviewer$/i.test(review.role ?? "") ||
+    !nonEmpty(reviewIdentity) || reviewIdentity === event.agent_name ||
+    reviewIdentity === event.agent_session || reviewIdentity === receipt.executor_identity ||
     receipt.independent_review_decision !== review.decision ||
     adjudication.marker !== "ACTIVE_CONTROL_ADJUDICATION_V1" ||
     adjudication.state !== "ACCEPTED" ||
     adjudication.recorded_by_role !== "ACTIVE_CONTROL" ||
     adjudication.active_control_id !== liveAuthority.active_control_id ||
     adjudication.source_event_id !== event.event_id ||
-    adjudication.review_comment_id !== review.id ||
-    adjudication.review_card_issue_number !== String(reviewCard.number) ||
-    adjudication.reviewed_head_sha !== event.head_sha ||
-    Number(event.comment_id) >= Number(review.id) || Number(review.id) >= Number(adjudication.id) ||
+    adjudication.source_event_comment_id !== String(event.comment_id) ||
+    Number(event.comment_id) >= Number(adjudication.id) || Number(adjudication.id) >= Number(review.id) ||
     Number(adjudication.id) >= Number(receipt.id) ||
     receipt.adjudication_state !== adjudication.state ||
     receipt.semantic_sequence !== "WORKER_RECEIPT_SOURCE_EVENT_ACTIVE_CONTROL_ADJUDICATION_INDEPENDENT_REVIEW_CURRENT_CONTROL_ACK" ||
@@ -148,16 +141,18 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
 
   const successor = {
     comment_id: receipt.successor_comment_id,
+    agent_name: receipt.successor_agent_name,
     agent_session: receipt.successor_agent_session,
     pane: receipt.successor_pane,
     terminal: receipt.successor_terminal,
   };
   if (!successor || !/^[1-9][0-9]*$/.test(String(successor.comment_id ?? "")) ||
-      ![successor.agent_session, successor.pane, successor.terminal].every(nonEmpty)) {
+      ![successor.agent_name, successor.agent_session, successor.pane, successor.terminal].every(nonEmpty)) {
     throw new Error("Control successor binding is incomplete");
   }
   return {
     comment_id: String(successor.comment_id),
+    agent_name: successor.agent_name,
     agent_session: successor.agent_session,
     pane: successor.pane,
     terminal: successor.terminal,
@@ -180,7 +175,6 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
   }
   const activeAuthority = parseActiveControlAuthority(currentAuthority);
   const results = [];
-  const readBack = new Map();
   const linkedCache = new Map();
   const readLinkedWorkerRecord = async (id) => {
     const key = String(id ?? "");
@@ -197,7 +191,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
     if (!exact || String(exact.id) !== key || exact.url !== first.url || exact.body !== first.body || exact.user?.login !== first.user.login) {
       throw new Error("worker receipt chain exact reread mismatch");
     }
-    const fields = parseG34ReceiptFields(exact);
+    const fields = { ...parseG34ReceiptFields(exact), id: String(exact.id) };
     linkedCache.set(key, fields);
     return fields;
   };
@@ -210,7 +204,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
         sourceComment.body !== listedComment.body || sourceComment.user?.login !== listedComment.user?.login) {
       throw new Error("SOURCE_RECEIPT_READBACK_MISMATCH: exact upstream comment changed");
     }
-    const fields = parseG34ReceiptFields(sourceComment);
+    const fields = { ...parseG34ReceiptFields(sourceComment), id: String(sourceComment.id) };
     const eventKind = fields.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1"
       ? "WORKER_STARTED"
       : fields.marker === "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1" ? "WORKER_TERMINAL_RESULT" : null;
@@ -222,50 +216,102 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       readLinkedWorkerRecord(fields.dispatch_comment_id),
     ]);
     const routeBinding = route.candidate_binding;
-    if (String(fields.card_comment_id) !== String(issueNumber) ||
-        fields.claim_comment_id !== String(binding?.claim_comment_id) ||
-        fields.acceptance_comment_id !== String(binding?.acceptance_comment_id) ||
-        fields.binding_comment_id !== String(binding?.binding_comment_id) ||
-        fields.dispatch_comment_id !== String(binding?.dispatch_comment_id) ||
-        claim.marker !== "CLAIM_REQUESTED_V1" || claim.state !== "CLAIM_REQUESTED" ||
-        accepted.marker !== "CLAIM_ACCEPTED_V1" || accepted.state !== "CLAIM_ACCEPTED" ||
-        !String(accepted.accepted_claim ?? "").startsWith(`#${issueNumber}/${fields.claim_comment_id}`) ||
-        claim.work_order !== `D22977/gpt-browser-bridge#${issueNumber}` ||
-        accepted.work_order !== `D22977/gpt-browser-bridge#${issueNumber}` ||
-        claim.role !== "Worker" || claim.model_effort !== `${binding?.model} / ${binding?.reasoning_effort}` ||
-        accepted.branch !== branch || claim.branch !== branch ||
-        route.marker !== "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_V1" ||
-        route.state !== "ONE_ALTERNATE_LOW_COST_WORKER_ROUTE_AUTHORIZED" ||
-        routeBinding?.task_name !== binding?.agent_name || routeBinding?.role !== "Worker" ||
-        routeBinding?.model_effort !== `${binding?.model} / ${binding?.reasoning_effort}` ||
-        routeBinding?.runtime_surface !== fields.runtime_surface ||
-        dispatch.marker !== "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" ||
-        dispatch.attempt_id !== fields.attempt_id || dispatch.lease_id !== fields.lease_id ||
-        dispatch.branch !== branch || dispatch.exact_remote_base_sha !== baseSha ||
-        fields.executor_identity !== `collaboration task ${routeBinding?.task_name}` ||
-        fields.agent_name !== routeBinding?.task_name || fields.agent_session !== dispatch.attempt_id ||
-        !String(claim.executor_identity ?? "").startsWith(`collaboration task ${routeBinding?.task_name}`) ||
-        !String(accepted.executor_identity ?? "").startsWith(`collaboration task ${routeBinding?.task_name}`) ||
-        !(Number(fields.claim_comment_id) < Number(fields.acceptance_comment_id) &&
-          Number(fields.acceptance_comment_id) < Number(fields.dispatch_comment_id) &&
-          Number(fields.dispatch_comment_id) < Number(sourceComment.id)) ||
-        !String(dispatch.executor_identity ?? "").includes(routeBinding?.task_name ?? "!")) {
-      throw new Error("upstream receipt is not bound to the exact card, accepted claim, Worker route, and dispatch records");
+    const workerStart = eventKind === "WORKER_STARTED"
+      ? fields
+      : await readLinkedWorkerRecord(fields.worker_start_comment_id);
+    const sameWorkerLink = (key) => fields[key] === workerStart[key];
+    const acceptedWorkOrder = `D22977/gpt-browser-bridge#${issueNumber} / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1`;
+    const chainChecks = {
+      start_marker: workerStart.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1",
+      start_state: workerStart.state === "CONSUMED_STARTED",
+      card: workerStart.card_comment_id === String(issueNumber),
+      claim_link: workerStart.claim_comment_id === String(claim.id),
+      acceptance_link: workerStart.acceptance_comment_id === String(accepted.id),
+      route_link: workerStart.binding_comment_id === String(route.id),
+      dispatch_link: workerStart.dispatch_comment_id === String(dispatch.id),
+      claim_record: claim.marker === "CLAIM_REQUESTED_V1" && claim.state === "CLAIM_REQUESTED",
+      accepted_record: accepted.marker === "CLAIM_ACCEPTED_V1" && accepted.state === "CLAIM_ACCEPTED",
+      accepted_claim: String(accepted.accepted_claim ?? "").startsWith(`#${issueNumber}/${claim.id}`),
+      claim_work_order: claim.work_order === `D22977/gpt-browser-bridge#${issueNumber}`,
+      acceptance_work_order: accepted.work_order === acceptedWorkOrder,
+      claim_tuple: claim.role === "Worker" && claim.model_effort === routeBinding?.model_effort,
+      claim_branch: accepted.branch === workerStart.branch && claim.branch === workerStart.branch,
+      route: route.marker === "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_V1" && route.state === "ONE_ALTERNATE_LOW_COST_WORKER_ROUTE_AUTHORIZED",
+      route_binding: routeBinding?.task_name === workerStart.agent_name && routeBinding?.role === "Worker" &&
+        routeBinding?.model_effort === `${workerStart.model} / ${workerStart.reasoning_effort}` &&
+        routeBinding?.runtime_surface === workerStart.runtime_surface,
+      dispatch: dispatch.marker === "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" &&
+        dispatch.attempt_id === workerStart.attempt_id && dispatch.lease_id === workerStart.lease_id &&
+        dispatch.branch === workerStart.branch && dispatch.exact_remote_base_sha === workerStart.base_sha,
+      executor: workerStart.executor_identity === `collaboration task ${routeBinding?.task_name}` &&
+        workerStart.agent_session === dispatch.attempt_id &&
+        String(claim.executor_identity ?? "").startsWith(`collaboration task ${routeBinding?.task_name}`) &&
+        String(accepted.executor_identity ?? "").startsWith(`collaboration task ${routeBinding?.task_name}`) &&
+        String(dispatch.executor_identity ?? "").includes(routeBinding?.task_name ?? "!"),
+      chronology: Number(route.id) < Number(claim.id) && Number(claim.id) < Number(accepted.id) &&
+        Number(accepted.id) < Number(dispatch.id) && Number(dispatch.id) < Number(workerStart.id),
+      assigned_base: workerStart.branch === branch && workerStart.base_sha === baseSha && workerStart.head_sha === workerStart.base_sha,
+    };
+    const invalidChain = Object.keys(chainChecks).filter((key) => !chainChecks[key]);
+    if (invalidChain.length) throw new Error(`upstream Worker chain invalid: ${invalidChain.join(",")}`);
+    if (eventKind === "WORKER_TERMINAL_RESULT" &&
+        (!sameWorkerLink("claim_comment_id") || !sameWorkerLink("acceptance_comment_id") ||
+         !sameWorkerLink("binding_comment_id") || !sameWorkerLink("dispatch_comment_id") ||
+         fields.executor_identity !== workerStart.executor_identity || fields.lease_id !== workerStart.lease_id ||
+         fields.attempt_id !== workerStart.attempt_id || fields.branch !== workerStart.branch ||
+         fields.base_sha !== workerStart.base_sha || fields.worker_start_comment_id !== workerStart.id)) {
+      throw new Error("terminal result does not bind to its exact G13/G14 start receipt");
     }
+    if (!(Number(route.id) < Number(claim.id) && Number(claim.id) < Number(accepted.id) &&
+          Number(accepted.id) < Number(dispatch.id) && Number(dispatch.id) < Number(workerStart.id) &&
+          (eventKind === "WORKER_STARTED"
+            ? String(workerStart.id) === String(sourceComment.id)
+            : Number(workerStart.id) < Number(sourceComment.id)))) {
+      throw new Error("Worker receipt chain chronology is invalid");
+    }
+    if (String(workerStart.card_comment_id) !== String(issueNumber) ||
+        claim.marker !== "CLAIM_REQUESTED_V1" || claim.state !== "CLAIM_REQUESTED" ||
+        accepted.marker !== "CLAIM_ACCEPTED_V1" || accepted.state !== "CLAIM_ACCEPTED") {
+      throw new Error("Worker claim and acceptance records are invalid");
+    }
+    const workerBinding = {
+      card_comment_id: String(issueNumber),
+      claim_comment_id: String(claim.id),
+      acceptance_comment_id: String(accepted.id),
+      binding_comment_id: String(route.id),
+      dispatch_comment_id: String(dispatch.id),
+      agent_name: workerStart.agent_name,
+      agent_session: workerStart.agent_session,
+      pane: workerStart.pane,
+      terminal: workerStart.terminal,
+      cwd: workerStart.cwd,
+      model: workerStart.model,
+      reasoning_effort: workerStart.reasoning_effort,
+      runtime_surface: workerStart.runtime_surface,
+      executor_identity: workerStart.executor_identity,
+      branch: workerStart.branch,
+      base_sha: workerStart.base_sha,
+      lease_id: workerStart.lease_id,
+      attempt_id: workerStart.attempt_id,
+      start_comment_id: String(workerStart.id),
+    };
     if (sourceComment.user?.login !== publisherAuthor ||
-        fields.card_comment_id !== String(binding?.card_comment_id) ||
-        fields.binding_comment_id !== String(binding?.binding_comment_id) ||
-        fields.dispatch_comment_id !== String(binding?.dispatch_comment_id) ||
-        fields.control_generation !== activeAuthority.control_generation ||
-        fields.control_conversation_id !== activeAuthority.control_conversation_id ||
-        fields.repository !== repositoryFullName ||
-        fields.agent_name !== binding?.agent_name || fields.agent_session !== binding?.agent_session ||
-        fields.pane !== binding?.pane || fields.terminal !== binding?.terminal || fields.cwd !== binding?.cwd ||
-        fields.model !== binding?.model || fields.reasoning_effort !== binding?.reasoning_effort ||
-        fields.state === undefined || fields.branch !== branch ||
-        fields.branch !== binding?.branch || fields.base_sha !== baseSha ||
-        fields.base_sha !== binding?.base_sha || fields.user_relay_count !== "0") {
-      throw new Error("upstream executor receipt does not match accepted Worker claim and exact binding");
+        fields.claim_comment_id !== String(claim.id) || fields.acceptance_comment_id !== String(accepted.id) ||
+        fields.binding_comment_id !== String(route.id) || fields.dispatch_comment_id !== String(dispatch.id) ||
+        (fields.control_generation !== undefined && fields.control_generation !== activeAuthority.control_generation) ||
+        (fields.control_conversation_id !== undefined && fields.control_conversation_id !== activeAuthority.control_conversation_id) ||
+        fields.state === undefined || fields.branch !== workerBinding.branch ||
+        fields.base_sha !== workerBinding.base_sha || fields.executor_identity !== workerBinding.executor_identity ||
+        fields.user_relay_count !== "0" ||
+        (fields.agent_name !== undefined && fields.agent_name !== workerBinding.agent_name) ||
+        (fields.agent_session !== undefined && fields.agent_session !== workerBinding.agent_session) ||
+        (fields.pane !== undefined && fields.pane !== workerBinding.pane) ||
+        (fields.terminal !== undefined && fields.terminal !== workerBinding.terminal) ||
+        (fields.cwd !== undefined && fields.cwd !== workerBinding.cwd) ||
+        (fields.model !== undefined && fields.model !== workerBinding.model) ||
+        (fields.reasoning_effort !== undefined && fields.reasoning_effort !== workerBinding.reasoning_effort) ||
+        (fields.repository !== undefined && fields.repository !== repositoryFullName)) {
+      throw new Error("executor receipt does not match its exact Worker start and upstream chain");
     }
     if (eventKind === "WORKER_STARTED" && fields.state !== "CONSUMED_STARTED") {
       throw new Error("Worker start receipt has an invalid state");
@@ -275,13 +321,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
     }
     if (eventKind === "WORKER_TERMINAL_RESULT") {
       const startId = String(fields.worker_start_comment_id ?? "");
-      const start = readBack.get(startId);
-      if (!start || start.marker !== "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1" ||
-          start.card_comment_id !== fields.card_comment_id ||
-          start.binding_comment_id !== fields.binding_comment_id ||
-          start.dispatch_comment_id !== fields.dispatch_comment_id ||
-          start.agent_session !== fields.agent_session || start.branch !== fields.branch ||
-          start.base_sha !== fields.base_sha) {
+      if (startId !== workerBinding.start_comment_id) {
         throw new Error("terminal result lacks its exact matching Worker start receipt chain");
       }
       if (fields.head_sha !== headSha ||
@@ -289,16 +329,13 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
         throw new Error("Worker terminal receipt is not bound to the exact current head and a valid terminal state");
       }
     }
-    readBack.set(String(sourceComment.id), fields);
     const event = createSourceEvent({
       sourceComment,
       sourceIssueNumber: issueNumber,
       sourceRepositoryFullName: repositoryFullName,
       eventKind,
       authority: activeAuthority,
-      binding: eventKind === "WORKER_TERMINAL_RESULT"
-        ? { ...binding, start_comment_id: fields.worker_start_comment_id }
-        : binding,
+      binding: workerBinding,
       branch: fields.branch,
       baseSha: fields.base_sha,
       headSha: fields.head_sha,

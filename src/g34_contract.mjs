@@ -15,6 +15,8 @@ export const sourceEventSchema = z.object({
   source_comment_id: commentId,
   source_body_sha256: sha256,
   card_comment_id: commentId,
+  claim_comment_id: commentId,
+  acceptance_comment_id: commentId,
   binding_comment_id: commentId,
   dispatch_comment_id: commentId,
   agent_name: fieldText,

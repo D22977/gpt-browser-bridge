@@ -9,6 +9,8 @@ const { createSourceEvent, publishSourceEvent, markSourceEventConsumed } = await
 
 const binding = {
   card_comment_id: "5777732770",
+  claim_comment_id: "6083284000",
+  acceptance_comment_id: "6083285000",
   binding_comment_id: "6083287293",
   dispatch_comment_id: "6083292578",
   agent_name: "gbb_g34_source_1009a",
@@ -18,6 +20,10 @@ const binding = {
   cwd: "D:\\AIWORK_WT\\GBB-G34-SOURCE-EVENT-20261009-01",
   model: "gpt-6-luna",
   reasoning_effort: "low",
+  executor_identity: "collaboration task gbb_g34_source_1009a",
+  lease_id: "GBB-LEASE-20261009-01",
+  attempt_id: "GBB-G34-SOURCE-1009A-01",
+  start_comment_id: "6083293000",
 };
 const authority = {
   control_generation: "034",
@@ -30,6 +36,8 @@ const sourceBody = (overrides = {}) => {
   marker: "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1",
   state: "CONSUMED_STARTED",
   card_comment_id: binding.card_comment_id,
+  claim_comment_id: binding.claim_comment_id,
+  acceptance_comment_id: binding.acceptance_comment_id,
   binding_comment_id: binding.binding_comment_id,
   dispatch_comment_id: binding.dispatch_comment_id,
   control_generation: authority.control_generation,
@@ -42,6 +50,9 @@ const sourceBody = (overrides = {}) => {
   agent_session: binding.agent_session,
   pane: binding.pane,
   terminal: binding.terminal,
+  executor_identity: `collaboration task ${binding.agent_name}`,
+  lease_id: binding.lease_id,
+  attempt_id: binding.attempt_id,
   cwd: binding.cwd,
   model: binding.model,
   reasoning_effort: binding.reasoning_effort,
@@ -125,6 +136,8 @@ test("source event id is deterministic and body binds the upstream receipt ident
   assert.equal(first.source_body_sha256, createHash("sha256").update(sourceComment().body, "utf8").digest("hex"));
   assert.match(first.body, /marker=GITHUB_SOURCE_EVENT_V1/);
   assert.match(first.body, /source_comment_id=6083328488/);
+  assert.match(first.body, /claim_comment_id=6083284000/);
+  assert.match(first.body, /acceptance_comment_id=6083285000/);
 });
 
 test("source event rejects unrelated authors and mismatched claim, executor, state, or branch fields", () => {

@@ -22,7 +22,7 @@ function commentIssueNumber(comment, repositoryFullName) {
 const eventFields = [
   "marker", "event_id", "control_generation", "active_control_id", "control_conversation_id",
   "event_kind", "source_comment_id", "source_body_sha256", "card_comment_id",
-  "binding_comment_id", "dispatch_comment_id", "agent_name", "agent_session", "pane",
+  "claim_comment_id", "acceptance_comment_id", "binding_comment_id", "dispatch_comment_id", "agent_name", "agent_session", "pane",
   "terminal", "cwd", "model", "reasoning_effort", "state", "branch", "base_sha", "head_sha",
   "terminal_comment_id", "worker_start_comment_id", "review_comment_id", "user_relay_count",
 ];
@@ -56,23 +56,28 @@ export function createSourceEvent({ sourceComment, sourceIssueNumber, sourceRepo
   const expectedMarker = eventKind === "WORKER_STARTED"
     ? "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1"
     : eventKind === "WORKER_TERMINAL_RESULT" ? "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1" : null;
-  const receiptMatches = expectedMarker && receipt.marker === expectedMarker &&
-    receipt.card_comment_id === String(binding?.card_comment_id) &&
+  const commonReceiptMatches = expectedMarker && receipt.marker === expectedMarker &&
+    receipt.claim_comment_id === String(binding?.claim_comment_id) &&
+    receipt.acceptance_comment_id === String(binding?.acceptance_comment_id) &&
     receipt.binding_comment_id === String(binding?.binding_comment_id) &&
     receipt.dispatch_comment_id === String(binding?.dispatch_comment_id) &&
-    receipt.control_generation === String(authority?.control_generation) &&
-    receipt.control_conversation_id === String(authority?.control_conversation_id) &&
-    receipt.repository === sourceRepositoryFullName &&
-    receipt.agent_name === binding?.agent_name &&
-    receipt.agent_session === binding?.agent_session &&
-    receipt.pane === binding?.pane &&
-    receipt.terminal === binding?.terminal &&
-    receipt.cwd === binding?.cwd &&
-    receipt.model === binding?.model &&
-    receipt.reasoning_effort === binding?.reasoning_effort &&
+    receipt.executor_identity === binding?.executor_identity &&
     receipt.state === state && receipt.branch === branch &&
     receipt.base_sha === baseSha && receipt.head_sha === headSha &&
     receipt.user_relay_count === "0";
+  const startReceiptMatches = eventKind === "WORKER_STARTED" &&
+    receipt.card_comment_id === String(binding?.card_comment_id) &&
+    receipt.control_generation === String(authority?.control_generation) &&
+    receipt.control_conversation_id === String(authority?.control_conversation_id) &&
+    receipt.repository === sourceRepositoryFullName &&
+    receipt.agent_name === binding?.agent_name && receipt.agent_session === binding?.agent_session &&
+    receipt.pane === binding?.pane && receipt.terminal === binding?.terminal && receipt.cwd === binding?.cwd &&
+    receipt.model === binding?.model && receipt.reasoning_effort === binding?.reasoning_effort &&
+    receipt.lease_id === binding?.lease_id && receipt.attempt_id === binding?.attempt_id;
+  const terminalReceiptMatches = eventKind === "WORKER_TERMINAL_RESULT" &&
+    receipt.worker_start_comment_id === String(binding?.start_comment_id) &&
+    receipt.lease_id === binding?.lease_id && receipt.attempt_id === binding?.attempt_id;
+  const receiptMatches = commonReceiptMatches && (startReceiptMatches || terminalReceiptMatches);
   if (!receiptMatches) throw new Error("upstream executor receipt does not match its exact card, binding, state, executor, or branch tuple");
   if (eventKind === "WORKER_TERMINAL_RESULT" &&
       (!binding?.start_comment_id || receipt.worker_start_comment_id !== String(binding.start_comment_id))) {
@@ -90,6 +95,8 @@ export function createSourceEvent({ sourceComment, sourceIssueNumber, sourceRepo
     source_comment_id: sourceCommentId,
     source_body_sha256: sha256Hex(sourceComment.body),
     card_comment_id: String(binding?.card_comment_id ?? ""),
+    claim_comment_id: String(binding?.claim_comment_id ?? ""),
+    acceptance_comment_id: String(binding?.acceptance_comment_id ?? ""),
     binding_comment_id: String(binding?.binding_comment_id ?? ""),
     dispatch_comment_id: String(binding?.dispatch_comment_id ?? ""),
     agent_name: binding?.agent_name,
@@ -294,6 +301,7 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
     throw new Error("no pending successor delivery attempt to reconcile");
   }
   let exact = null;
+  let consumerAckValid = false;
   if (!uncertain && /^[1-9][0-9]*$/.test(String(receiptId ?? "")) && typeof github?.getIssueComment === "function") {
     const id = String(receiptId);
     try {
@@ -307,13 +315,78 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
         if (exact.marker !== "GBB_G34_SUCCESSOR_DELIVERY_RECEIPT_V1" || exact.state !== "DELIVERED" ||
             exact.event_id !== eventId || exact.source_event_comment_id !== String(event?.comment_id ?? "") ||
             exact.control_comment_id !== String(controlCommentId ?? "") || exact.successor_comment_id !== String(successor?.comment_id ?? "") ||
-            exact.successor_agent_session !== successor?.agent_session ||
+            exact.successor_agent_name !== successor?.agent_name || exact.successor_agent_session !== successor?.agent_session ||
+            exact.successor_pane !== successor?.pane || exact.successor_terminal !== successor?.terminal ||
+            exact.source_claim_comment_id !== String(event?.claim_comment_id ?? "") ||
+            exact.source_acceptance_comment_id !== String(event?.acceptance_comment_id ?? "") ||
+            exact.source_binding_comment_id !== String(event?.binding_comment_id ?? "") ||
+            exact.source_dispatch_comment_id !== String(event?.dispatch_comment_id ?? "") ||
+            exact.source_worker_start_comment_id !== String(event?.worker_start_comment_id ?? event?.source_comment_id ?? "") ||
             exact.control_comment_id !== prior.control_comment_id || exact.successor_comment_id !== prior.successor_comment_id ||
             Number(id) <= Number(controlCommentId)) exact = null;
+        if (exact && /^[1-9][0-9]*$/.test(String(exact.consumer_ack_comment_id ?? ""))) {
+          const ackId = String(exact.consumer_ack_comment_id);
+          const ackFirst = await github.getIssueComment(ackId);
+          const ackSecond = await github.getIssueComment(ackId);
+          const ackUrl = `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${ackId}`;
+          if (ackFirst && ackSecond && String(ackFirst.id) === ackId && String(ackSecond.id) === ackId &&
+              ackFirst.url === ackUrl && ackSecond.url === ackUrl && ackFirst.body === ackSecond.body &&
+              ackFirst.user?.login === "D22977" && ackSecond.user?.login === "D22977" && Number(ackId) < Number(id)) {
+            const ack = parseG34ReceiptFields(ackSecond);
+            const readWorker = async (commentId) => {
+              if (!/^[1-9][0-9]*$/.test(String(commentId ?? ""))) return null;
+              const key = String(commentId);
+              const a = await github.getIssueComment(key);
+              const b = await github.getIssueComment(key);
+              const url = `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${key}`;
+              if (!a || !b || String(a.id) !== key || String(b.id) !== key || a.url !== url || b.url !== url ||
+                  a.body !== b.body || a.user?.login !== "D22977" || b.user?.login !== "D22977") return null;
+              return { ...parseG34ReceiptFields(b), id: key };
+            };
+            const [claim, accepted, route, dispatch, start] = await Promise.all([
+              readWorker(ack.claim_comment_id), readWorker(ack.acceptance_comment_id),
+              readWorker(ack.binding_comment_id), readWorker(ack.dispatch_comment_id),
+              readWorker(ack.worker_start_comment_id),
+            ]);
+            const routeBinding = route?.candidate_binding;
+            consumerAckValid = ack.marker === "GBB_G34_EXECUTOR_CONSUMED_ACK_V1" && ack.state === "CONSUMED_ACK" &&
+              ack.card_comment_id === "211" && ack.event_id === eventId &&
+              ack.source_event_comment_id === String(event?.comment_id ?? "") &&
+              ack.source_claim_comment_id === String(event?.claim_comment_id ?? "") &&
+              ack.source_acceptance_comment_id === String(event?.acceptance_comment_id ?? "") &&
+              ack.source_binding_comment_id === String(event?.binding_comment_id ?? "") &&
+              ack.source_dispatch_comment_id === String(event?.dispatch_comment_id ?? "") &&
+              ack.source_worker_start_comment_id === String(event?.worker_start_comment_id ?? event?.source_comment_id ?? "") &&
+              ack.control_comment_id === String(controlCommentId ?? "") &&
+              ack.successor_comment_id === String(successor?.comment_id ?? "") &&
+              ack.successor_agent_name === successor?.agent_name && ack.agent_name === successor?.agent_name &&
+              ack.agent_session === successor?.agent_session && ack.pane === successor?.pane && ack.terminal === successor?.terminal &&
+              ack.executor_identity === `collaboration task ${successor?.agent_name}` &&
+              claim?.marker === "CLAIM_REQUESTED_V1" && claim.state === "CLAIM_REQUESTED" &&
+              accepted?.marker === "CLAIM_ACCEPTED_V1" && accepted.state === "CLAIM_ACCEPTED" &&
+              accepted.work_order === "D22977/gpt-browser-bridge#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1" &&
+              String(accepted.accepted_claim ?? "").startsWith(`#211/${claim?.id}`) &&
+              route?.marker === "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_V1" &&
+              route?.state === "ONE_ALTERNATE_LOW_COST_WORKER_ROUTE_AUTHORIZED" &&
+              routeBinding?.task_name === successor?.agent_name && routeBinding?.role === "Worker" &&
+              dispatch?.marker === "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" &&
+              dispatch.attempt_id === start?.attempt_id && dispatch.lease_id === start?.lease_id &&
+              dispatch.branch === start?.branch && dispatch.exact_remote_base_sha === start?.base_sha &&
+              start?.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1" && start.state === "CONSUMED_STARTED" &&
+              start.card_comment_id === "211" && start.claim_comment_id === claim?.id &&
+              start.acceptance_comment_id === accepted?.id && start.binding_comment_id === route?.id &&
+              start.dispatch_comment_id === dispatch?.id && start.agent_name === successor?.agent_name &&
+              start.agent_session === successor?.agent_session && start.pane === successor?.pane &&
+              start.terminal === successor?.terminal && start.executor_identity === `collaboration task ${successor?.agent_name}` &&
+              Number(route?.id) < Number(claim?.id) && Number(claim?.id) < Number(accepted?.id) &&
+              Number(accepted?.id) < Number(dispatch?.id) && Number(dispatch?.id) < Number(start?.id) &&
+              Number(start?.id) < Number(ackId);
+          }
+        }
       }
     } catch { exact = null; }
   }
-  if (uncertain || !exact) {
+  if (uncertain || !exact || !consumerAckValid) {
     ledger[eventId] = { ...prior, state: "SUCCESSOR_DELIVERY_UNCERTAIN" };
     await saveLedger(file, ledger);
     return { state: "DELIVERY_UNCERTAIN" };
