@@ -85,6 +85,7 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
   const reviewCard = await github.getIssue(Number(receipt.independent_review_card_issue_number));
   const exactReviewCard = await github.getIssue(Number(receipt.independent_review_card_issue_number));
   const reviewCardFields = reviewCard ? parseG34ReceiptFields(reviewCard) : {};
+  const reviewerBinding = await readLinkedReceipt(reviewCardFields.reviewer_binding_comment_id, reviewCardNumber);
   const acceptedHead = receipt.reviewed_exact_head_sha ?? receipt.reviewed_head_sha;
   const reviewIdentity = review.reviewer_task_identity;
   const currentControlPointers = liveAuthority.record_ids;
@@ -117,8 +118,23 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     (event.tree_sha !== undefined && reviewCardFields.candidate_tree_sha !== event.tree_sha) ||
     acceptedHead !== event.head_sha ||
     review.marker !== "GBB_G34_FRESH_INDEPENDENT_REVIEW_RESULT_V1" ||
-    review.decision !== "PASS" || review.state !== "REVIEW_TERMINAL" ||
+    review.decision !== "APPROVE" || review.state !== "REVIEW_TERMINAL" ||
     review.card !== `#${reviewCard.number}` ||
+    review.reviewer_binding_comment_id !== reviewerBinding.id ||
+    reviewerBinding.marker !== "GBB_G34_REVIEWER_BINDING_V1" ||
+    reviewerBinding.state !== "REVIEWER_ASSIGNED" ||
+    reviewerBinding.card_issue_number !== String(reviewCard.number) ||
+    reviewerBinding.role !== "fresh independent GPT-6 Sol High read-only Reviewer" ||
+    reviewerBinding.model !== "gpt-6-sol" || reviewerBinding.reasoning_effort !== "high" ||
+    !nonEmpty(reviewerBinding.reviewer_task_identity) ||
+    reviewerBinding.reviewer_task_identity === event.agent_name ||
+    reviewerBinding.reviewer_task_identity === event.agent_session ||
+    reviewerBinding.reviewer_task_identity === receipt.executor_identity ||
+    review.reviewer_task_identity !== reviewerBinding.reviewer_task_identity ||
+    reviewerBinding.candidate_repository !== "D22977/gpt-browser-bridge" ||
+    reviewerBinding.candidate_branch !== event.branch ||
+    reviewerBinding.candidate_exact_head_sha !== event.head_sha ||
+    reviewerBinding.candidate_tree_sha !== reviewCardFields.candidate_tree_sha ||
     review.reviewed_repository !== "D22977/gpt-browser-bridge" ||
     review.reviewed_branch !== event.branch ||
     review.reviewed_exact_head !== event.head_sha ||
@@ -209,16 +225,16 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       ? "WORKER_STARTED"
       : fields.marker === "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1" ? "WORKER_TERMINAL_RESULT" : null;
     if (!eventKind || !fields.state) throw new Error("unsupported G34 executor receipt");
-    const [claim, accepted, route, dispatch] = await Promise.all([
-      readLinkedWorkerRecord(fields.claim_comment_id),
-      readLinkedWorkerRecord(fields.acceptance_comment_id),
-      readLinkedWorkerRecord(fields.binding_comment_id),
-      readLinkedWorkerRecord(fields.dispatch_comment_id),
-    ]);
-    const routeBinding = route.candidate_binding;
     const workerStart = eventKind === "WORKER_STARTED"
       ? fields
       : await readLinkedWorkerRecord(fields.worker_start_comment_id);
+    const [claim, accepted, route, dispatch] = await Promise.all([
+      readLinkedWorkerRecord(fields.claim_comment_id ?? workerStart.claim_comment_id),
+      readLinkedWorkerRecord(fields.acceptance_comment_id ?? workerStart.acceptance_comment_id),
+      readLinkedWorkerRecord(fields.binding_comment_id ?? workerStart.binding_comment_id),
+      readLinkedWorkerRecord(fields.dispatch_comment_id ?? workerStart.dispatch_comment_id),
+    ]);
+    const routeBinding = route.candidate_binding;
     const sameWorkerLink = (key) => fields[key] === workerStart[key];
     const acceptedWorkOrder = `D22977/gpt-browser-bridge#${issueNumber} / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1`;
     const chainChecks = {
@@ -254,13 +270,16 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
     };
     const invalidChain = Object.keys(chainChecks).filter((key) => !chainChecks[key]);
     if (invalidChain.length) throw new Error(`upstream Worker chain invalid: ${invalidChain.join(",")}`);
+    const terminalMismatches = [["claim_comment_id", String(claim.id)], ["acceptance_comment_id", String(accepted.id)],
+          ["binding_comment_id", String(route.id)], ["dispatch_comment_id", String(dispatch.id)],
+          ["executor_identity", workerStart.executor_identity], ["lease_id", workerStart.lease_id],
+          ["attempt_id", workerStart.attempt_id], ["branch", workerStart.branch],
+          ["base_sha", workerStart.base_sha], ["card_comment_id", String(issueNumber)]]
+          .filter(([key, value]) => fields[key] !== undefined && fields[key] !== value).map(([key]) => key);
     if (eventKind === "WORKER_TERMINAL_RESULT" &&
-        (!sameWorkerLink("claim_comment_id") || !sameWorkerLink("acceptance_comment_id") ||
-         !sameWorkerLink("binding_comment_id") || !sameWorkerLink("dispatch_comment_id") ||
-         fields.executor_identity !== workerStart.executor_identity || fields.lease_id !== workerStart.lease_id ||
-         fields.attempt_id !== workerStart.attempt_id || fields.branch !== workerStart.branch ||
-         fields.base_sha !== workerStart.base_sha || fields.worker_start_comment_id !== workerStart.id)) {
-      throw new Error("terminal result does not bind to its exact G13/G14 start receipt");
+        (terminalMismatches.length > 0 ||
+         fields.worker_start_comment_id !== workerStart.id)) {
+      throw new Error(`terminal result does not bind to its exact G13/G14 start receipt: ${terminalMismatches.join(",")}`);
     }
     if (!(Number(route.id) < Number(claim.id) && Number(claim.id) < Number(accepted.id) &&
           Number(accepted.id) < Number(dispatch.id) && Number(dispatch.id) < Number(workerStart.id) &&
@@ -296,13 +315,19 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       start_comment_id: String(workerStart.id),
     };
     if (sourceComment.user?.login !== publisherAuthor ||
-        fields.claim_comment_id !== String(claim.id) || fields.acceptance_comment_id !== String(accepted.id) ||
-        fields.binding_comment_id !== String(route.id) || fields.dispatch_comment_id !== String(dispatch.id) ||
+        (eventKind === "WORKER_STARTED" && (fields.claim_comment_id !== String(claim.id) ||
+          fields.acceptance_comment_id !== String(accepted.id) || fields.binding_comment_id !== String(route.id) ||
+          fields.dispatch_comment_id !== String(dispatch.id))) ||
+        (eventKind === "WORKER_TERMINAL_RESULT" && [["claim_comment_id", String(claim.id)],
+          ["acceptance_comment_id", String(accepted.id)], ["binding_comment_id", String(route.id)],
+          ["dispatch_comment_id", String(dispatch.id)]].some(([key, value]) => fields[key] !== undefined && fields[key] !== value)) ||
         (fields.control_generation !== undefined && fields.control_generation !== activeAuthority.control_generation) ||
         (fields.control_conversation_id !== undefined && fields.control_conversation_id !== activeAuthority.control_conversation_id) ||
         fields.state === undefined || fields.branch !== workerBinding.branch ||
-        fields.base_sha !== workerBinding.base_sha || fields.executor_identity !== workerBinding.executor_identity ||
-        fields.user_relay_count !== "0" ||
+        (fields.base_sha !== undefined && fields.base_sha !== workerBinding.base_sha) ||
+        (fields.executor_identity !== undefined && fields.executor_identity !== workerBinding.executor_identity) ||
+        (eventKind === "WORKER_STARTED" ? fields.user_relay_count !== "0" :
+          (fields.user_relay_count !== undefined && fields.user_relay_count !== "0")) ||
         (fields.agent_name !== undefined && fields.agent_name !== workerBinding.agent_name) ||
         (fields.agent_session !== undefined && fields.agent_session !== workerBinding.agent_session) ||
         (fields.pane !== undefined && fields.pane !== workerBinding.pane) ||
@@ -324,7 +349,8 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       if (startId !== workerBinding.start_comment_id) {
         throw new Error("terminal result lacks its exact matching Worker start receipt chain");
       }
-      if (fields.head_sha !== headSha ||
+      const terminalHead = fields.head_sha ?? fields.remote_commit ?? fields.local_tested_commit;
+      if (terminalHead !== headSha ||
           !(fields.state === "READY_FOR_FRESH_REVIEW" || /^BLOCKED_[A-Z0-9_]+$/.test(fields.state))) {
         throw new Error("Worker terminal receipt is not bound to the exact current head and a valid terminal state");
       }
@@ -337,8 +363,8 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       authority: activeAuthority,
       binding: workerBinding,
       branch: fields.branch,
-      baseSha: fields.base_sha,
-      headSha: fields.head_sha,
+      baseSha: fields.base_sha ?? workerBinding.base_sha,
+      headSha: fields.head_sha ?? fields.remote_commit ?? fields.local_tested_commit,
       state: fields.state,
       ...(eventKind === "WORKER_TERMINAL_RESULT" ? { terminalCommentId: String(sourceComment.id) } : {}),
       expectedAuthor: publisherAuthor,
