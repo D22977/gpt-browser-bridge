@@ -435,6 +435,11 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
               const cardIssue = await github.getIssue(Number(control.independent_review_card_issue_number));
               const cardFields = cardIssue ? parseG34ReceiptFields(cardIssue) : {};
               reviewerBinding = await readControlLink(cardFields.reviewer_binding_comment_id);
+              const workerExecutorIdentity = start?.executor_identity ?? event.executor_identity ?? `collaboration task ${event.agent_name}`;
+              const controlIdentityIsWorker = reviewerBinding?.control_task_identity === event.agent_name ||
+                reviewerBinding?.control_task_identity === event.agent_session ||
+                reviewerBinding?.control_task_identity === workerExecutorIdentity ||
+                executorTaskIdentity(workerExecutorIdentity) === reviewerBinding?.control_task_identity;
               semanticChainValid = control.marker === "CONTROL_SUCCESSOR_ACCEPTANCE_V1" &&
                 control.state === "SUCCESSOR_ACCEPTED" && control.source_event_id === eventId &&
                 control.source_event_comment_id === String(event?.comment_id ?? "") &&
@@ -452,6 +457,10 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 control.successor_agent_session === successor?.agent_session &&
                 control.successor_pane === successor?.pane &&
                 control.successor_terminal === successor?.terminal &&
+                Number(cardIssue?.number) === Number(control.independent_review_card_issue_number) &&
+                cardFields.candidate_repository === event.source_repository_full_name &&
+                cardFields.candidate_branch === event.branch &&
+                cardFields.candidate_exact_head_sha === event.head_sha &&
                 adjudication?.marker === "ACTIVE_CONTROL_ADJUDICATION_V1" && adjudication.state === "ACCEPTED" &&
                 adjudication.source_event_id === eventId && adjudication.source_event_comment_id === String(event?.comment_id ?? "") &&
                 review.marker === "GBB_G34_FRESH_INDEPENDENT_REVIEW_RESULT_V1" && review.decision === "APPROVE" &&
@@ -462,15 +471,21 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 reviewerBinding?.marker === "GBB_G34_REVIEWER_BINDING_V1" && reviewerBinding.state === "REVIEWER_ASSIGNED" &&
                 reviewerBinding.recorded_by_role === "LOCAL_CONTROL_TOWER" &&
                 typeof reviewerBinding.control_task_identity === "string" && reviewerBinding.control_task_identity.trim() !== "" &&
+                !controlIdentityIsWorker &&
                 reviewerBinding.worker_task_identity === event.agent_name &&
                 reviewerBinding.reviewer_task_identity === review.reviewer_task_identity &&
                 reviewerBinding.reviewer_task_identity !== reviewerBinding.control_task_identity &&
+                reviewerBinding.reviewer_task_identity !== event.agent_name &&
+                reviewerBinding.reviewer_task_identity !== event.agent_session &&
+                reviewerBinding.reviewer_task_identity !== workerExecutorIdentity &&
+                executorTaskIdentity(workerExecutorIdentity) !== reviewerBinding.reviewer_task_identity &&
                 reviewerBinding.role === review.role && reviewerBinding.model === "gpt-6-sol" &&
                 reviewerBinding.reasoning_effort === "high" &&
                 reviewerBinding.candidate_repository === event.source_repository_full_name &&
                 reviewerBinding.candidate_branch === event.branch &&
                 reviewerBinding.candidate_exact_head_sha === event.head_sha &&
                 reviewerBinding.candidate_tree_sha === cardFields.candidate_tree_sha &&
+                reviewerBinding.card_issue_number === String(cardIssue?.number) &&
                 (event.tree_sha === undefined || event.tree_sha === cardFields.candidate_tree_sha) &&
                 Number(reviewerBinding.id) < Number(review.id) &&
                 reviewerBinding.reviewer_task_identity !== event.agent_name &&

@@ -93,6 +93,11 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
   const reviewerBinding = await readLinkedReceipt(reviewCardFields.reviewer_binding_comment_id, reviewCardNumber);
   const acceptedHead = receipt.reviewed_exact_head_sha ?? receipt.reviewed_head_sha;
   const reviewIdentity = review.reviewer_task_identity;
+  const workerExecutorIdentity = event.executor_identity ?? `collaboration task ${event.agent_name}`;
+  const controlIdentityIsWorker = reviewerBinding.control_task_identity === event.agent_name ||
+    reviewerBinding.control_task_identity === event.agent_session ||
+    reviewerBinding.control_task_identity === workerExecutorIdentity ||
+    executorTaskIdentity(workerExecutorIdentity) === reviewerBinding.control_task_identity;
   const currentControlPointers = liveAuthority.record_ids;
   if (
     !event || !authority || event.state !== "DELIVERED" ||
@@ -134,10 +139,13 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     reviewerBinding.model !== "gpt-6-sol" || reviewerBinding.reasoning_effort !== "high" ||
     !nonEmpty(reviewerBinding.reviewer_task_identity) ||
     !nonEmpty(reviewerBinding.control_task_identity) ||
+    controlIdentityIsWorker ||
     reviewerBinding.worker_task_identity !== event.agent_name ||
     reviewerBinding.reviewer_task_identity === reviewerBinding.control_task_identity ||
     reviewerBinding.reviewer_task_identity === event.agent_name ||
     reviewerBinding.reviewer_task_identity === event.agent_session ||
+    reviewerBinding.reviewer_task_identity === workerExecutorIdentity ||
+    executorTaskIdentity(workerExecutorIdentity) === reviewerBinding.reviewer_task_identity ||
     reviewerBinding.reviewer_task_identity === receipt.executor_identity ||
     review.reviewer_task_identity !== reviewerBinding.reviewer_task_identity ||
     reviewerBinding.candidate_repository !== "D22977/gpt-browser-bridge" ||
