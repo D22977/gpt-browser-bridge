@@ -441,6 +441,7 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
               readControlLink(control.adjudication_comment_id),
               readControlLink(control.independent_review_comment_id),
             ]);
+            const sourceBaseSha = event?.base_sha ?? event?.head_sha;
             let reviewerBinding = null;
             let semanticChainValid = false;
             if (review) {
@@ -503,10 +504,10 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 sourceStart.dispatch_comment_id === sourceDispatch.id &&
                 sourceStart.executor_identity === sourceDispatch.executor_identity &&
                 sourceStart.agent_name === event.agent_name && sourceStart.agent_session === event.agent_session &&
-                sourceStart.branch === event.branch && sourceStart.base_sha === event.head_sha &&
-                sourceStart.head_sha === event.head_sha && sourceStart.lease_id === sourceDispatch.lease_id &&
+                sourceStart.branch === event.branch && sourceStart.base_sha === sourceBaseSha &&
+                sourceStart.head_sha === sourceBaseSha && sourceStart.lease_id === sourceDispatch.lease_id &&
                 sourceStart.attempt_id === sourceDispatch.attempt_id &&
-                sourceDispatch.exact_remote_base_sha === sourceStart.base_sha &&
+                sourceDispatch.exact_remote_base_sha === sourceBaseSha && sourceStart.base_sha === sourceDispatch.exact_remote_base_sha &&
                 Number(sourceDispatch.id) < Number(sourceStart.id) &&
                 reviewerBinding.control_task_identity === sourceDispatch.control_task_identity &&
                 !controlIdentityIsWorker &&
