@@ -757,6 +757,8 @@ test("resident rejects explicit G22 terminal aliases that conflict with the veri
     (record) => { record.body += `\nbase_sha: ${"a".repeat(40)}`; },
     (record) => { record.body += `\nhead_sha: ${"b".repeat(40)}`; },
     (record) => { record.body += `\ntree_sha: ${"c".repeat(40)}`; },
+    (record) => { record.body += `\nremote_parent: ${"e".repeat(40)}`; },
+    (record) => { record.body += `\nbase_tree_sha: ${"f".repeat(40)}`; },
     (record) => {
       record.body = record.body.replace("lease_id: GBB-211-LEASE-20261022-22", "lease_id: GBB-211-LEASE-CONFLICT-99");
     },
@@ -766,6 +768,59 @@ test("resident rejects explicit G22 terminal aliases that conflict with the veri
     const records = structuredClone(pinnedG22ReceiptRecords);
     conflict(records[terminalIndex]);
     await assert.rejects(() => run(records));
+  }
+});
+
+test("resident rejects conflicting G22 terminal base aliases before publication and leaves its pre-terminal ledger unchanged", async () => {
+  const terminalIndex = pinnedG22ReceiptRecords.findIndex((record) => record.body.startsWith("GBB_G34_WORKER_TERMINAL_RESULT_V1"));
+  assert.ok(terminalIndex >= 0);
+  const terminalId = String(pinnedG22ReceiptRecords[terminalIndex].id);
+  const normalized = () => structuredClone(pinnedG22ReceiptRecords).map((record) => ({ ...record, id: String(record.id) }));
+  const run = async (records, runtimeRoot, publications) => {
+    const github = fakeSourceGithub(records, {}, 9900);
+    github.getCommit = async (sha) => sha === "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8"
+      ? { sha, tree: { sha: "13c12f569c3e3302ba60e0be800fb3c9995d903c" }, parents: [] }
+      : { sha, tree: { sha: "6613901a972772dbada0222feb45662e477f0ab5" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] };
+    const create = github.createIssueComment.bind(github);
+    github.createIssueComment = async (issueNumber, body) => {
+      publications.push(body);
+      return create(issueNumber, body);
+    };
+    return runG34ResidentCycle({
+      sourceComments: records, currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
+      issueNumber: 211, runtimeRoot, github,
+      repositoryFullName: "D22977/gpt-browser-bridge", branch: "work/gbb-g34-review-repair-20261009-01",
+      baseSha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8",
+      headSha: "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14", publisherAuthor: "D22977",
+    });
+  };
+
+  const baselineRoot = await mkdtemp(path.join(tmpdir(), "g34-g22-base-alias-baseline-"));
+  const baselineRecords = normalized();
+  baselineRecords.splice(terminalIndex, 1);
+  const baselinePublications = [];
+  const baselineResults = await run(baselineRecords, baselineRoot, baselinePublications);
+  assert.equal(baselineResults.length, 1);
+  assert.equal(baselinePublications.length, 1);
+  const baselineLedger = await readFile(path.join(baselineRoot, "events", "g34-source-events.json"), "utf8");
+  assert.equal(Object.keys(JSON.parse(baselineLedger)).length, 1);
+
+  const conflicts = [
+    ["remote_parent", (record) => { record.body += `\nremote_parent: ${"e".repeat(40)}`; }],
+    ["base_tree_sha", (record) => { record.body += `\nbase_tree_sha: ${"f".repeat(40)}`; }],
+    ["tree_sha", (record) => { record.body += `\ntree_sha: ${"c".repeat(40)}`; }],
+    ["base_sha", (record) => { record.body += `\nbase_sha: ${"a".repeat(40)}`; }],
+  ];
+  for (const [alias, mutate] of conflicts) {
+    const records = normalized();
+    mutate(records[terminalIndex]);
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), `g34-g22-base-alias-${alias}-`));
+    const publications = [];
+    await assert.rejects(() => run(records, runtimeRoot, publications), /explicit aliases conflict/);
+    assert.equal(publications.length, 1, `${alias}: conflicting terminal event must not be published`);
+    const ledger = await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8");
+    assert.equal(ledger, baselineLedger, `${alias}: pre-terminal ledger changed`);
+    assert.equal(Object.values(JSON.parse(ledger)).some((entry) => entry.source_comment_id === terminalId), false);
   }
 });
 

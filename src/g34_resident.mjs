@@ -347,6 +347,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       const attempt = routeRaw.new_shift?.attempt_id;
       const lease = routeRaw.new_shift?.lease_id;
       const base = routeRaw.new_shift?.assigned_base_sha;
+      const baseTree = routeRaw.new_shift?.assigned_base_tree;
       const tree = terminalFields?.candidate_tree_sha;
       const commit = terminalFields?.candidate_exact_head_sha;
       if (routeRaw._legacy_marker !== "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_G22_V1" ||
@@ -386,6 +387,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
           ["attempt_id", attempt],
           ["lease_id", lease],
           ["base_sha", base],
+          ["base_tree_sha", baseTree],
           ["head_sha", commit],
           ["tree_sha", tree],
           ["branch", branchName],
@@ -394,6 +396,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
           ["candidate_exact_head_sha", commit],
           ["candidate_tree_sha", tree],
           ["remote_commit", commit],
+          ["remote_parent", base],
           ["local_tested_commit", commit],
           ["remote_tree", tree],
           ["remote_api_tree", tree],
@@ -407,7 +410,6 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
         }
         if (typeof github.getCommit !== "function") throw new Error("exact G22 candidate commit and tree read is required");
         const [baseCommit, headCommit] = await Promise.all([github.getCommit(base), github.getCommit(commit)]);
-        const baseTree = routeRaw.new_shift?.assigned_base_tree;
         const parents = Array.isArray(headCommit?.parents) ? headCommit.parents.map((p) => p.sha) : [];
         if (String(baseCommit?.sha) !== base || String(baseCommit?.tree?.sha) !== baseTree ||
             String(headCommit?.sha) !== commit || String(headCommit?.tree?.sha) !== tree ||
