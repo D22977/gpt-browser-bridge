@@ -37,7 +37,7 @@ function eventBody(event) {
     .map((key) => `${key}=${event[key]}`).join("\n");
 }
 
-export function createSourceEvent({ sourceComment, sourceIssueNumber, sourceRepositoryFullName, eventKind, authority, binding, branch, baseSha, headSha, state, terminalCommentId, reviewCommentId, expectedAuthor }) {
+export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssueNumber, sourceRepositoryFullName, eventKind, authority, binding, branch, baseSha, headSha, state, terminalCommentId, reviewCommentId, expectedAuthor }) {
   if (!sourceComment || !/^[1-9][0-9]*$/.test(String(sourceComment.id ?? "")) || typeof sourceComment.body !== "string") {
     throw new Error("source executor comment metadata is required");
   }
@@ -57,7 +57,7 @@ export function createSourceEvent({ sourceComment, sourceIssueNumber, sourceRepo
   }
   if (typeof expectedAuthor !== "string" || !expectedAuthor.trim()) throw new Error("expected publisher GitHub author is required");
   if (sourceComment.user?.login !== expectedAuthor) throw new Error("source executor comment has an unrelated GitHub author");
-  const receipt = parseG34ReceiptFields(sourceComment);
+  const receipt = canonicalReceipt ?? parseG34ReceiptFields(sourceComment);
   const expectedMarker = eventKind === "WORKER_STARTED"
     ? "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1"
     : eventKind === "WORKER_TERMINAL_RESULT" ? "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1" : null;
@@ -333,7 +333,7 @@ export async function readSourceEventPublication({ eventId, sourceCommentId, eve
   };
 }
 
-export async function beginSuccessorDelivery({ eventId, sourceCommentId, eventCommentId, controlCommentId, successorCommentId, runtimeRoot }) {
+export async function beginSuccessorDelivery({ eventId, sourceCommentId, eventCommentId, controlCommentId, successorCommentId, deliver, runtimeRoot }) {
   const file = ledgerPathFor(runtimeRoot);
   const ledger = await readLedger(file);
   const prior = ledger[eventId];
@@ -344,6 +344,7 @@ export async function beginSuccessorDelivery({ eventId, sourceCommentId, eventCo
     return { state: "DELIVERY_UNCERTAIN" };
   }
   if (prior.state !== "DELIVERED") throw new Error("cannot deliver a successor for an undelivered source event");
+  if (typeof deliver !== "function") throw new Error("bound Worker transport is required");
   ledger[eventId] = {
     ...prior,
     state: "SUCCESSOR_SEND_ATTEMPTED",
