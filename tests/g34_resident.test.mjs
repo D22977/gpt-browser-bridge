@@ -734,6 +734,79 @@ test("resident fails closed on ambiguous, mismatched, or unauthenticated G22 cha
   }
 });
 
+test("resident rejects explicit G22 terminal aliases that conflict with the verified start chain", async () => {
+  const run = async (records) => {
+    const normalized = structuredClone(records).map((record) => ({ ...record, id: String(record.id) }));
+    const github = fakeSourceGithub(normalized, {}, 9900);
+    github.getCommit = async (sha) => sha === "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8"
+      ? { sha, tree: { sha: "13c12f569c3e3302ba60e0be800fb3c9995d903c" }, parents: [] }
+      : { sha, tree: { sha: "6613901a972772dbada0222feb45662e477f0ab5" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] };
+    return runG34ResidentCycle({
+      sourceComments: normalized, currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
+      issueNumber: 211, runtimeRoot: await mkdtemp(path.join(tmpdir(), "g34-g22-alias-conflict-")), github,
+      repositoryFullName: "D22977/gpt-browser-bridge", branch: "work/gbb-g34-review-repair-20261009-01",
+      baseSha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8",
+      headSha: "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14", publisherAuthor: "D22977",
+    });
+  };
+  const terminalIndex = pinnedG22ReceiptRecords.findIndex((record) => record.body.startsWith("GBB_G34_WORKER_TERMINAL_RESULT_V1"));
+  assert.ok(terminalIndex >= 0);
+  const conflicts = [
+    (record) => { record.body += "\nworker_start_comment_id: 6328970024"; },
+    (record) => { record.body += "\nattempt_id: GBB-G22-CONFLICTING-ATTEMPT-01"; },
+    (record) => { record.body += `\nbase_sha: ${"a".repeat(40)}`; },
+    (record) => { record.body += `\nhead_sha: ${"b".repeat(40)}`; },
+    (record) => { record.body += `\ntree_sha: ${"c".repeat(40)}`; },
+    (record) => {
+      record.body = record.body.replace("lease_id: GBB-211-LEASE-20261022-22", "lease_id: GBB-211-LEASE-CONFLICT-99");
+    },
+    (record) => { record.body += "\nbranch: work/gbb-conflicting-branch"; },
+  ];
+  for (const conflict of conflicts) {
+    const records = structuredClone(pinnedG22ReceiptRecords);
+    conflict(records[terminalIndex]);
+    await assert.rejects(() => run(records));
+  }
+});
+
+test("resident binds source and terminal authors to the verified active Control authority before publication", async () => {
+  const head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const start = workerComment("4001", "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1", "CONSUMED_STARTED", workerBinding.base_sha);
+  const terminal = workerComment("4002", "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1", "READY_FOR_FRESH_REVIEW", head, {
+    worker_start_comment_id: "4001",
+  });
+  start.user.login = "spoofed-publisher";
+  terminal.user.login = "spoofed-publisher";
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-author-spoof-"));
+  await assert.rejects(() => runG34ResidentCycle({
+    sourceComments: [start, terminal], currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
+    issueNumber: 211, runtimeRoot, github: fakeSourceGithub([start, terminal], {}, 9001),
+    repositoryFullName: "D22977/gpt-browser-bridge", branch: workerBinding.branch,
+    baseSha: workerBinding.base_sha, headSha: head, publisherAuthor: "spoofed-publisher",
+  }));
+  await assert.rejects(readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"), { code: "ENOENT" });
+
+  const records = structuredClone(pinnedG22ReceiptRecords).map((record) => ({ ...record, id: String(record.id) }));
+  const startRecord = records.find((record) => record.body.startsWith("GBB_G036_211_WORKER_CONSUMED_STARTED_V1"));
+  const terminalRecord = records.find((record) => record.body.startsWith("GBB_G34_WORKER_TERMINAL_RESULT_V1"));
+  assert.ok(startRecord && terminalRecord);
+  startRecord.user.login = "spoofed-publisher";
+  terminalRecord.user.login = "spoofed-publisher";
+  const g22Github = fakeSourceGithub(records, {}, 9900);
+  g22Github.getCommit = async (sha) => sha === "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8"
+    ? { sha, tree: { sha: "13c12f569c3e3302ba60e0be800fb3c9995d903c" }, parents: [] }
+    : { sha, tree: { sha: "6613901a972772dbada0222feb45662e477f0ab5" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] };
+  const g22Root = await mkdtemp(path.join(tmpdir(), "g34-g22-author-spoof-"));
+  await assert.rejects(() => runG34ResidentCycle({
+    sourceComments: records, currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
+    issueNumber: 211, runtimeRoot: g22Root, github: g22Github,
+    repositoryFullName: "D22977/gpt-browser-bridge", branch: "work/gbb-g34-review-repair-20261009-01",
+    baseSha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8",
+    headSha: "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14", publisherAuthor: "spoofed-publisher",
+  }));
+  await assert.rejects(readFile(path.join(g22Root, "events", "g34-source-events.json"), "utf8"), { code: "ENOENT" });
+});
+
 test("missing or nonfunction successor deliver leaves the delivered ledger byte-identical", async () => {
   for (const deliver of [undefined, null, "not-a-function"]) {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-missing-deliver-"));

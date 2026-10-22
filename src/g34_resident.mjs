@@ -222,6 +222,9 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
     throw new Error("exact open G34 work-order card is required");
   }
   const activeAuthority = parseActiveControlAuthority(currentAuthority);
+  if (!nonEmpty(publisherAuthor) || publisherAuthor !== activeAuthority.publisher_login) {
+    throw new Error("worker source publisher is not the verified active Control publisher");
+  }
   const results = [];
   const linkedCache = new Map();
   const listedG22Records = new Map();
@@ -314,6 +317,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
     if (legacyG22 && issueNumber === 211) {
       // G22 used a routed collaboration task and omitted an explicit start pointer on
       // its terminal. Resolve that alias only from one exact, authenticated chain.
+      const rawTerminalFields = fields.marker === "GBB_G34_WORKER_TERMINAL_RESULT_V1" ? { ...fields } : null;
       const allListed = [...listedG22Records.values()];
       const parseById = (id) => {
         const record = listedG22Records.get(String(id));
@@ -377,6 +381,30 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
         throw new Error("G22 exact receipt chain fields do not agree");
       }
       if (terminal) {
+        const explicitAliases = [
+          ["worker_start_comment_id", String(startRecord.id)],
+          ["attempt_id", attempt],
+          ["lease_id", lease],
+          ["base_sha", base],
+          ["head_sha", commit],
+          ["tree_sha", tree],
+          ["branch", branchName],
+          ["candidate_base_sha", base],
+          ["candidate_branch", branchName],
+          ["candidate_exact_head_sha", commit],
+          ["candidate_tree_sha", tree],
+          ["remote_commit", commit],
+          ["local_tested_commit", commit],
+          ["remote_tree", tree],
+          ["remote_api_tree", tree],
+          ["local_tested_tree", tree],
+        ];
+        const conflictingAliases = explicitAliases
+          .filter(([key, expected]) => rawTerminalFields[key] !== undefined && rawTerminalFields[key] !== expected)
+          .map(([key]) => key);
+        if (conflictingAliases.length) {
+          throw new Error(`G22 terminal explicit aliases conflict with the verified chain: ${conflictingAliases.join(",")}`);
+        }
         if (typeof github.getCommit !== "function") throw new Error("exact G22 candidate commit and tree read is required");
         const [baseCommit, headCommit] = await Promise.all([github.getCommit(base), github.getCommit(commit)]);
         const baseTree = routeRaw.new_shift?.assigned_base_tree;
@@ -529,7 +557,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       attempt_id: workerStart.attempt_id,
       start_comment_id: String(workerStart.id),
     };
-    if (sourceComment.user?.login !== publisherAuthor ||
+    if (sourceComment.user?.login !== activeAuthority.publisher_login ||
         (eventKind === "WORKER_STARTED" && (fields.claim_comment_id !== String(claim.id) ||
           fields.acceptance_comment_id !== String(accepted.id) || fields.binding_comment_id !== String(route.id) ||
           fields.dispatch_comment_id !== String(dispatch.id))) ||
@@ -583,7 +611,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       headSha: fields.head_sha ?? fields.remote_commit ?? fields.local_tested_commit,
       state: fields.state,
       ...(eventKind === "WORKER_TERMINAL_RESULT" ? { terminalCommentId: String(sourceComment.id) } : {}),
-      expectedAuthor: publisherAuthor,
+      expectedAuthor: activeAuthority.publisher_login,
     });
     const publication = await publishSourceEvent({ event, issueNumber, runtimeRoot, github, repositoryFullName });
     results.push({ event: { ...event, comment_id: publication.comment_id }, publication });

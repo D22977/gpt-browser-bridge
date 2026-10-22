@@ -56,7 +56,9 @@ export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssue
     throw new Error("source executor comment is not bound to its exact GitHub issue");
   }
   if (typeof expectedAuthor !== "string" || !expectedAuthor.trim()) throw new Error("expected publisher GitHub author is required");
-  if (sourceComment.user?.login !== expectedAuthor) throw new Error("source executor comment has an unrelated GitHub author");
+  const verifiedAuthor = authority?.publisher_login ?? expectedAuthor;
+  if (verifiedAuthor !== expectedAuthor) throw new Error("expected publisher is not the verified active Control publisher");
+  if (sourceComment.user?.login !== verifiedAuthor) throw new Error("source executor comment has an unrelated GitHub author");
   const receipt = canonicalReceipt ?? parseG34ReceiptFields(sourceComment);
   const expectedMarker = eventKind === "WORKER_STARTED"
     ? "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1"
