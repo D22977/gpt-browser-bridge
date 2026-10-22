@@ -1,5 +1,5 @@
 import { parseG34ReceiptFields, parseActiveControlAuthority } from "./g34_contract.mjs";
-import { createSourceEvent, publishSourceEvent, beginSuccessorDelivery, recordSuccessorDelivery } from "./g34_source_event_publisher.mjs";
+import { createSourceEvent, publishSourceEvent, readSourceEventPublication, beginSuccessorDelivery, recordSuccessorDelivery } from "./g34_source_event_publisher.mjs";
 
 const nonEmpty = (value) => typeof value === "string" && value.trim().length > 0;
 const executorTaskIdentity = (value) => {
@@ -20,7 +20,7 @@ function receiptFields(receipt) {
   return { ...parseG34ReceiptFields(receipt), id, author: receipt.user.login, url: receipt.url, body: receipt.body };
 }
 
-export async function authorizeControlSuccessor({ event, authority, controlReceipt, github }) {
+export async function authorizeControlSuccessor({ event, publication, authority, controlReceipt, github }) {
   const receipt = receiptFields(controlReceipt);
   if (typeof github?.getIssueComment !== "function" ||
       typeof github?.getCurrentAuthorityRecords !== "function") {
@@ -101,7 +101,9 @@ export async function authorizeControlSuccessor({ event, authority, controlRecei
     executorTaskIdentity(workerExecutorIdentity) === reviewerBinding.control_task_identity;
   const currentControlPointers = liveAuthority.record_ids;
   if (
-    !event || !authority || event.state !== "DELIVERED" ||
+    !event || !authority || publication?.state !== "DELIVERED" ||
+    String(publication.comment_id ?? "") !== String(event.comment_id ?? "") ||
+    String(publication.source_comment_id ?? "") !== String(event.source_comment_id ?? "") ||
     !/^[0-9a-f]{40}$/.test(String(event.tree_sha ?? "")) ||
     !event.body.includes(`tree_sha=${event.tree_sha}`) ||
     authority.control_generation !== "034" ||
@@ -406,21 +408,13 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
 }
 
 export async function consumeDeliveredControlSuccessor({ event, authority, controlReceipt, runtimeRoot, github, deliver, reconcile }) {
-  let successor;
-  try {
-    successor = await authorizeControlSuccessor({ event, authority, controlReceipt, github });
-  } catch (error) {
-    const prior = await beginSuccessorDelivery({
-      eventId: event.event_id,
-      sourceCommentId: event.source_comment_id,
-      eventCommentId: event.comment_id,
-      controlCommentId: controlReceipt?.id,
-      successorCommentId: controlReceipt?.successor_comment_id,
-      runtimeRoot,
-    });
-    if (prior.state === "DELIVERY_UNCERTAIN") return { state: "DELIVERY_UNCERTAIN" };
-    throw error;
-  }
+  const publication = await readSourceEventPublication({
+    eventId: event.event_id,
+    sourceCommentId: event.source_comment_id,
+    eventCommentId: event.comment_id,
+    runtimeRoot,
+  });
+  const successor = await authorizeControlSuccessor({ event, publication, authority, controlReceipt, github });
   const opened = await beginSuccessorDelivery({
     eventId: event.event_id,
     sourceCommentId: event.source_comment_id,

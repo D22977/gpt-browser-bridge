@@ -227,7 +227,12 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
       if (error.message.startsWith("DUPLICATE_EVENT:")) throw error;
     }
     if (exact) {
-      ledger[validated.event_id] = { ...prior, state: "DELIVERED", comment_id: String(exact.id) };
+      ledger[validated.event_id] = {
+        ...prior,
+        state: "DELIVERED",
+        source_publication_state: "DELIVERED",
+        comment_id: String(exact.id),
+      };
       await saveLedger(file, ledger);
       return { state: "NO_OP", comment_id: String(exact.id) };
     }
@@ -252,7 +257,12 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
 
   const existing = await findMatch({ ...validated, body, expected_author: expectedAuthor }, issueNumber, repositoryFullName, github);
   if (existing) {
-    ledger[validated.event_id] = { state: "DELIVERED", source_comment_id: validated.source_comment_id, comment_id: String(existing.id) };
+    ledger[validated.event_id] = {
+      state: "DELIVERED",
+      source_publication_state: "DELIVERED",
+      source_comment_id: validated.source_comment_id,
+      comment_id: String(existing.id),
+    };
     await saveLedger(file, ledger);
     return { state: "NO_OP", comment_id: String(existing.id) };
   }
@@ -267,7 +277,12 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
   try {
     created = await github.createIssueComment(issueNumber, body);
     const exact = await verifyComment({ ...validated, body, expected_author: expectedAuthor }, issueNumber, repositoryFullName, created, github);
-    ledger[validated.event_id] = { state: "DELIVERED", source_comment_id: validated.source_comment_id, comment_id: String(exact.id) };
+    ledger[validated.event_id] = {
+      state: "DELIVERED",
+      source_publication_state: "DELIVERED",
+      source_comment_id: validated.source_comment_id,
+      comment_id: String(exact.id),
+    };
     await saveLedger(file, ledger);
     return { state: "DELIVERED", comment_id: String(exact.id) };
   } catch (error) {
@@ -294,6 +309,28 @@ export async function markSourceEventConsumed({ eventId, sourceCommentId, contro
     throw new Error("cannot consume with an unbound Control acceptance");
   }
   throw new Error("cannot consume without an exact successor delivery confirmation receipt");
+}
+
+export async function readSourceEventPublication({ eventId, sourceCommentId, eventCommentId, runtimeRoot }) {
+  const file = ledgerPathFor(runtimeRoot);
+  const ledger = await readLedger(file);
+  const prior = ledger[eventId];
+  if (!prior || prior.source_comment_id !== String(sourceCommentId) ||
+      prior.comment_id !== String(eventCommentId)) {
+    throw new Error("cannot authorize an unbound source event publication");
+  }
+  const publicationState = prior.source_publication_state ??
+    (prior.state === "DELIVERED" || ["SUCCESSOR_SEND_ATTEMPTED", "SUCCESSOR_DELIVERY_UNCERTAIN", "CONSUMED"].includes(prior.state)
+      ? "DELIVERED"
+      : null);
+  if (publicationState !== "DELIVERED") {
+    throw new Error("source event has no verified delivered publication state");
+  }
+  return {
+    state: publicationState,
+    source_comment_id: prior.source_comment_id,
+    comment_id: prior.comment_id,
+  };
 }
 
 export async function beginSuccessorDelivery({ eventId, sourceCommentId, eventCommentId, controlCommentId, successorCommentId, runtimeRoot }) {
@@ -474,7 +511,7 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 dispatch.state === "SAME_WORKER_REASSIGNED_FOR_REVIEW_FIXES" &&
                 dispatch.recorded_by_role === "LOCAL_CONTROL_TOWER" &&
                 typeof dispatch.control_task_identity === "string" && dispatch.control_task_identity.trim() !== "" &&
-                executorTaskIdentity(dispatch.executor_identity) === event.agent_name &&
+                executorTaskIdentity(dispatch.executor_identity) === successor?.agent_name &&
                 Number(cardIssue?.number) === Number(control.independent_review_card_issue_number) &&
                 cardFields.candidate_repository === event.source_repository_full_name &&
                 cardFields.candidate_branch === event.branch &&
