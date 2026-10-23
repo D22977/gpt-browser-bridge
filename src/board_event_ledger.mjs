@@ -123,25 +123,56 @@ export function projectEvents(events) {
   const active = [];
   const fencedEventIds = [];
   const duplicateIdempotencyEventIds = [];
+  const quarantinedEventIds = [];
 
   for (const list of byWorkOrder.values()) {
-    const sorted = [...list].sort(
-      (a, b) =>
-        a.generation - b.generation ||
-        a.sequence - b.sequence ||
-        a.event_id.localeCompare(b.event_id)
-    );
     const seenKeys = new Set();
-    for (const event of sorted) {
+    for (const event of list) {
       if (seenKeys.has(event.idempotency_key)) {
         duplicateIdempotencyEventIds.push(event.event_id);
       }
       seenKeys.add(event.idempotency_key);
     }
-    const head = sorted.at(-1) ?? null;
-    active.push(head);
-    for (const event of sorted.slice(0, -1)) {
-      fencedEventIds.push(event.event_id);
+
+    const children = new Map();
+    for (const event of list) {
+      const key = event.predecessor_event_id ?? "__root__";
+      if (!children.has(key)) children.set(key, []);
+      children.get(key).push(event);
+    }
+
+    const roots = list.filter((event) => event.predecessor_event_id === null);
+    const valid = new Set();
+    let current = null;
+    if (roots.length > 0) {
+      current = roots[0];
+      valid.add(current.event_id);
+      const pathKeys = new Set([current.idempotency_key]);
+      while (true) {
+        const kids = children.get(current.event_id) ?? [];
+        const candidates = kids.filter(
+          (kid) =>
+            !pathKeys.has(kid.idempotency_key) &&
+            kid.sequence > current.sequence &&
+            kid.generation >= current.generation
+        );
+        if (candidates.length === 0) break;
+        const next = candidates[0];
+        valid.add(next.event_id);
+        pathKeys.add(next.idempotency_key);
+        current = next;
+      }
+    }
+
+    const head = current;
+    if (head) active.push(head);
+    for (const event of list) {
+      if (event.event_id !== head?.event_id) {
+        fencedEventIds.push(event.event_id);
+      }
+      if (!valid.has(event.event_id)) {
+        quarantinedEventIds.push(event.event_id);
+      }
     }
   }
 
@@ -149,6 +180,9 @@ export function projectEvents(events) {
     active,
     fenced_event_ids: fencedEventIds.sort(),
     duplicate_idempotency_event_ids: duplicateIdempotencyEventIds.sort(),
+    quarantined_event_ids: quarantinedEventIds.sort(),
+    invalid_event_ids: quarantinedEventIds.sort(),
+    rejected_event_ids: quarantinedEventIds.sort(),
   };
 }
 
@@ -193,6 +227,12 @@ export function classifyLease(input, atUtc) {
 }
 
 export function buildHandoffEvent(priorInput, next = {}) {
+  if (next?.predecessor_commit == null) {
+    throw new Error("buildHandoffEvent: predecessor_commit is required");
+  }
+  if (!commitSha.safeParse(next.predecessor_commit).success) {
+    throw new Error("buildHandoffEvent: predecessor_commit must be a 40-hex commit sha");
+  }
   const prior = boardEventSchema.parse(priorInput);
   return boardEventSchema.parse({
     ...prior,
@@ -202,7 +242,7 @@ export function buildHandoffEvent(priorInput, next = {}) {
     attempt_id: next.attempt_id,
     idempotency_key: next.idempotency_key,
     predecessor_event_id: prior.event_id,
-    predecessor_commit: next.predecessor_commit ?? prior.predecessor_commit,
+    predecessor_commit: next.predecessor_commit,
     transition: next.transition ?? "HANDOFF",
     state: next.state ?? "HANDOFF_READY",
     checkpoint: prior.checkpoint,
@@ -295,6 +335,14 @@ function isStaleRejection(error) {
   return /fast.?forward|stale head/i.test(String(error.message ?? ""));
 }
 
+function resolveCanonicalPrior(history) {
+  if (!Array.isArray(history) || history.length === 0) return null;
+  const workOrders = new Set(history.map((item) => boardEventSchema.parse(item).work_order_id));
+  if (workOrders.size !== 1) return null;
+  const projection = projectEvents(history);
+  return projection.active[0] ?? null;
+}
+
 export async function publishEvent({ github, ref, expectedHead = null, event, history = [] }) {
   requireGithub(github);
   const candidate = boardEventSchema.parse(event);
@@ -306,6 +354,111 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
       existing_event_id: conflict.existing.event_id,
       existing_idempotency_key: conflict.existing.idempotency_key,
       next_legal_action: "USE_EXISTING_ACCEPTED_EVENT",
+    };
+  }
+
+  const canonicalPrior =
+    Array.isArray(history) && history.length > 0 ? resolveCanonicalPrior(history) : null;
+
+  if (Array.isArray(history) && history.length > 0) {
+    if (!canonicalPrior) {
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "history does not contain a valid canonical accepted event",
+        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
+    }
+    if (expectedHead === null || expectedHead === undefined) {
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "canonical history requires a bound head commit",
+        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
+    }
+    const priorLease = classifyLease(canonicalPrior, candidate.clock_in_utc);
+    if (priorLease.state === "ACTIVE" && !candidate.fenced_event_ids.includes(canonicalPrior.event_id)) {
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "prior shift is still active and has not been fenced or expired",
+        next_legal_action: "WAIT_FOR_LEASE_EXPIRY_OR_HANDOFF",
+      };
+    }
+    if (candidate.work_order_id !== canonicalPrior.work_order_id) {
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "work order mismatch against canonical history",
+        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
+    }
+    if (candidate.predecessor_event_id !== canonicalPrior.event_id) {
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "predecessor_event_id is not bound to the canonical accepted event",
+        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
+    }
+    if (candidate.predecessor_commit !== expectedHead) {
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "predecessor_commit is not bound to the canonical accepted head",
+        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
+    }
+    if (candidate.sequence <= canonicalPrior.sequence) {
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "sequence must advance beyond the canonical accepted event",
+        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
+    }
+    if (candidate.generation <= canonicalPrior.generation) {
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "generation must advance beyond the canonical accepted event",
+        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
+    }
+  } else if (candidate.predecessor_event_id !== null) {
+    return {
+      outcome: "INVALID_HISTORY",
+      published: false,
+      accepted: false,
+      status: "INVALID_HISTORY",
+      reason: "INVALID_HISTORY",
+      error: "omitted history cannot publish a successor event",
+      next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
     };
   }
 
@@ -400,11 +553,22 @@ export async function reconcilePublication({
   if (event && history.length > 0) {
     const conflict = findIdempotencyConflict(history, event);
     if (conflict) {
+      if (conflict.kind === "IDEMPOTENCY_CONFLICT") {
+        return {
+          outcome: "IDEMPOTENCY_CONFLICT",
+          accepted: false,
+          head,
+          existing_event_id: conflict.existing.event_id,
+          existing_idempotency_key: conflict.existing.idempotency_key,
+          next_legal_action: "FAIL_CLOSED_USE_CANONICAL_EVENT",
+        };
+      }
       return {
         outcome: "DUPLICATE",
         accepted: true,
         head,
         existing_event_id: conflict.existing.event_id,
+        existing_idempotency_key: conflict.existing.idempotency_key,
         next_legal_action: "USE_EXISTING_ACCEPTED_EVENT",
       };
     }

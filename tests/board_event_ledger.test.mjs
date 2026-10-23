@@ -135,6 +135,17 @@ test("first contender advances the shared head with a non-forced update", async 
 
 test("two contenders share one parent: only the first advances, the stale one is rejected and reconciles without blind retry", async () => {
   const github = createFakeGitHub();
+  const seedEvent = createEvent(
+    baseEvent({
+      event_id: "EVT-SEED",
+      idempotency_key: "IDEM-SEED",
+      sequence: 1,
+      generation: 1,
+      predecessor_event_id: null,
+      predecessor_commit: null,
+    })
+  );
+
   const contenderA = baseEvent({
     event_id: "EVT-A",
     idempotency_key: "IDEM-A",
@@ -152,10 +163,10 @@ test("two contenders share one parent: only the first advances, the stale one is
     predecessor_commit: SEED,
   });
 
-  const first = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: SEED, event: contenderA });
+  const first = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: SEED, event: contenderA, history: [seedEvent] });
   assert.equal(first.outcome, "ACCEPTED");
 
-  const stale = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: SEED, event: contenderB });
+  const stale = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: SEED, event: contenderB, history: [seedEvent] });
   assert.equal(stale.outcome, "STALE_HEAD");
   assert.equal(stale.published, false);
   assert.equal(stale.observed_head, first.commit_sha);
@@ -168,10 +179,12 @@ test("two contenders share one parent: only the first advances, the stale one is
     ref: "refs/heads/proof",
     expectedHead: first.commit_sha,
     event: { ...contenderB, predecessor_commit: first.commit_sha },
+    history: [first.event],
   });
-  assert.equal(rebased.outcome, "ACCEPTED");
-  assert.equal(github.state.updates.length, 2);
-  assert.equal(github.state.head, rebased.commit_sha);
+  assert.notEqual(rebased.outcome, "ACCEPTED");
+  assert.equal(rebased.published, false);
+  assert.equal(github.state.updates.length, 1);
+  assert.equal(github.state.head, first.commit_sha);
 });
 
 test("a write-time race is rejected as stale and reread from the competing head", async () => {
@@ -286,6 +299,7 @@ test("lease expiry is observable and handoff keeps the same work order and check
     event_id: "EVT-HANDOFF",
     attempt_id: "ATT-2",
     idempotency_key: "IDEM-HANDOFF",
+    predecessor_commit: SEED,
     handoff_utc: "2026-10-23T09:11:00+00:00",
     clock_in_utc: "2026-10-23T09:12:00+00:00",
     lease_expires_utc: "2026-10-23T09:30:00+00:00",
@@ -296,6 +310,7 @@ test("lease expiry is observable and handoff keeps the same work order and check
   assert.equal(handoff.generation, claim.generation + 1);
   assert.equal(handoff.sequence, claim.sequence + 1);
   assert.equal(handoff.predecessor_event_id, claim.event_id);
+  assert.equal(handoff.predecessor_commit, SEED);
   assert.equal(classifyLease(handoff, "2026-10-23T09:15:00+00:00").state, "HANDED_OFF");
 });
 
@@ -399,7 +414,6 @@ test("worker identity is not an admission predicate", async () => {
     event_id: "EVT-ID-B",
     idempotency_key: "IDEM-ID-B",
     predecessor_commit: SEED,
-    executor_identity: "optional-agent-b",
   });
 
   const githubA = createFakeGitHub();
@@ -420,4 +434,98 @@ test("publishEvent rejects an adapter missing the required operations", async ()
     () => publishEvent({ github: { readRef: async () => null }, ref: "r", expectedHead: null, event: baseEvent() }),
     /readRef, createCommit and updateRef/
   );
+});
+
+test("REGRESSION finding1: omitted or stale canonical history cannot publish a successor", async () => {
+  const github = createFakeGitHub();
+  const first = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: SEED,
+    event: baseEvent({ event_id: "EVT-A", idempotency_key: "IDEM-A", predecessor_commit: SEED }),
+  });
+  assert.equal(first.outcome, "ACCEPTED");
+
+  const omittedHistory = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: first.commit_sha,
+    event: baseEvent({
+      event_id: "EVT-B",
+      idempotency_key: "IDEM-B",
+      sequence: 2,
+      generation: 2,
+      predecessor_event_id: first.event.event_id,
+      predecessor_commit: first.commit_sha,
+    }),
+  });
+  assert.equal(omittedHistory.published, false);
+
+  const stalePredecessor = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: first.commit_sha,
+    event: baseEvent({
+      event_id: "EVT-C",
+      idempotency_key: "IDEM-C",
+      sequence: 2,
+      generation: 2,
+      predecessor_event_id: "EVT-SEED",
+      predecessor_commit: first.commit_sha,
+    }),
+    history: [first.event],
+  });
+  assert.equal(stalePredecessor.published, false);
+});
+
+test("REGRESSION finding2: reconcilePublication preserves IDEMPOTENCY_CONFLICT as not accepted", async () => {
+  const github = createFakeGitHub();
+  const event = baseEvent({ predecessor_commit: SEED });
+  const first = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: SEED, event });
+  assert.equal(first.outcome, "ACCEPTED");
+
+  const conflictedEvent = { ...event, event_id: "EVT-OTHER", state: "DIFFERENT" };
+  const reconciled = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: "f".repeat(40),
+    expectedHead: first.commit_sha,
+    history: [first.event],
+    event: conflictedEvent,
+  });
+  assert.equal(reconciled.outcome, "IDEMPOTENCY_CONFLICT");
+  assert.equal(reconciled.accepted, false);
+});
+
+test("REGRESSION finding3: projectEvents does not select invalid events as active", () => {
+  const first = createEvent(baseEvent({ event_id: "EVT-1", idempotency_key: "IDEM-1", generation: 1, sequence: 1 }));
+  const invalid = createEvent(
+    baseEvent({ event_id: "EVT-2", idempotency_key: "IDEM-1", generation: 99, sequence: 99 })
+  );
+  const projection = projectEvents([first, invalid]);
+  assert.equal(projection.active.length, 1);
+  assert.equal(projection.active[0].event_id, "EVT-1");
+  assert.ok(projection.quarantined_event_ids.includes("EVT-2"));
+});
+
+test("REGRESSION finding4: buildHandoffEvent requires predecessor commit provenance", () => {
+  const prior = createEvent(baseEvent({ predecessor_commit: null }));
+  assert.throws(
+    () =>
+      buildHandoffEvent(prior, {
+        event_id: "EVT-HANDOFF",
+        attempt_id: "ATT-2",
+        idempotency_key: "IDEM-HANDOFF",
+        clock_in_utc: "2026-10-23T09:12:00+00:00",
+      }),
+    /predecessor_commit/
+  );
+  const handoff = buildHandoffEvent(prior, {
+    event_id: "EVT-HANDOFF",
+    attempt_id: "ATT-2",
+    idempotency_key: "IDEM-HANDOFF",
+    predecessor_commit: SEED,
+    clock_in_utc: "2026-10-23T09:12:00+00:00",
+  });
+  assert.equal(handoff.predecessor_commit, SEED);
 });
