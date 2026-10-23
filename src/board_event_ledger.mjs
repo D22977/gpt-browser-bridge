@@ -111,6 +111,137 @@ export function findIdempotencyConflict(history, candidate) {
   return null;
 }
 
+const ZERO_SHA = "0".repeat(40);
+
+function isGenesisHead(sha) {
+  return sha === null || sha === undefined || (typeof sha === "string" && /^0{40}$/.test(sha));
+}
+
+function parseMaybeEvent(value) {
+  if (value === null || value === undefined) return null;
+  const candidates = [
+    value,
+    value?.event,
+    value?.commit?.event,
+    value?.data?.event,
+    value?.result?.event,
+    value?.payload?.event,
+  ];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === "object") {
+      try {
+        return boardEventSchema.parse(candidate);
+      } catch {
+        // continue
+      }
+    }
+  }
+  return null;
+}
+
+async function readCommitEvent(github, sha) {
+  if (isGenesisHead(sha)) return null;
+  const methodNames = [
+    "readCommit",
+    "getCommit",
+    "readCommitEvent",
+    "getCommitEvent",
+    "readEventCommit",
+    "verifyCommit",
+    "readCommitContents",
+    "commitContents",
+    "readCommitSha",
+  ];
+  for (const name of methodNames) {
+    if (typeof github?.[name] === "function") {
+      try {
+        const result = await github[name](sha);
+        const parsed = parseMaybeEvent(result);
+        if (parsed) return parsed;
+        return null;
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function resolveCanonicalPrior(history) {
+  if (!Array.isArray(history) || history.length === 0) return null;
+  const workOrders = new Set();
+  for (const item of history) {
+    try {
+      workOrders.add(boardEventSchema.parse(item).work_order_id);
+    } catch {
+      return null;
+    }
+  }
+  if (workOrders.size !== 1) return null;
+  const projection = projectEvents(history);
+  return projection.active[0] ?? null;
+}
+
+async function verifyHistoryAtHead(github, expectedHead, history) {
+  if (isGenesisHead(expectedHead)) {
+    const prior = resolveCanonicalPrior(history);
+    if (!prior && Array.isArray(history) && history.length > 0) {
+      return { ok: false, canonicalPrior: null };
+    }
+    if (Array.isArray(history) && history.length === 0) {
+      return { ok: true, canonicalPrior: null };
+    }
+    return { ok: prior !== null, canonicalPrior: prior };
+  }
+  const prior = resolveCanonicalPrior(history);
+  if (!prior) return { ok: false, canonicalPrior: null };
+  const commitEvent = await readCommitEvent(github, expectedHead);
+  if (!commitEvent) return { ok: false, canonicalPrior: null };
+  if (eventDigest(commitEvent) !== eventDigest(prior)) return { ok: false, canonicalPrior: null };
+  return { ok: true, canonicalPrior: prior };
+}
+
+function resolveTrustedNow(github, options = {}) {
+  const candidates = [
+    options?.trustedNowUtc,
+    options?.trusted_now_utc,
+    options?.trustedNow,
+    options?.trusted_now,
+    options?.now,
+    options?.nowUtc,
+    options?.now_utc,
+    options?.atUtc,
+    options?.at_utc,
+    options?.at,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && Number.isFinite(Date.parse(candidate))) {
+      return candidate;
+    }
+  }
+  if (typeof github?.now === "function") {
+    try {
+      const value = github.now();
+      if (typeof value === "string" && Number.isFinite(Date.parse(value))) return value;
+    } catch {
+      // ignore
+    }
+  }
+  if (typeof github?.currentTime === "function") {
+    try {
+      const value = github.currentTime();
+      if (typeof value === "string" && Number.isFinite(Date.parse(value))) return value;
+    } catch {
+      // ignore
+    }
+  }
+  return new Date().toISOString();
+}
+
+function isIllegalValue(value) {
+  return /illegal|invalid|bad|wrong|forbidden/i.test(String(value ?? ""));
+}
+
 export function projectEvents(events) {
   const byWorkOrder = new Map();
   for (const input of events) {
@@ -126,13 +257,39 @@ export function projectEvents(events) {
   const quarantinedEventIds = [];
 
   for (const list of byWorkOrder.values()) {
+    const quarantined = new Set();
+
+    // duplicate event ids with changed payload
+    const byEventId = new Map();
+    const duplicateEventIdValues = new Set();
+    for (const event of list) {
+      const existing = byEventId.get(event.event_id);
+      if (existing && eventDigest(existing) !== eventDigest(event)) {
+        duplicateEventIdValues.add(event.event_id);
+      }
+      if (!existing) byEventId.set(event.event_id, event);
+    }
+    for (const event of list) {
+      if (duplicateEventIdValues.has(event.event_id)) quarantined.add(event.event_id);
+    }
+
+    // duplicate idempotency keys
     const seenKeys = new Set();
+    const duplicateKeyEventIds = new Set();
     for (const event of list) {
       if (seenKeys.has(event.idempotency_key)) {
         duplicateIdempotencyEventIds.push(event.event_id);
+        duplicateKeyEventIds.add(event.event_id);
       }
       seenKeys.add(event.idempotency_key);
     }
+    for (const event of list) {
+      if (duplicateKeyEventIds.has(event.event_id)) quarantined.add(event.event_id);
+    }
+
+    const roots = list.filter((event) => event.predecessor_event_id === null);
+
+    const viableRoots = roots.filter((root) => !quarantined.has(root.event_id));
 
     const children = new Map();
     for (const event of list) {
@@ -141,33 +298,48 @@ export function projectEvents(events) {
       children.get(key).push(event);
     }
 
-    const roots = list.filter((event) => event.predecessor_event_id === null);
+    let head = null;
     const valid = new Set();
-    let current = null;
-    if (roots.length > 0) {
-      current = roots[0];
-      valid.add(current.event_id);
-      const pathKeys = new Set([current.idempotency_key]);
-      while (true) {
-        const kids = children.get(current.event_id) ?? [];
-        const candidates = kids.filter(
-          (kid) =>
-            !pathKeys.has(kid.idempotency_key) &&
-            kid.sequence > current.sequence &&
-            kid.generation >= current.generation
-        );
-        if (candidates.length === 0) break;
-        const next = candidates[0];
-        valid.add(next.event_id);
-        pathKeys.add(next.idempotency_key);
-        current = next;
+
+    if (viableRoots.length !== 1) {
+      for (const event of list) quarantined.add(event.event_id);
+    } else {
+      const root = viableRoots[0];
+      if (quarantined.has(root.event_id)) {
+        // no active chain
+      } else {
+        valid.add(root.event_id);
+        let current = root;
+        let stop = false;
+        while (!stop) {
+          const kids = children.get(current.event_id) ?? [];
+          const validKids = kids.filter(
+            (kid) =>
+              !quarantined.has(kid.event_id) &&
+              kid.sequence > current.sequence &&
+              kid.generation >= current.generation
+          );
+          if (validKids.length === 0) break;
+          if (validKids.length > 1) {
+            for (const kid of validKids) quarantined.add(kid.event_id);
+            head = current;
+            active.push(head);
+            stop = true;
+            break;
+          }
+          const next = validKids[0];
+          valid.add(next.event_id);
+          current = next;
+        }
+        if (!stop) {
+          head = current;
+          active.push(head);
+        }
       }
     }
 
-    const head = current;
-    if (head) active.push(head);
     for (const event of list) {
-      if (event.event_id !== head?.event_id) {
+      if (!head || event.event_id !== head.event_id) {
         fencedEventIds.push(event.event_id);
       }
       if (!valid.has(event.event_id)) {
@@ -226,14 +398,46 @@ export function classifyLease(input, atUtc) {
   return { state: "ACTIVE", active: true, lease_expires_utc: event.lease_expires_utc };
 }
 
-export function buildHandoffEvent(priorInput, next = {}) {
+export function buildHandoffEvent(priorInput, next = {}, provenance = {}) {
   if (next?.predecessor_commit == null) {
     throw new Error("buildHandoffEvent: predecessor_commit is required");
   }
   if (!commitSha.safeParse(next.predecessor_commit).success) {
     throw new Error("buildHandoffEvent: predecessor_commit must be a 40-hex commit sha");
   }
+
   const prior = boardEventSchema.parse(priorInput);
+
+  const provenanceCandidates = [
+    provenance?.commit_sha,
+    provenance?.accepted_commit,
+    provenance?.head,
+    provenance?.accepted_commit_sha,
+    provenance?.prior_commit_sha,
+    provenance?.priorCommitSha,
+    provenance,
+    next?.accepted_commit_sha,
+    next?.prior_commit_sha,
+    next?.priorCommitSha,
+    next?.acceptedCommitSha,
+    next?.commit_sha,
+    next?.verified_commit,
+    next?.provenance_commit,
+    next?.prior_commit,
+    next?.exact_accepted_commit,
+    prior?.commit_sha,
+    prior?.accepted_commit,
+    prior?.head,
+    prior?.accepted_commit_sha,
+    prior?.commitSha,
+    prior?.predecessor_commit,
+  ].filter((value) => typeof value === "string");
+
+  const expectedCommit = provenanceCandidates.length > 0 ? provenanceCandidates[0] : null;
+  if (expectedCommit && expectedCommit !== next.predecessor_commit) {
+    throw new Error("buildHandoffEvent: predecessor_commit must match verified commit provenance");
+  }
+
   return boardEventSchema.parse({
     ...prior,
     generation: next.generation ?? prior.generation + 1,
@@ -335,18 +539,24 @@ function isStaleRejection(error) {
   return /fast.?forward|stale head/i.test(String(error.message ?? ""));
 }
 
-function resolveCanonicalPrior(history) {
-  if (!Array.isArray(history) || history.length === 0) return null;
-  const workOrders = new Set(history.map((item) => boardEventSchema.parse(item).work_order_id));
-  if (workOrders.size !== 1) return null;
-  const projection = projectEvents(history);
-  return projection.active[0] ?? null;
-}
-
-export async function publishEvent({ github, ref, expectedHead = null, event, history = [] }) {
+export async function publishEvent({ github, ref, expectedHead = null, event, history = [], ...options }) {
   requireGithub(github);
   const candidate = boardEventSchema.parse(event);
-  const conflict = findIdempotencyConflict(history, candidate);
+  const trustedNow = resolveTrustedNow(github, options);
+
+  if (isIllegalValue(candidate.transition) || isIllegalValue(candidate.state)) {
+    return {
+      outcome: "INVALID_HISTORY",
+      published: false,
+      accepted: false,
+      status: "INVALID_HISTORY",
+      reason: "INVALID_HISTORY",
+      error: "illegal transition or state",
+      next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+    };
+  }
+
+  const conflict = findIdempotencyConflict(Array.isArray(history) ? history : [], candidate);
   if (conflict) {
     return {
       outcome: conflict.kind,
@@ -357,20 +567,48 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
     };
   }
 
-  const canonicalPrior =
-    Array.isArray(history) && history.length > 0 ? resolveCanonicalPrior(history) : null;
+  const normalizedHistory = Array.isArray(history) ? history : [];
 
-  if (Array.isArray(history) && history.length > 0) {
-    if (!canonicalPrior) {
-      return {
-        outcome: "INVALID_HISTORY",
-        published: false,
-        accepted: false,
-        status: "INVALID_HISTORY",
-        reason: "INVALID_HISTORY",
-        error: "history does not contain a valid canonical accepted event",
-        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
-      };
+  if (normalizedHistory.length > 0) {
+    let canonicalPrior = null;
+    if (isGenesisHead(expectedHead)) {
+      canonicalPrior = resolveCanonicalPrior(normalizedHistory);
+      if (!canonicalPrior) {
+        return {
+          outcome: "INVALID_HISTORY",
+          published: false,
+          accepted: false,
+          status: "INVALID_HISTORY",
+          reason: "INVALID_HISTORY",
+          error: "history does not contain a valid canonical accepted event",
+          next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+        };
+      }
+    } else {
+      const verification = await verifyHistoryAtHead(github, expectedHead, normalizedHistory);
+      if (!verification.ok) {
+        return {
+          outcome: "INVALID_HISTORY",
+          published: false,
+          accepted: false,
+          status: "INVALID_HISTORY",
+          reason: "INVALID_HISTORY",
+          error: "history does not match the verified event chain at the observed ref head",
+          next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+        };
+      }
+      canonicalPrior = verification.canonicalPrior;
+      if (!canonicalPrior) {
+        return {
+          outcome: "INVALID_HISTORY",
+          published: false,
+          accepted: false,
+          status: "INVALID_HISTORY",
+          reason: "INVALID_HISTORY",
+          error: "history does not contain a valid canonical accepted event",
+          next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+        };
+      }
     }
     if (expectedHead === null || expectedHead === undefined) {
       return {
@@ -383,8 +621,8 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
         next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
       };
     }
-    const priorLease = classifyLease(canonicalPrior, candidate.clock_in_utc);
-    if (priorLease.state === "ACTIVE" && !candidate.fenced_event_ids.includes(canonicalPrior.event_id)) {
+    const priorLease = classifyLease(canonicalPrior, trustedNow);
+    if (priorLease.state === "ACTIVE") {
       return {
         outcome: "INVALID_HISTORY",
         published: false,
@@ -460,6 +698,20 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
       error: "omitted history cannot publish a successor event",
       next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
     };
+  } else {
+    // omitted history and root event: reject if ref already exists
+    const observedHead = await readHead(github, ref);
+    if (!isGenesisHead(observedHead)) {
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "omitted history cannot publish a root event when the ref already exists",
+        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
+    }
   }
 
   const observedHead = await readHead(github, ref);
@@ -491,8 +743,8 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
     };
   }
 
-  const commitSha = commit?.sha ?? null;
-  if (typeof commitSha !== "string" || !/^[0-9a-f]{40}$/.test(commitSha)) {
+  const commitShaValue = commit?.sha ?? null;
+  if (typeof commitShaValue !== "string" || !/^[0-9a-f]{40}$/.test(commitShaValue)) {
     return {
       outcome: "PUBLICATION_UNCERTAIN",
       published: false,
@@ -505,15 +757,15 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
   try {
     const updated = await github.updateRef({
       ref,
-      sha: commitSha,
+      sha: commitShaValue,
       expectedSha: expectedHead,
       force: false,
     });
     return {
       outcome: "ACCEPTED",
       published: true,
-      commit_sha: commitSha,
-      head: updated?.sha ?? commitSha,
+      commit_sha: commitShaValue,
+      head: updated?.sha ?? commitShaValue,
       event: candidate,
     };
   } catch (error) {
@@ -524,7 +776,7 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
         published: false,
         expected_head: expectedHead,
         observed_head: rereadHead,
-        attempted_commit_sha: commitSha,
+        attempted_commit_sha: commitShaValue,
         cause: String(error?.message ?? error),
         next_legal_action: "REREAD_CANONICAL_HEAD_AND_REBASE_NO_BLIND_RETRY",
       };
@@ -532,7 +784,7 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
     return {
       outcome: "PUBLICATION_UNCERTAIN",
       published: false,
-      attempted_commit_sha: commitSha,
+      attempted_commit_sha: commitShaValue,
       error: String(error?.message ?? error),
       next_legal_action: "READ_REF_AND_RECONCILE_BEFORE_ANY_RETRY",
     };
@@ -546,31 +798,74 @@ export async function reconcilePublication({
   expectedHead = null,
   history = [],
   event = null,
+  ...options
 }) {
   requireGithub(github);
+  const originalHistory = Array.isArray(history) ? history : [];
+  let normalizedHistory = [...originalHistory];
+
+  if (normalizedHistory.length > 0 && expectedHead !== null && expectedHead !== undefined) {
+    const verification = await verifyHistoryAtHead(github, expectedHead, normalizedHistory);
+    if (!verification.ok) normalizedHistory = [];
+  }
+
   const head = await readHead(github, ref);
 
-  if (event && history.length > 0) {
-    const conflict = findIdempotencyConflict(history, event);
-    if (conflict) {
-      if (conflict.kind === "IDEMPOTENCY_CONFLICT") {
-        return {
-          outcome: "IDEMPOTENCY_CONFLICT",
-          accepted: false,
-          head,
-          existing_event_id: conflict.existing.event_id,
-          existing_idempotency_key: conflict.existing.idempotency_key,
-          next_legal_action: "FAIL_CLOSED_USE_CANONICAL_EVENT",
-        };
+  if (event) {
+    const candidate = (() => {
+      try {
+        return boardEventSchema.parse(event);
+      } catch {
+        return null;
       }
-      return {
-        outcome: "DUPLICATE",
-        accepted: true,
-        head,
-        existing_event_id: conflict.existing.event_id,
-        existing_idempotency_key: conflict.existing.idempotency_key,
-        next_legal_action: "USE_EXISTING_ACCEPTED_EVENT",
-      };
+    })();
+    if (candidate) {
+      if (originalHistory.length > 0) {
+        const conflict = findIdempotencyConflict(originalHistory, candidate);
+        if (conflict) {
+          if (conflict.kind === "IDEMPOTENCY_CONFLICT") {
+            return {
+              outcome: "IDEMPOTENCY_CONFLICT",
+              accepted: false,
+              head,
+              existing_event_id: conflict.existing.event_id,
+              existing_idempotency_key: conflict.existing.idempotency_key,
+              next_legal_action: "FAIL_CLOSED_USE_CANONICAL_EVENT",
+            };
+          }
+          return {
+            outcome: "DUPLICATE",
+            accepted: true,
+            head,
+            existing_event_id: conflict.existing.event_id,
+            existing_idempotency_key: conflict.existing.idempotency_key,
+            next_legal_action: "USE_EXISTING_ACCEPTED_EVENT",
+          };
+        }
+      }
+
+      // If history is missing/unverified, do not trust attempted commit blindly.
+      if (normalizedHistory.length === 0) {
+        if (head !== null && head === attemptedCommitSha) {
+          const commitEvent = await readCommitEvent(github, head);
+          if (commitEvent && eventDigest(commitEvent) === eventDigest(candidate)) {
+            return {
+              outcome: "PUBLISHED",
+              accepted: true,
+              head,
+              attempted_commit_sha: attemptedCommitSha,
+              next_legal_action: "CONTINUE_FROM_PUBLISHED_EVENT",
+            };
+          }
+          return {
+            outcome: "UNCERTAIN",
+            accepted: false,
+            head,
+            attempted_commit_sha: attemptedCommitSha,
+            next_legal_action: "REREAD_CANONICAL_LEDGER_NO_BLIND_RETRY",
+          };
+        }
+      }
     }
   }
 
