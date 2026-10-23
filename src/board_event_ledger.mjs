@@ -269,6 +269,9 @@ async function verifyHistoryAtHead(github, expectedHead, history) {
 
   // A root event's commit should not carry a non-genesis parent.
   if (currentEvent.predecessor_event_id === null) {
+    if (!isGenesisHead(currentEvent.predecessor_commit)) {
+      return { ok: false, canonicalPrior: null };
+    }
     const rootParent = extractParentSha(currentRaw);
     if (rootParent && !isGenesisHead(rootParent)) {
       return { ok: false, canonicalPrior: null };

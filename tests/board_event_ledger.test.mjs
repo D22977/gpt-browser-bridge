@@ -1379,3 +1379,79 @@ test("REGRESSION attempt12: publishEvent rejects a root with a non-genesis prede
   assert.equal(github.state.head, SEED);
   assert.equal(github.state.updates.length, 0);
 });
+
+test("REGRESSION attempt13: publishEvent rejects a successor of a committed root with malformed predecessor commit", async () => {
+  const rootSha = "a".repeat(40);
+  const root = createEvent(baseEvent({
+    event_id: "ATTEMPT13-BAD-COMMITTED-ROOT",
+    idempotency_key: "IDEM-ATTEMPT13-BAD-COMMITTED-ROOT",
+    sequence: 0,
+    generation: 0,
+    predecessor_event_id: null,
+    predecessor_commit: "c".repeat(40),
+    transition: "CHECKPOINT_AND_CLOCK_OUT",
+    state: "HANDOFF_READY_FOR_BOUNDED_PROOF_SHIFT",
+    clock_out_utc: "2026-10-23T09:01:00+00:00",
+  }));
+  const github = createCommitBoundGitHub(rootSha, root);
+  const successor = baseEvent({
+    event_id: "ATTEMPT13-PUBLISH-SUCCESSOR",
+    idempotency_key: "IDEM-ATTEMPT13-PUBLISH-SUCCESSOR",
+    sequence: 1,
+    generation: 1,
+    predecessor_event_id: root.event_id,
+    predecessor_commit: rootSha,
+  });
+
+  const result = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: rootSha,
+    history: [root],
+    event: successor,
+  });
+
+  assert.equal(result.published, false);
+  assert.equal(result.outcome, "INVALID_HISTORY");
+  assert.equal(github.state.head, rootSha);
+  assert.equal(github.state.updates.length, 0);
+});
+
+test("REGRESSION attempt13: reconcilePublication rejects a successor of a committed root with malformed predecessor commit", async () => {
+  const rootSha = "a".repeat(40);
+  const attemptedSha = "b".repeat(40);
+  const root = createEvent(baseEvent({
+    event_id: "ATTEMPT13-BAD-RECONCILE-ROOT",
+    idempotency_key: "IDEM-ATTEMPT13-BAD-RECONCILE-ROOT",
+    sequence: 0,
+    generation: 0,
+    predecessor_event_id: null,
+    predecessor_commit: "c".repeat(40),
+    transition: "CHECKPOINT_AND_CLOCK_OUT",
+    state: "HANDOFF_READY_FOR_BOUNDED_PROOF_SHIFT",
+    clock_out_utc: "2026-10-23T09:01:00+00:00",
+  }));
+  const github = createCommitBoundGitHub(rootSha, root);
+  const successor = createEvent(baseEvent({
+    event_id: "ATTEMPT13-RECONCILE-SUCCESSOR",
+    idempotency_key: "IDEM-ATTEMPT13-RECONCILE-SUCCESSOR",
+    sequence: 1,
+    generation: 1,
+    predecessor_event_id: root.event_id,
+    predecessor_commit: rootSha,
+  }));
+  github.state.commits.set(attemptedSha, { sha: attemptedSha, parent: rootSha, event: successor });
+  github.state.head = attemptedSha;
+
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: attemptedSha,
+    expectedHead: rootSha,
+    history: [root],
+    event: successor,
+  });
+
+  assert.notEqual(result.outcome, "PUBLISHED");
+  assert.equal(result.accepted, false);
+});
