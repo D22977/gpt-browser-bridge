@@ -205,6 +205,8 @@ function resolveCanonicalPrior(history) {
   }
   if (workOrders.size !== 1) return null;
   const projection = projectEvents(history);
+  if (projection.quarantined_event_ids.length > 0) return null;
+  if (projection.active.length !== 1) return null;
   return projection.active[0] ?? null;
 }
 
@@ -317,6 +319,7 @@ const ALLOWED_ROLE_TRANSITIONS = new Map([
     ["CLOCK_OUT_AND_HANDOFF", new Set(["READY_FOR_FRESH_REVIEW"])],
     ["CLAIM", new Set(["IN_PROGRESS"])],
     ["COMPLETE_REWORK", new Set(["READY_FOR_FRESH_REVIEW"])],
+    ["HANDOFF", new Set(["HANDOFF_READY"])],
   ])],
   ["Reviewer", new Map([
     ["REVIEW_COMPLETE", new Set(["FIX_REQUIRED"])],
@@ -622,29 +625,6 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
   const candidate = boardEventSchema.parse(event);
   const trustedNow = resolveTrustedNow(github);
 
-  const conflict = findIdempotencyConflict(Array.isArray(history) ? history : [], candidate);
-  if (conflict) {
-    return {
-      outcome: conflict.kind,
-      published: false,
-      existing_event_id: conflict.existing.event_id,
-      existing_idempotency_key: conflict.existing.idempotency_key,
-      next_legal_action: "USE_EXISTING_ACCEPTED_EVENT",
-    };
-  }
-
-  if (!isAllowedRoleTransition(candidate)) {
-    return {
-      outcome: "INVALID_HISTORY",
-      published: false,
-      accepted: false,
-      status: "INVALID_HISTORY",
-      reason: "INVALID_HISTORY",
-      error: "role, transition and state combination is not allowed",
-      next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
-    };
-  }
-
   const normalizedHistory = Array.isArray(history) ? history : [];
 
   if (normalizedHistory.length > 0) {
@@ -697,6 +677,16 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
         reason: "INVALID_HISTORY",
         error: "canonical history requires a bound head commit",
         next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
+    }
+    const verifiedHistoryConflict = findIdempotencyConflict(normalizedHistory, candidate);
+    if (verifiedHistoryConflict) {
+      return {
+        outcome: verifiedHistoryConflict.kind,
+        published: false,
+        existing_event_id: verifiedHistoryConflict.existing.event_id,
+        existing_idempotency_key: verifiedHistoryConflict.existing.idempotency_key,
+        next_legal_action: "USE_EXISTING_ACCEPTED_EVENT",
       };
     }
     if (Array.isArray(candidate.fenced_event_ids) && candidate.fenced_event_ids.includes(canonicalPrior.event_id)) {
@@ -801,6 +791,18 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
         next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
       };
     }
+  }
+
+  if (!isAllowedRoleTransition(candidate)) {
+    return {
+      outcome: "INVALID_HISTORY",
+      published: false,
+      accepted: false,
+      status: "INVALID_HISTORY",
+      reason: "INVALID_HISTORY",
+      error: "role, transition and state combination is not allowed",
+      next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+    };
   }
 
   const observedHead = await readHead(github, ref);
@@ -927,8 +929,8 @@ export async function reconcilePublication({
       }
     })();
     if (candidate) {
-      if (originalHistory.length > 0) {
-        const conflict = findIdempotencyConflict(originalHistory, candidate);
+      if (normalizedHistory.length > 0) {
+        const conflict = findIdempotencyConflict(normalizedHistory, candidate);
         if (conflict) {
           if (conflict.kind === "IDEMPOTENCY_CONFLICT") {
             return {

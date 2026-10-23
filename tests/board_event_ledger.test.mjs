@@ -990,3 +990,107 @@ test("REGRESSION review11: readCommit fails closed when adapter omits the reques
   assert.equal(result.published, false);
   assert.equal(result.outcome, "INVALID_HISTORY");
 });
+
+
+test("REGRESSION attempt09 finding1a: publishEvent rejects history with committed chain plus uncommitted orphan before idempotency", async () => {
+  const github = createFakeGitHub();
+  const committed = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: SEED,
+    event: baseEvent({ event_id: "EVT-COMMITTED", idempotency_key: "IDEM-COMMITTED", predecessor_commit: SEED }),
+  });
+  assert.equal(committed.outcome, "ACCEPTED");
+
+  const orphan = createEvent(baseEvent({
+    event_id: "EVT-ORPHAN",
+    idempotency_key: "IDEM-ORPHAN",
+    predecessor_event_id: "GHOST",
+  }));
+
+  const candidate = baseEvent({
+    event_id: "EVT-CAND",
+    idempotency_key: "IDEM-ORPHAN",
+    sequence: 2,
+    generation: 2,
+    predecessor_event_id: committed.event.event_id,
+    predecessor_commit: committed.commit_sha,
+  });
+
+  const before = github.state.head;
+  const result = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: committed.commit_sha,
+    event: candidate,
+    history: [committed.event, orphan],
+  });
+
+  assert.equal(result.published, false);
+  assert.equal(result.outcome, "INVALID_HISTORY");
+  assert.equal(github.state.head, before);
+});
+
+test("REGRESSION attempt09 finding1b: reconcilePublication does not accept duplicate from history with orphan", async () => {
+  const github = createFakeGitHub();
+  const committed = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: SEED,
+    event: baseEvent({ event_id: "EVT-COMMITTED", idempotency_key: "IDEM-COMMITTED", predecessor_commit: SEED }),
+  });
+  assert.equal(committed.outcome, "ACCEPTED");
+
+  const orphan = createEvent(baseEvent({
+    event_id: "EVT-ORPHAN",
+    idempotency_key: "IDEM-ORPHAN",
+    predecessor_event_id: "GHOST",
+  }));
+
+  const before = github.state.head;
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: "f".repeat(40),
+    expectedHead: committed.commit_sha,
+    history: [committed.event, orphan],
+    event: orphan,
+  });
+
+  assert.equal(result.accepted, false);
+  assert.notEqual(result.outcome, "DUPLICATE");
+  assert.equal(github.state.head, before);
+});
+
+test("REGRESSION attempt09 finding2: buildHandoffEvent default transition is publishable", async () => {
+  const headSha = "a".repeat(40);
+  const prior = createEvent(baseEvent({ event_id: "HANDOFF-PRIOR", idempotency_key: "IDEM-HANDOFF-PRIOR", predecessor_event_id: null, predecessor_commit: null }));
+  const github = createCommitBoundGitHub(headSha, prior);
+
+  let handoff;
+  await assert.doesNotReject(async () => {
+    handoff = await buildHandoffEvent(
+      prior,
+      {
+        event_id: "HANDOFF-NEXT",
+        attempt_id: "ATT-2",
+        idempotency_key: "IDEM-HANDOFF-NEXT",
+        predecessor_commit: headSha,
+        clock_in_utc: "2026-10-23T09:12:00+00:00",
+      },
+      { github, ref: "refs/heads/proof", expectedHead: headSha, history: [prior] }
+    );
+  });
+
+  const result = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: headSha,
+    event: handoff,
+    history: [prior],
+  });
+
+  assert.equal(result.outcome, "ACCEPTED");
+  assert.equal(result.published, true);
+  assert.equal(github.state.head, result.commit_sha);
+});
