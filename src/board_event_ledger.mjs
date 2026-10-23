@@ -212,14 +212,10 @@ function resolveCanonicalPrior(history) {
 
 async function verifyHistoryAtHead(github, expectedHead, history) {
   if (isGenesisHead(expectedHead)) {
-    const prior = resolveCanonicalPrior(history);
-    if (!prior && Array.isArray(history) && history.length > 0) {
-      return { ok: false, canonicalPrior: null };
-    }
     if (Array.isArray(history) && history.length === 0) {
       return { ok: true, canonicalPrior: null };
     }
-    return { ok: prior !== null, canonicalPrior: prior };
+    return { ok: false, canonicalPrior: null };
   }
   const prior = resolveCanonicalPrior(history);
   if (!prior) return { ok: false, canonicalPrior: null };
@@ -630,18 +626,15 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
   if (normalizedHistory.length > 0) {
     let canonicalPrior = null;
     if (isGenesisHead(expectedHead)) {
-      canonicalPrior = resolveCanonicalPrior(normalizedHistory);
-      if (!canonicalPrior) {
-        return {
-          outcome: "INVALID_HISTORY",
-          published: false,
-          accepted: false,
-          status: "INVALID_HISTORY",
-          reason: "INVALID_HISTORY",
-          error: "history does not contain a valid canonical accepted event",
-          next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
-        };
-      }
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "nonempty history cannot be verified at the genesis head",
+        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
     } else {
       const verification = await verifyHistoryAtHead(github, expectedHead, normalizedHistory);
       if (!verification.ok) {

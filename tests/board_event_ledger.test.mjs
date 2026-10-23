@@ -155,6 +155,8 @@ test("two contenders share one parent: only the first advances, the stale one is
       predecessor_commit: null,
     })
   );
+  const seed = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: SEED, event: seedEvent });
+  assert.equal(seed.outcome, "ACCEPTED");
 
   const contenderA = baseEvent({
     event_id: "EVT-A",
@@ -162,7 +164,7 @@ test("two contenders share one parent: only the first advances, the stale one is
     sequence: 2,
     generation: 2,
     predecessor_event_id: "EVT-SEED",
-    predecessor_commit: SEED,
+    predecessor_commit: seed.commit_sha,
   });
   const contenderB = baseEvent({
     event_id: "EVT-B",
@@ -170,18 +172,18 @@ test("two contenders share one parent: only the first advances, the stale one is
     sequence: 2,
     generation: 2,
     predecessor_event_id: "EVT-SEED",
-    predecessor_commit: SEED,
+    predecessor_commit: seed.commit_sha,
   });
 
-  const first = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: SEED, event: contenderA, history: [seedEvent] });
+  const first = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: seed.commit_sha, event: contenderA, history: [seed.event] });
   assert.equal(first.outcome, "ACCEPTED");
 
-  const stale = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: SEED, event: contenderB, history: [seedEvent] });
+  const stale = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: seed.commit_sha, event: contenderB, history: [seed.event] });
   assert.equal(stale.outcome, "STALE_HEAD");
   assert.equal(stale.published, false);
   assert.equal(stale.observed_head, first.commit_sha);
   assert.equal(github.state.head, first.commit_sha);
-  assert.equal(github.state.updates.length, 1);
+  assert.equal(github.state.updates.length, 2);
   assert.equal(stale.next_legal_action, "REREAD_CANONICAL_HEAD_AND_REBASE_NO_BLIND_RETRY");
 
   const rebased = await publishEvent({
@@ -193,7 +195,7 @@ test("two contenders share one parent: only the first advances, the stale one is
   });
   assert.notEqual(rebased.outcome, "ACCEPTED");
   assert.equal(rebased.published, false);
-  assert.equal(github.state.updates.length, 1);
+  assert.equal(github.state.updates.length, 2);
   assert.equal(github.state.head, first.commit_sha);
 });
 
@@ -1093,4 +1095,62 @@ test("REGRESSION attempt09 finding2: buildHandoffEvent default transition is pub
   assert.equal(result.outcome, "ACCEPTED");
   assert.equal(result.published, true);
   assert.equal(github.state.head, result.commit_sha);
+});
+test("REGRESSION attempt10 finding1: publishEvent fails closed for nonempty history at genesis", async () => {
+  const github = createFakeGitHub();
+  const rootHistory = createEvent(baseEvent({
+    event_id: "EVT-GENESIS-ROOT",
+    idempotency_key: "IDEM-GENESIS-ROOT",
+    predecessor_event_id: null,
+    predecessor_commit: null,
+  }));
+  const candidate = createEvent(baseEvent({
+    event_id: "EVT-GENESIS-ROOT",
+    idempotency_key: "IDEM-GENESIS-ROOT",
+    predecessor_event_id: null,
+    predecessor_commit: null,
+  }));
+
+  const before = github.state.head;
+  const result = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: SEED,
+    event: candidate,
+    history: [rootHistory],
+  });
+
+  assert.equal(result.published, false);
+  assert.notEqual(result.outcome, "DUPLICATE");
+  assert.equal(github.state.head, before);
+});
+
+test("REGRESSION attempt10 finding2: reconcilePublication fails closed for nonempty history at genesis", async () => {
+  const github = createFakeGitHub();
+  const rootHistory = createEvent(baseEvent({
+    event_id: "EVT-GENESIS-ROOT",
+    idempotency_key: "IDEM-GENESIS-ROOT",
+    predecessor_event_id: null,
+    predecessor_commit: null,
+  }));
+  const candidate = createEvent(baseEvent({
+    event_id: "EVT-GENESIS-ROOT",
+    idempotency_key: "IDEM-GENESIS-ROOT",
+    predecessor_event_id: null,
+    predecessor_commit: null,
+  }));
+
+  const before = github.state.head;
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: "f".repeat(40),
+    expectedHead: SEED,
+    history: [rootHistory],
+    event: candidate,
+  });
+
+  assert.equal(result.accepted, false);
+  assert.notEqual(result.outcome, "DUPLICATE");
+  assert.equal(github.state.head, before);
 });
