@@ -888,11 +888,13 @@ export async function reconcilePublication({
   const originalHistory = Array.isArray(history) ? history : [];
   let normalizedHistory = [...originalHistory];
   let historyVerified = originalHistory.length === 0;
+  let canonicalPrior = null;
 
   if (originalHistory.length > 0 && expectedHead !== null && expectedHead !== undefined) {
     const verification = await verifyHistoryAtHead(github, expectedHead, normalizedHistory);
     if (verification.ok) {
       historyVerified = true;
+      canonicalPrior = verification.canonicalPrior;
     } else {
       normalizedHistory = [];
       historyVerified = false;
@@ -959,13 +961,29 @@ export async function reconcilePublication({
     const parentMatches = isGenesisHead(expectedHead)
       ? isGenesisHead(actualParent)
       : actualParent === expectedHead;
-    const historyBound = isGenesisHead(expectedHead) || historyVerified;
+    const validGenesisRoot = isGenesisHead(expectedHead) && candidate?.predecessor_event_id === null;
+    const validSuccessor = Boolean(
+      !isGenesisHead(expectedHead) &&
+      originalHistory.length > 0 &&
+      historyVerified &&
+      canonicalPrior &&
+      isAllowedRoleTransition(candidate) &&
+      candidate.work_order_id === canonicalPrior.work_order_id &&
+      candidate.predecessor_event_id === canonicalPrior.event_id &&
+      candidate.predecessor_commit === expectedHead &&
+      candidate.sequence === canonicalPrior.sequence + 1 &&
+      candidate.generation >= canonicalPrior.generation &&
+      candidate.generation <= canonicalPrior.generation + 1 &&
+      !(candidate.fenced_event_ids ?? []).includes(canonicalPrior.event_id) &&
+      classifyLease(canonicalPrior, resolveTrustedNow(github)).state !== "ACTIVE"
+    );
     if (
       candidate &&
       attemptedEvent &&
       eventDigest(attemptedEvent) === eventDigest(candidate) &&
       parentMatches &&
-      historyBound
+      isAllowedRoleTransition(candidate) &&
+      (validGenesisRoot || validSuccessor)
     ) {
       return {
         outcome: "PUBLISHED",

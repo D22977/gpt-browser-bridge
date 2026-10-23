@@ -1154,3 +1154,119 @@ test("REGRESSION attempt10 finding2: reconcilePublication fails closed for nonem
   assert.notEqual(result.outcome, "DUPLICATE");
   assert.equal(github.state.head, before);
 });
+
+test("REGRESSION attempt11: reconcilePublication does not accept an invalid attempted successor with omitted history", async () => {
+  const rootSha = "a".repeat(40);
+  const attemptedSha = "b".repeat(40);
+  const root = createEvent(baseEvent({
+    event_id: "ATTEMPT11-ROOT",
+    idempotency_key: "IDEM-ATTEMPT11-ROOT",
+    sequence: 0,
+    generation: 0,
+    predecessor_event_id: null,
+    predecessor_commit: null,
+    transition: "CHECKPOINT_AND_CLOCK_OUT",
+    state: "HANDOFF_READY_FOR_BOUNDED_PROOF_SHIFT",
+    clock_out_utc: "2026-10-23T09:01:00+00:00",
+  }));
+  const github = createCommitBoundGitHub(rootSha, root);
+  const candidate = createEvent(baseEvent({
+    event_id: "ATTEMPT11-GHOST",
+    idempotency_key: "IDEM-ATTEMPT11-GHOST",
+    sequence: 99,
+    generation: 99,
+    predecessor_event_id: "GHOST",
+    predecessor_commit: rootSha,
+  }));
+  github.state.commits.set(attemptedSha, { sha: attemptedSha, parent: rootSha, event: candidate });
+  github.state.head = attemptedSha;
+
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: attemptedSha,
+    expectedHead: rootSha,
+    event: candidate,
+  });
+
+  assert.notEqual(result.outcome, "PUBLISHED");
+  assert.equal(result.accepted, false);
+});
+
+test("REGRESSION attempt11: reconcilePublication does not accept an invalid attempted successor against verified history", async () => {
+  const rootSha = "a".repeat(40);
+  const attemptedSha = "b".repeat(40);
+  const root = createEvent(baseEvent({
+    event_id: "ATTEMPT11-ROOT-VERIFIED",
+    idempotency_key: "IDEM-ATTEMPT11-ROOT-VERIFIED",
+    sequence: 0,
+    generation: 0,
+    predecessor_event_id: null,
+    predecessor_commit: null,
+    transition: "CHECKPOINT_AND_CLOCK_OUT",
+    state: "HANDOFF_READY_FOR_BOUNDED_PROOF_SHIFT",
+    clock_out_utc: "2026-10-23T09:01:00+00:00",
+  }));
+  const github = createCommitBoundGitHub(rootSha, root);
+  const candidate = createEvent(baseEvent({
+    event_id: "ATTEMPT11-GHOST-VERIFIED",
+    idempotency_key: "IDEM-ATTEMPT11-GHOST-VERIFIED",
+    sequence: 99,
+    generation: 99,
+    predecessor_event_id: "GHOST",
+    predecessor_commit: rootSha,
+  }));
+  github.state.commits.set(attemptedSha, { sha: attemptedSha, parent: rootSha, event: candidate });
+  github.state.head = attemptedSha;
+
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: attemptedSha,
+    expectedHead: rootSha,
+    history: [root],
+    event: candidate,
+  });
+
+  assert.notEqual(result.outcome, "PUBLISHED");
+  assert.equal(result.accepted, false);
+});
+
+test("REGRESSION attempt11: reconcilePublication accepts an exact valid contiguous attempted successor", async () => {
+  const rootSha = "a".repeat(40);
+  const attemptedSha = "b".repeat(40);
+  const root = createEvent(baseEvent({
+    event_id: "ATTEMPT11-VALID-ROOT",
+    idempotency_key: "IDEM-ATTEMPT11-VALID-ROOT",
+    sequence: 0,
+    generation: 0,
+    predecessor_event_id: null,
+    predecessor_commit: null,
+    transition: "CHECKPOINT_AND_CLOCK_OUT",
+    state: "HANDOFF_READY_FOR_BOUNDED_PROOF_SHIFT",
+    clock_out_utc: "2026-10-23T09:01:00+00:00",
+  }));
+  const github = createCommitBoundGitHub(rootSha, root);
+  const candidate = createEvent(baseEvent({
+    event_id: "ATTEMPT11-VALID-NEXT",
+    idempotency_key: "IDEM-ATTEMPT11-VALID-NEXT",
+    sequence: 1,
+    generation: 1,
+    predecessor_event_id: root.event_id,
+    predecessor_commit: rootSha,
+  }));
+  github.state.commits.set(attemptedSha, { sha: attemptedSha, parent: rootSha, event: candidate });
+  github.state.head = attemptedSha;
+
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: attemptedSha,
+    expectedHead: rootSha,
+    history: [root],
+    event: candidate,
+  });
+
+  assert.equal(result.outcome, "PUBLISHED");
+  assert.equal(result.accepted, true);
+});
