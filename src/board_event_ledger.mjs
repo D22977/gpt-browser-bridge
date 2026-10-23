@@ -772,6 +772,17 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
     };
   } else {
     // omitted history and root event: reject if ref already exists
+    if (!isGenesisHead(candidate.predecessor_commit)) {
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "root predecessor_commit must identify a genesis head",
+        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
+    }
     const observedHead = await readHead(github, ref);
     if (!isGenesisHead(observedHead)) {
       return {
@@ -961,12 +972,16 @@ export async function reconcilePublication({
     const parentMatches = isGenesisHead(expectedHead)
       ? isGenesisHead(actualParent)
       : actualParent === expectedHead;
-    const validGenesisRoot = isGenesisHead(expectedHead) && candidate?.predecessor_event_id === null;
+    const validGenesisRoot =
+      isGenesisHead(expectedHead) &&
+      candidate?.predecessor_event_id === null &&
+      isGenesisHead(candidate?.predecessor_commit);
     const validSuccessor = Boolean(
       !isGenesisHead(expectedHead) &&
       originalHistory.length > 0 &&
       historyVerified &&
       canonicalPrior &&
+      candidate &&
       isAllowedRoleTransition(candidate) &&
       candidate.work_order_id === canonicalPrior.work_order_id &&
       candidate.predecessor_event_id === canonicalPrior.event_id &&

@@ -1270,3 +1270,112 @@ test("REGRESSION attempt11: reconcilePublication accepts an exact valid contiguo
   assert.equal(result.outcome, "PUBLISHED");
   assert.equal(result.accepted, true);
 });
+
+test("REGRESSION attempt12: reconcilePublication fails closed for a null event with verified history", async () => {
+  const rootSha = "a".repeat(40);
+  const attemptedSha = "b".repeat(40);
+  const root = createEvent(baseEvent({
+    event_id: "ATTEMPT12-NULL-ROOT",
+    idempotency_key: "IDEM-ATTEMPT12-NULL-ROOT",
+    sequence: 0,
+    generation: 0,
+    predecessor_event_id: null,
+    predecessor_commit: null,
+    transition: "CHECKPOINT_AND_CLOCK_OUT",
+    state: "HANDOFF_READY_FOR_BOUNDED_PROOF_SHIFT",
+    clock_out_utc: "2026-10-23T09:01:00+00:00",
+  }));
+  const github = createCommitBoundGitHub(rootSha, root);
+  github.state.commits.set(attemptedSha, { sha: attemptedSha, parent: rootSha, event: null });
+  github.state.head = attemptedSha;
+
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: attemptedSha,
+    expectedHead: rootSha,
+    history: [root],
+    event: null,
+  });
+
+  assert.equal(result.outcome, "UNCERTAIN");
+  assert.equal(result.accepted, false);
+});
+
+test("REGRESSION attempt12: reconcilePublication fails closed for a schema-invalid event with verified history", async () => {
+  const rootSha = "a".repeat(40);
+  const attemptedSha = "b".repeat(40);
+  const root = createEvent(baseEvent({
+    event_id: "ATTEMPT12-INVALID-ROOT",
+    idempotency_key: "IDEM-ATTEMPT12-INVALID-ROOT",
+    sequence: 0,
+    generation: 0,
+    predecessor_event_id: null,
+    predecessor_commit: null,
+    transition: "CHECKPOINT_AND_CLOCK_OUT",
+    state: "HANDOFF_READY_FOR_BOUNDED_PROOF_SHIFT",
+    clock_out_utc: "2026-10-23T09:01:00+00:00",
+  }));
+  const github = createCommitBoundGitHub(rootSha, root);
+  const invalid = { schema_version: -1 };
+  github.state.commits.set(attemptedSha, { sha: attemptedSha, parent: rootSha, event: invalid });
+  github.state.head = attemptedSha;
+
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: attemptedSha,
+    expectedHead: rootSha,
+    history: [root],
+    event: invalid,
+  });
+
+  assert.equal(result.outcome, "UNCERTAIN");
+  assert.equal(result.accepted, false);
+});
+
+test("REGRESSION attempt12: reconcilePublication rejects a genesis root with a non-genesis predecessor commit", async () => {
+  const attemptedSha = "b".repeat(40);
+  const github = createFakeGitHub();
+  const candidate = createEvent(baseEvent({
+    event_id: "ATTEMPT12-BAD-GENESIS",
+    idempotency_key: "IDEM-ATTEMPT12-BAD-GENESIS",
+    predecessor_event_id: null,
+    predecessor_commit: "c".repeat(40),
+  }));
+  github.state.commits.set(attemptedSha, { sha: attemptedSha, parent: SEED, event: candidate });
+  github.state.head = attemptedSha;
+
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: attemptedSha,
+    expectedHead: SEED,
+    event: candidate,
+  });
+
+  assert.notEqual(result.outcome, "PUBLISHED");
+  assert.equal(result.accepted, false);
+});
+
+test("REGRESSION attempt12: publishEvent rejects a root with a non-genesis predecessor commit", async () => {
+  const github = createFakeGitHub();
+  const candidate = baseEvent({
+    event_id: "ATTEMPT12-PUBLISH-BAD-GENESIS",
+    idempotency_key: "IDEM-ATTEMPT12-PUBLISH-BAD-GENESIS",
+    predecessor_event_id: null,
+    predecessor_commit: "c".repeat(40),
+  });
+
+  const result = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: SEED,
+    event: candidate,
+  });
+
+  assert.equal(result.published, false);
+  assert.equal(result.outcome, "INVALID_HISTORY");
+  assert.equal(github.state.head, SEED);
+  assert.equal(github.state.updates.length, 0);
+});
