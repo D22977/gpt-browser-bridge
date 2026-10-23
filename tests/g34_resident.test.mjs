@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseActiveControlAuthority } from "../src/g34_contract.mjs";
 import { authorizeControlSuccessor as authorizeControlSuccessorCore, consumeDeliveredControlSuccessor, runG34ResidentCycle } from "../src/g34_resident.mjs";
-import { beginSuccessorDelivery, recordSuccessorDelivery } from "../src/g34_source_event_publisher.mjs";
+import { beginSuccessorDelivery, recordSuccessorDelivery, sourceEventPayloadBody } from "../src/g34_source_event_publisher.mjs";
 
 const authorityRecords = {
   "switchReceipt": {
@@ -59,6 +59,7 @@ const authorityRecords = {
 };
 const authority = parseActiveControlAuthority(structuredClone(authorityRecords));
 const event = {
+  marker: "GITHUB_SOURCE_EVENT_V1",
   event_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   state: "DELIVERED",
   source_comment_id: "6083328488",
@@ -282,7 +283,11 @@ function fakeSourceGithub(sourceComments, overrides = {}, firstEventCommentId = 
   for (const [id, body] of linked) all.set(id, { id, url: `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${id}`, user: { login: "D22977" }, body });
   let nextId = firstEventCommentId;
   return {
-    async getIssueComment(id) { return structuredClone(overrides[String(id)] ?? all.get(String(id))); },
+    async getCurrentAuthorityRecords() { return structuredClone(authorityRecords); },
+    async getIssueComment(id) {
+      const authorityRecord = Object.values(authorityRecords).find((record) => String(record.id) === String(id));
+      return structuredClone(overrides[String(id)] ?? authorityRecord ?? all.get(String(id)));
+    },
     async getIssue(number) { return { number, state: "open", body: "GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\nstate: OPEN_FOR_SINGLE_CLAIM" }; },
     async findEventComments() { return []; },
     async createIssueComment(issueNumber, body) {
@@ -298,6 +303,7 @@ function fakeSourceGithub(sourceComments, overrides = {}, firstEventCommentId = 
 }
 
 test("only exact-read, authenticated current Control acceptance after review and adjudication authorizes one successor", async () => {
+  assert.equal(sourceEventPayloadBody(event), event.body);
   const receipt = controlReceipt();
   assert.deepEqual(await authorizeControlSuccessor({ event, authority, controlReceipt: receipt, github: githubFor(receipt) }), {
     comment_id: "9002", agent_name: workerBinding.agent_name, agent_session: workerBinding.agent_session,
@@ -1107,6 +1113,9 @@ test("CONSUMED binds review Control identity to source dispatch separately from 
   assert.equal(await runCase("/root/other-control"), "DELIVERY_UNCERTAIN");
   assert.equal(await runCase("/root"), "CONSUMED");
   Object.assign(event, original);
+  delete event.event_kind;
+  delete event.base_sha;
+  delete event.worker_start_comment_id;
 });
 
 test("a second delivery call without reconciliation never sends again", async () => {
@@ -1255,4 +1264,107 @@ test("terminal source state remains bound while exported delivery and successor 
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
   assert.equal(ledger[sourceEvent.event_id].state, "CONSUMED");
   assert.equal(ledger[sourceEvent.event_id].successor_delivery_receipt_id, "9901");
+});
+
+test("resident cycle rejects a stale supplied Control pointer snapshot before source processing", async () => {
+  const liveRecords = structuredClone(authorityRecords);
+  const old43 = String(liveRecords.index43.id);
+  const old81 = String(liveRecords.index81.id);
+  const new43 = "6020264987";
+  const new81 = "6020285673";
+  liveRecords.index43.id = new43;
+  liveRecords.index43.url = `https://github.com/D22977/gpt-browser-bridge/issues/43#issuecomment-${new43}`;
+  liveRecords.index81.id = new81;
+  liveRecords.index81.url = `https://github.com/D22977/gpt-browser-bridge/issues/81#issuecomment-${new81}`;
+  liveRecords.index81.body = liveRecords.index81.body.replace(`#43/${old43}`, `#43/${new43}`);
+  assert.equal(parseActiveControlAuthority(liveRecords).record_ids.index43_comment_id, new43);
+  const livePointerById = new Map([
+    [new43, liveRecords.index43],
+    [new81, liveRecords.index81],
+  ]);
+  const github = fakeSourceGithub([]);
+  const getIssueComment = github.getIssueComment.bind(github);
+  github.getCurrentAuthorityRecords = async () => structuredClone(liveRecords);
+  github.getIssueComment = async (id) => structuredClone(livePointerById.get(String(id)) ?? await getIssueComment(id));
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-stale-control-pointer-"));
+
+  await assert.rejects(() => runG34ResidentCycle({
+    sourceComments: [], currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
+    issueNumber: 211, runtimeRoot, github,
+    repositoryFullName: "D22977/gpt-browser-bridge", branch: workerBinding.branch,
+    baseSha: workerBinding.base_sha, headSha: workerBinding.base_sha, publisherAuthor: "D22977",
+  }), /current Control authority changed before resident publication/);
+});
+
+test("resident cycle rereads the Control pointer set immediately before publication", async () => {
+  const records = structuredClone(pinnedG22ReceiptRecords).map((record) => ({ ...record, id: String(record.id) }));
+  const github = fakeSourceGithub(records, {}, 9950);
+  github.getCommit = async (sha) => sha === "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8"
+    ? { sha, tree: { sha: "13c12f569c3e3302ba60e0be800fb3c9995d903c" }, parents: [] }
+    : { sha, tree: { sha: "6613901a972772dbada0222feb45662e477f0ab5" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] };
+  const updated = structuredClone(authorityRecords);
+  const old43 = String(updated.index43.id);
+  const old81 = String(updated.index81.id);
+  const new43 = "6020264988";
+  const new81 = "6020285674";
+  updated.index43.id = new43;
+  updated.index43.url = `https://github.com/D22977/gpt-browser-bridge/issues/43#issuecomment-${new43}`;
+  updated.index81.id = new81;
+  updated.index81.url = `https://github.com/D22977/gpt-browser-bridge/issues/81#issuecomment-${new81}`;
+  updated.index81.body = updated.index81.body.replace(`#43/${old43}`, `#43/${new43}`);
+  assert.equal(parseActiveControlAuthority(updated).record_ids.index43_comment_id, new43);
+  const updatedPointerById = new Map([[new43, updated.index43], [new81, updated.index81]]);
+  const getIssueComment = github.getIssueComment.bind(github);
+  let authorityReads = 0;
+  github.getCurrentAuthorityRecords = async () => {
+    authorityReads++;
+    return structuredClone(authorityReads === 1 ? authorityRecords : updated);
+  };
+  github.getIssueComment = async (id) => structuredClone(updatedPointerById.get(String(id)) ?? await getIssueComment(id));
+  const createIssueComment = github.createIssueComment.bind(github);
+  let publishedEvents = 0;
+  github.createIssueComment = async (...args) => {
+    publishedEvents++;
+    return createIssueComment(...args);
+  };
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-control-changed-before-publish-"));
+
+  await assert.rejects(() => runG34ResidentCycle({
+    sourceComments: records, currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
+    issueNumber: 211, runtimeRoot, github,
+    repositoryFullName: "D22977/gpt-browser-bridge", branch: "work/gbb-g34-review-repair-20261009-01",
+    baseSha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8",
+    headSha: "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14", publisherAuthor: "D22977",
+  }), /current Control authority changed before resident publication/);
+  assert.equal(authorityReads, 2);
+  assert.equal(publishedEvents, 0);
+});
+
+test("successor authorization rejects caller-substituted event head before delivery", async () => {
+  const substitutedHead = "c".repeat(40);
+  const substitutedEvent = { ...event, head_sha: substitutedHead };
+  const receipt = controlReceipt({ reviewed_exact_head_sha: substitutedHead });
+  const bindingBody = `GBB_G34_REVIEWER_BINDING_V1\nstate: REVIEWER_ASSIGNED\nrecorded_by_role: LOCAL_CONTROL_TOWER\ncontrol_task_identity: /root\nworker_task_identity: ${event.agent_name}\ncard_issue_number: 219\nreviewer_task_identity: /root/g34_219_sol_high_review\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nmodel: gpt-6-sol\nreasoning_effort: high\ncandidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: ${event.branch}\ncandidate_exact_head_sha: ${substitutedHead}\ncandidate_tree_sha: ${event.tree_sha}`;
+  const reviewBody = `GBB_G34_FRESH_INDEPENDENT_REVIEW_RESULT_V1\ndecision: APPROVE\nstate: REVIEW_TERMINAL\ncard: #219\nreviewer_binding_comment_id: 8499\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nreviewer_task_identity: /root/g34_219_sol_high_review\nreviewed_repository: D22977/gpt-browser-bridge\nreviewed_branch: ${event.branch}\nreviewed_exact_head: ${substitutedHead}\nreviewed_tree: ${event.tree_sha}`;
+  const originalEventComment = {
+    id: event.comment_id,
+    url: `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${event.comment_id}`,
+    user: { login: "D22977" },
+    body: event.body,
+  };
+  const github = githubFor(receipt, (id) => id === "8499" ? {
+    id: "8499", url: "https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-8499",
+    user: { login: "D22977" }, body: bindingBody,
+  } : id === "8500" ? {
+    id: "8500", url: "https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-8500",
+    user: { login: "D22977" }, body: reviewBody,
+  } : id === event.comment_id ? originalEventComment : undefined);
+  github.getIssue = async (number) => Number(number) === 219 ? {
+    number: 219, state: "open",
+    body: `GBB_G34_FRESH_REVIEW_REMEDIATION_WORK_ORDER_V1\ncandidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: ${event.branch}\ncandidate_exact_head_sha: ${substitutedHead}\ncandidate_tree_sha: ${event.tree_sha}\nreviewer_binding_comment_id: 8499`,
+  } : null;
+
+  await assert.rejects(() => authorizeControlSuccessor({
+    event: substitutedEvent, authority, controlReceipt: receipt, github,
+  }), /delivered source event exact reread mismatch/);
 });

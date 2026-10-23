@@ -1,5 +1,5 @@
 import { parseG34ReceiptFields, parseActiveControlAuthority } from "./g34_contract.mjs";
-import { createSourceEvent, publishSourceEvent, readSourceEventPublication, beginSuccessorDelivery, recordSuccessorDelivery } from "./g34_source_event_publisher.mjs";
+import { createSourceEvent, sourceEventPayloadBody, publishSourceEvent, readSourceEventPublication, beginSuccessorDelivery, recordSuccessorDelivery } from "./g34_source_event_publisher.mjs";
 
 const nonEmpty = (value) => typeof value === "string" && value.trim().length > 0;
 const executorTaskIdentity = (value) => {
@@ -20,11 +20,10 @@ function receiptFields(receipt) {
   return { ...parseG34ReceiptFields(receipt), id, author: receipt.user.login, url: receipt.url, body: receipt.body };
 }
 
-export async function authorizeControlSuccessor({ event, publication, authority, controlReceipt, github }) {
-  const receipt = receiptFields(controlReceipt);
+async function readCurrentControlAuthority(github, expectedAuthority, phase) {
   if (typeof github?.getIssueComment !== "function" ||
       typeof github?.getCurrentAuthorityRecords !== "function") {
-    throw new Error("exact current GitHub authority and Control acceptance rereads are required");
+    throw new Error("exact current GitHub Control authority reads are required");
   }
   const liveRecords = await github.getCurrentAuthorityRecords();
   const live = {};
@@ -42,10 +41,20 @@ export async function authorizeControlSuccessor({ event, publication, authority,
     live[key] = exactPointer;
   }
   const liveAuthority = parseActiveControlAuthority(live);
-  if (liveAuthority.control_generation !== authority?.control_generation ||
-      liveAuthority.active_control_id !== authority?.active_control_id) {
-    throw new Error("current Control authority changed before successor authorization");
+  const expectedRecords = expectedAuthority?.source_records ?? expectedAuthority;
+  const expected = parseActiveControlAuthority(expectedRecords);
+  const pointerKeys = ["switch_comment_id", "index43_comment_id", "index81_comment_id", "rehydration_ack_comment_id"];
+  if (liveAuthority.control_generation !== expected.control_generation ||
+      liveAuthority.active_control_id !== expected.active_control_id ||
+      pointerKeys.some((key) => liveAuthority.record_ids[key] !== expected.record_ids[key])) {
+    throw new Error(`current Control authority changed before ${phase}`);
   }
+  return liveAuthority;
+}
+
+export async function authorizeControlSuccessor({ event, publication, authority, controlReceipt, github }) {
+  const receipt = receiptFields(controlReceipt);
+  const liveAuthority = await readCurrentControlAuthority(github, authority, "successor authorization");
   const reread = receiptFields(await github.getIssueComment(receipt.id));
   if (reread.id !== receipt.id || reread.url !== receipt.url || reread.body !== receipt.body ||
       reread.author !== receipt.author) throw new Error("Control acceptance exact reread mismatch");
@@ -60,6 +69,7 @@ export async function authorizeControlSuccessor({ event, publication, authority,
   );
   if (!eventComment || String(eventComment.id) !== String(event.comment_id) ||
       !eventUrl.test(eventComment.url ?? "") || eventComment.body !== event.body ||
+      sourceEventPayloadBody(event) !== event.body ||
       eventComment.user?.login !== liveAuthority.publisher_login ||
       !event.body.includes(`event_id=${event.event_id}`) ||
       !event.body.includes(`source_comment_id=${event.source_comment_id}`) ||
@@ -209,7 +219,8 @@ export async function authorizeControlSuccessor({ event, publication, authority,
 
 export async function runG34ResidentCycle({ sourceComments, currentAuthority, binding, issueNumber, runtimeRoot, github, repositoryFullName = "D22977/gpt-browser-bridge", branch, baseSha, headSha, publisherAuthor }) {
   if (!Array.isArray(sourceComments)) throw new Error("exact source comments are required");
-  if (typeof github?.getIssueComment !== "function" || typeof github?.getIssue !== "function") throw new Error("GitHub client is missing exact issue/comment reads");
+  if (typeof github?.getIssueComment !== "function" || typeof github?.getIssue !== "function" ||
+      typeof github?.getCurrentAuthorityRecords !== "function") throw new Error("GitHub client is missing exact current authority and issue/comment reads");
   if (!nonEmpty(branch) || !/^[0-9a-f]{40}$/.test(String(baseSha ?? "")) ||
       !/^[0-9a-f]{40}$/.test(String(headSha ?? ""))) {
     throw new Error("exact branch, base, and current head are required");
@@ -221,7 +232,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       !String(card.body ?? "").startsWith("GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1")) {
     throw new Error("exact open G34 work-order card is required");
   }
-  const activeAuthority = parseActiveControlAuthority(currentAuthority);
+  const activeAuthority = await readCurrentControlAuthority(github, currentAuthority, "resident publication");
   if (!nonEmpty(publisherAuthor) || publisherAuthor !== activeAuthority.publisher_login) {
     throw new Error("worker source publisher is not the verified active Control publisher");
   }
@@ -615,6 +626,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       ...(eventKind === "WORKER_TERMINAL_RESULT" ? { terminalCommentId: String(sourceComment.id) } : {}),
       expectedAuthor: activeAuthority.publisher_login,
     });
+    await readCurrentControlAuthority(github, activeAuthority, "resident publication");
     const publication = await publishSourceEvent({ event, issueNumber, runtimeRoot, github, repositoryFullName });
     results.push({ event: { ...event, comment_id: publication.comment_id }, publication });
   }

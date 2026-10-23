@@ -37,6 +37,13 @@ function eventBody(event) {
     .map((key) => `${key}=${event[key]}`).join("\n");
 }
 
+export function sourceEventPayloadBody(event) {
+  const payload = Object.fromEntries(eventFields
+    .filter((key) => event?.[key] !== undefined)
+    .map((key) => [key, event[key]]));
+  return eventBody(payload);
+}
+
 export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssueNumber, sourceRepositoryFullName, eventKind, authority, binding, branch, baseSha, headSha, state, terminalCommentId, reviewCommentId, expectedAuthor }) {
   if (!sourceComment || !/^[1-9][0-9]*$/.test(String(sourceComment.id ?? "")) || typeof sourceComment.body !== "string") {
     throw new Error("source executor comment metadata is required");
@@ -205,7 +212,7 @@ async function verifyComment(event, issueNumber, repositoryFullName, metadata, g
 export async function publishSourceEvent({ event, issueNumber, runtimeRoot, github, repositoryFullName = "D22977/gpt-browser-bridge" }) {
   const { body, expected_author: expectedAuthor, source_issue_number: sourceIssueNumber, source_repository_full_name: sourceRepositoryFullName, ...fields } = event ?? {};
   const validated = sourceEventSchema.parse(fields);
-  if (typeof body !== "string" || body !== eventBody(validated) || !expectedAuthor ||
+  if (typeof body !== "string" || body !== sourceEventPayloadBody(event) || body !== eventBody(validated) || !expectedAuthor ||
       sourceIssueNumber !== issueNumber || sourceRepositoryFullName !== repositoryFullName) {
     throw new Error("source event body and expected author are required");
   }
