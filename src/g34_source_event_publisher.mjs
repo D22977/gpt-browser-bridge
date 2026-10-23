@@ -432,7 +432,10 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
         adjudication.source_event_comment_id === String(event.comment_id) &&
         Number(event.comment_id) < Number(adjudication.id) && Number(adjudication.id) < Number(review.id) &&
         Number(reviewerBinding.id) < Number(review.id) && Number(review.id) < Number(controlCommentId) &&
+        control.recorded_by_role === "ACTIVE_CONTROL" &&
         control.independent_review_comment_id === review.id && control.independent_review_decision === "APPROVE" &&
+        control.independent_review_card_issue_number === String(reviewCardNumber) &&
+        control.reviewed_exact_head_sha === event.head_sha && control.successor_count === "1" &&
         control.adjudication_comment_id === adjudication.id && control.adjudication_state === adjudication.state &&
         control.semantic_sequence === "WORKER_RECEIPT_SOURCE_EVENT_ACTIVE_CONTROL_ADJUDICATION_INDEPENDENT_REVIEW_CURRENT_CONTROL_ACK";
       if (!delivery || delivery.marker !== "GBB_G34_SUCCESSOR_DELIVERY_RECEIPT_V1" || delivery.state !== "DELIVERED" ||

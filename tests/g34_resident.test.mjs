@@ -1241,6 +1241,13 @@ test("pinned authentic G22 terminal chain publishes without invented Worker or C
   await rejectsTampering(acceptanceId, (body) => body.replace(
     "independent_review_decision: APPROVE", "independent_review_decision: REJECT",
   ));
+  await rejectsTampering(acceptanceId, (body) => body.replace(
+    `reviewed_exact_head_sha: ${head}`, `reviewed_exact_head_sha: ${"a".repeat(40)}`,
+  ));
+  await rejectsTampering(acceptanceId, (body) => body.replace(
+    "recorded_by_role: ACTIVE_CONTROL", "recorded_by_role: LOCAL_CONTROL_TOWER",
+  ));
+  await rejectsTampering(acceptanceId, (body) => body.replace("successor_count: 1", "successor_count: 2"));
   await rejectsTampering("6331000006", (body) => body.replace(
     "claim_accepted: #211/6331000005 exact-read", "claim_accepted: #211/6331000999 exact-read",
   ));
