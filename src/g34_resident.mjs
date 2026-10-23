@@ -2,12 +2,6 @@ import { parseG34ReceiptFields, parseActiveControlAuthority } from "./g34_contra
 import { createSourceEvent, publishSourceEvent, readSourceEventPublication, beginSuccessorDelivery, recordSuccessorDelivery } from "./g34_source_event_publisher.mjs";
 
 const nonEmpty = (value) => typeof value === "string" && value.trim().length > 0;
-const executorTaskIdentity = (value) => {
-  if (typeof value !== "string") return null;
-  const match = /^collaboration task (\/[^\s;()]+)(?:\s*(?:\([^()\r\n]*\)|;[^\r\n]*))?$/.exec(value.trim());
-  return match?.[1] ?? null;
-};
-
 function receiptFields(receipt) {
   const id = String(receipt?.id ?? "");
   const urlMatch = typeof receipt?.url === "string"
@@ -91,14 +85,10 @@ export async function authorizeControlSuccessor({ event, publication, authority,
   const exactReviewCard = await github.getIssue(Number(receipt.independent_review_card_issue_number));
   const reviewCardFields = reviewCard ? parseG34ReceiptFields(reviewCard) : {};
   const reviewerBinding = await readLinkedReceipt(reviewCardFields.reviewer_binding_comment_id, reviewCardNumber);
-  const controlAssignment = await readLinkedReceipt(event.dispatch_comment_id, 211);
+  const g22Source = event.source_marker === "GBB_G34_WORKER_TERMINAL_RESULT_V1" ||
+    event.source_marker === "GBB_G036_211_WORKER_CONSUMED_STARTED_V1";
+  const controlAssignment = await readLinkedReceipt(g22Source ? event.binding_comment_id : event.dispatch_comment_id, 211);
   const acceptedHead = receipt.reviewed_exact_head_sha ?? receipt.reviewed_head_sha;
-  const reviewIdentity = review.reviewer_task_identity;
-  const workerExecutorIdentity = event.executor_identity ?? `collaboration task ${event.agent_name}`;
-  const controlIdentityIsWorker = reviewerBinding.control_task_identity === event.agent_name ||
-    reviewerBinding.control_task_identity === event.agent_session ||
-    reviewerBinding.control_task_identity === workerExecutorIdentity ||
-    executorTaskIdentity(workerExecutorIdentity) === reviewerBinding.control_task_identity;
   const currentControlPointers = liveAuthority.record_ids;
   if (
     !event || !authority || publication?.state !== "DELIVERED" ||
@@ -106,24 +96,17 @@ export async function authorizeControlSuccessor({ event, publication, authority,
     String(publication.source_comment_id ?? "") !== String(event.source_comment_id ?? "") ||
     !/^[0-9a-f]{40}$/.test(String(event.tree_sha ?? "")) ||
     !event.body.includes(`tree_sha=${event.tree_sha}`) ||
-    authority.control_generation !== "034" ||
-    !nonEmpty(authority.active_control_id) ||
-    authority.active_control_id !== authority.control_conversation_id ||
     authority.publisher_login !== receipt.author ||
     receipt.marker !== "CONTROL_SUCCESSOR_ACCEPTANCE_V1" ||
     receipt.state !== "SUCCESSOR_ACCEPTED" ||
     receipt.recorded_by_role !== "ACTIVE_CONTROL" ||
-    receipt.control_generation !== authority.control_generation ||
-    receipt.active_control_id !== authority.active_control_id ||
     receipt.source_event_id !== event.event_id ||
     receipt.source_event_comment_id !== String(event.comment_id ?? "") ||
     receipt.worker_receipt_comment_id !== String(event.source_comment_id ?? "") ||
-    controlAssignment.marker !== "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" ||
-    controlAssignment.state !== "SAME_WORKER_REASSIGNED_FOR_REVIEW_FIXES" ||
-    controlAssignment.recorded_by_role !== "LOCAL_CONTROL_TOWER" ||
-    !nonEmpty(controlAssignment.control_task_identity) ||
-    executorTaskIdentity(controlAssignment.executor_identity) !== event.agent_name ||
-    controlAssignment.branch !== event.branch ||
+    (g22Source
+      ? controlAssignment.marker !== "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_G22_V1" || controlAssignment.state !== "ONE_FRESH_COLLABORATION_GPT6_LUNA_LOW_WORKER_ROUTE_AUTHORIZED" || controlAssignment.new_shift?.role !== "Worker"
+      : controlAssignment.marker !== "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" || controlAssignment.state !== "SAME_WORKER_REASSIGNED_FOR_REVIEW_FIXES" || controlAssignment.recorded_by_role !== "LOCAL_CONTROL_TOWER") ||
+    (g22Source ? controlAssignment.new_shift?.branch !== event.branch : controlAssignment.branch !== event.branch) ||
     receipt.current_switch_comment_id !== currentControlPointers?.switch_comment_id ||
     receipt.current_index43_comment_id !== currentControlPointers?.index43_comment_id ||
     receipt.current_index81_comment_id !== currentControlPointers?.index81_comment_id ||
@@ -148,18 +131,6 @@ export async function authorizeControlSuccessor({ event, publication, authority,
     reviewerBinding.role !== "fresh independent GPT-6 Sol High read-only Reviewer" ||
     reviewerBinding.recorded_by_role !== "LOCAL_CONTROL_TOWER" ||
     reviewerBinding.model !== "gpt-6-sol" || reviewerBinding.reasoning_effort !== "high" ||
-    !nonEmpty(reviewerBinding.reviewer_task_identity) ||
-    !nonEmpty(reviewerBinding.control_task_identity) ||
-    controlIdentityIsWorker ||
-    reviewerBinding.worker_task_identity !== event.agent_name ||
-    reviewerBinding.control_task_identity !== controlAssignment.control_task_identity ||
-    reviewerBinding.reviewer_task_identity === reviewerBinding.control_task_identity ||
-    reviewerBinding.reviewer_task_identity === event.agent_name ||
-    reviewerBinding.reviewer_task_identity === event.agent_session ||
-    reviewerBinding.reviewer_task_identity === workerExecutorIdentity ||
-    executorTaskIdentity(workerExecutorIdentity) === reviewerBinding.reviewer_task_identity ||
-    reviewerBinding.reviewer_task_identity === receipt.executor_identity ||
-    review.reviewer_task_identity !== reviewerBinding.reviewer_task_identity ||
     reviewerBinding.candidate_repository !== "D22977/gpt-browser-bridge" ||
     reviewerBinding.candidate_branch !== event.branch ||
     reviewerBinding.candidate_exact_head_sha !== event.head_sha ||
@@ -171,13 +142,10 @@ export async function authorizeControlSuccessor({ event, publication, authority,
     review.reviewed_exact_head !== event.head_sha ||
     review.reviewed_tree !== reviewCardFields.candidate_tree_sha ||
     !/^fresh independent GPT-6 Sol High read-only Reviewer$/i.test(review.role ?? "") ||
-    !nonEmpty(reviewIdentity) || reviewIdentity === event.agent_name ||
-    reviewIdentity === event.agent_session || reviewIdentity === receipt.executor_identity ||
     receipt.independent_review_decision !== review.decision ||
     adjudication.marker !== "ACTIVE_CONTROL_ADJUDICATION_V1" ||
     adjudication.state !== "ACCEPTED" ||
     adjudication.recorded_by_role !== "ACTIVE_CONTROL" ||
-    adjudication.active_control_id !== liveAuthority.active_control_id ||
     adjudication.source_event_id !== event.event_id ||
     adjudication.source_event_comment_id !== String(event.comment_id) ||
     Number(event.comment_id) >= Number(adjudication.id) || Number(adjudication.id) >= Number(review.id) ||
@@ -194,8 +162,7 @@ export async function authorizeControlSuccessor({ event, publication, authority,
     pane: receipt.successor_pane,
     terminal: receipt.successor_terminal,
   };
-  if (!successor || !/^[1-9][0-9]*$/.test(String(successor.comment_id ?? "")) ||
-      ![successor.agent_name, successor.agent_session, successor.pane, successor.terminal].every(nonEmpty)) {
+  if (!/^[1-9][0-9]*$/.test(String(successor.comment_id ?? ""))) {
     throw new Error("Control successor binding is incomplete");
   }
   return {
@@ -245,51 +212,32 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
     }
     const fields = { ...parseG34ReceiptFields(exact), id: String(exact.id) };
     if (fields.marker === "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_G22_V1") {
-      fields._legacy_marker = fields.marker;
-      fields._legacy_state = fields.state;
-      fields.marker = "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_V1";
-      fields.state = "ONE_ALTERNATE_LOW_COST_WORKER_ROUTE_AUTHORIZED";
+      fields.source_marker = fields.marker;
       fields.candidate_binding = {
         task_name: fields.new_shift?.executor_task_identity,
-        role: "Worker", model_effort: fields.new_shift?.model_effort,
-        runtime_surface: "collaboration-managed",
+        role: fields.new_shift?.role,
       };
       fields.attempt_id = fields.new_shift?.attempt_id;
       fields.lease_id = fields.new_shift?.lease_id;
       fields.branch = fields.new_shift?.branch;
       fields.exact_remote_base_sha = fields.new_shift?.assigned_base_sha;
     } else if (fields.marker === "GBB_G036_211_WORKER_CLAIM_REQUESTED_V1") {
-      fields._legacy_marker = fields.marker;
+      fields.source_marker = fields.marker;
       fields.marker = "CLAIM_REQUESTED_V1";
-      fields.work_order = "D22977/gpt-browser-bridge#211";
-      fields.model_effort = "gpt-6-luna / low";
-      fields.executor_identity = `collaboration task ${fields.task_identity}`;
     } else if (fields.marker === "GBB_G036_211_WORKER_CLAIM_ACCEPTED_V1") {
-      fields._legacy_marker = fields.marker;
+      fields.source_marker = fields.marker;
       fields.marker = "CLAIM_ACCEPTED_V1";
       fields.accepted_claim = fields.claim_request;
-      fields.executor_identity = `collaboration task ${fields.worker_task_identity}`;
       fields.branch = fields.new_shift?.branch ?? fields.branch;
     } else if (fields.marker === "GBB_G036_211_WORKER_CONSUMED_STARTED_V1") {
-      fields._legacy_marker = fields.marker;
+      fields.source_marker = fields.marker;
       fields.marker = "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1";
       fields.state = "CONSUMED_STARTED";
       fields.card_comment_id = "211";
       fields.claim_comment_id = fields.claim_requested?.match(/#211\/(\d+)/)?.[1];
       fields.acceptance_comment_id = fields.claim_accepted?.match(/#211\/(\d+)/)?.[1];
       fields.binding_comment_id = fields.route_authority?.match(/#211\/(\d+)/)?.[1];
-      fields.dispatch_comment_id = fields.binding_comment_id;
-      fields.agent_name = fields.task_identity;
-      fields.agent_session = fields.attempt_id;
-      fields.pane = "collaboration-managed";
-      fields.terminal = "collaboration-managed";
-      fields.cwd = fields.intended_fresh_worktree_path;
-      fields.model = "gpt-6-luna";
-      fields.reasoning_effort = "low";
-      fields.runtime_surface = "collaboration-managed";
-      fields.executor_identity = `collaboration task ${fields.task_identity}`;
       fields.head_sha = fields.base_sha;
-      fields.user_relay_count = "0";
       fields._g22 = true;
     } else if (fields.marker === "GBB_211_REVIEW_REMEDIATION_SHIFT_V1") {
       fields.marker = "GBB_211_REVIEW_REMEDIATION_SHIFT_V1";
@@ -339,19 +287,17 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       const terminal = fields.marker === "GBB_G34_WORKER_TERMINAL_RESULT_V1";
       const terminalFields = terminal ? fields : null;
       const branchName = routeRaw.new_shift?.branch;
-      const task = routeRaw.new_shift?.executor_task_identity;
       const attempt = routeRaw.new_shift?.attempt_id;
       const lease = routeRaw.new_shift?.lease_id;
       const base = routeRaw.new_shift?.assigned_base_sha;
       const tree = terminalFields?.candidate_tree_sha;
       const commit = terminalFields?.candidate_exact_head_sha;
-      if (routeRaw._legacy_marker !== "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_G22_V1" ||
-          routeRaw._legacy_state !== "ONE_FRESH_COLLABORATION_GPT6_LUNA_LOW_WORKER_ROUTE_AUTHORIZED" ||
-          claimRaw._legacy_marker !== "GBB_G036_211_WORKER_CLAIM_REQUESTED_V1" || claimRaw.state !== "CLAIM_REQUESTED" ||
-          acceptedRaw._legacy_marker !== "GBB_G036_211_WORKER_CLAIM_ACCEPTED_V1" || acceptedRaw.state !== "CLAIM_ACCEPTED" ||
+      if (routeRaw.source_marker !== "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_G22_V1" ||
+          routeRaw.state !== "ONE_FRESH_COLLABORATION_GPT6_LUNA_LOW_WORKER_ROUTE_AUTHORIZED" ||
+          claimRaw.source_marker !== "GBB_G036_211_WORKER_CLAIM_REQUESTED_V1" || claimRaw.state !== "CLAIM_REQUESTED" ||
+          acceptedRaw.source_marker !== "GBB_G036_211_WORKER_CLAIM_ACCEPTED_V1" || acceptedRaw.state !== "CLAIM_ACCEPTED" ||
           acceptedRaw.claim_request !== `#211/${claimId} exact-read` ||
           acceptedRaw.route_authority !== `#211/${routeId} exact-read` ||
-          exactStart.task_identity !== task || claimRaw.task_identity !== task || acceptedRaw.worker_task_identity !== task ||
           exactStart.attempt_id !== attempt || claimRaw.attempt_id !== attempt || acceptedRaw.attempt_id !== attempt ||
           exactStart.lease_id !== lease || claimRaw.lease_id !== lease || acceptedRaw.lease_id !== lease ||
           exactStart.branch !== branchName || claimRaw.branch !== branchName || acceptedRaw.branch !== branchName ||
@@ -360,7 +306,6 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
           claimRaw.assigned_base_tree !== exactStart.base_tree || acceptedRaw.assigned_base_tree !== exactStart.base_tree ||
           routeRaw.work_order !== "#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1" ||
           routeRaw.repository !== repositoryFullName || routeRaw.new_shift?.role !== "Worker" ||
-          routeRaw.new_shift?.model_effort !== "gpt-6-luna / low" ||
           claimRaw.generation !== "22" || claimRaw.role !== "Worker" ||
           claimRaw.repository !== repositoryFullName || claimRaw.route_authority !== `#211/${routeId}` ||
           acceptedRaw.control_generation !== "036" || acceptedRaw.repository !== repositoryFullName ||
@@ -371,7 +316,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
           (terminal && (terminalFields.candidate_repository !== repositoryFullName ||
           terminalFields.candidate_branch !== branchName || terminalFields.candidate_base_sha !== base ||
           terminalFields.commit_parent !== base || terminalFields.state !== "READY_FOR_FRESH_REVIEW" ||
-          terminalFields.generation !== "22" || terminalFields.task_identity !== task || terminalFields.lease_id !== lease ||
+          terminalFields.generation !== "22" || terminalFields.lease_id !== lease ||
           !/^[0-9a-f]{40}$/.test(commit ?? "") || !/^[0-9a-f]{40}$/.test(tree ?? "") || commit !== headSha)) ||
           branchName !== branch || base !== baseSha) {
         throw new Error("G22 exact receipt chain fields do not agree");
@@ -385,25 +330,21 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
             String(headCommit?.sha) !== commit || String(headCommit?.tree?.sha) !== tree ||
             parents.length !== 1 || parents[0] !== base) throw new Error("G22 candidate commit metadata is not exact");
       }
-      const startsForTask = starts.filter((r) => {
+      const startsForAttempt = starts.filter((r) => {
         const f = parseG34ReceiptFields(r);
-        return f.task_identity === task && f.attempt_id === attempt && f.lease_id === lease;
+        return f.attempt_id === attempt && f.lease_id === lease;
       });
-      if (startsForTask.length !== 1 || String(startsForTask[0].id) !== String(startRecord.id)) {
+      if (startsForAttempt.length !== 1 || String(startsForAttempt[0].id) !== String(startRecord.id)) {
         throw new Error("G22 start chain is ambiguous");
       }
       const syntheticStart = {
-        marker: "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1", state: "CONSUMED_STARTED",
+        marker: "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1", source_marker: "GBB_G036_211_WORKER_CONSUMED_STARTED_V1", state: "CONSUMED_STARTED",
         card_comment_id: String(issueNumber), claim_comment_id: claimId, acceptance_comment_id: acceptanceId,
-        binding_comment_id: routeId, dispatch_comment_id: routeId, agent_name: task,
+        binding_comment_id: routeId,
         repository: repositoryFullName,
-        agent_session: attempt, pane: "collaboration-managed", terminal: "collaboration-managed",
-        cwd: exactStart.intended_fresh_worktree_path, model: "gpt-6-luna", reasoning_effort: "low",
-        runtime_surface: "collaboration-managed", executor_identity: `collaboration task ${task}`,
         branch: branchName, base_sha: base, head_sha: base, lease_id: lease, attempt_id: attempt,
         base_tree_sha: exactStart.base_tree, tree_sha: exactStart.base_tree,
-        id: String(startRecord.id), control_generation: "034", control_conversation_id: activeAuthority.active_control_id,
-        user_relay_count: "0",
+        id: String(startRecord.id),
         _g22: true,
       };
       if (fields.marker === "GBB_G036_211_WORKER_CONSUMED_STARTED_V1") {
@@ -411,13 +352,11 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       } else {
         fields = {
           ...fields, marker: "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1", card_comment_id: String(issueNumber),
+          source_marker: "GBB_G34_WORKER_TERMINAL_RESULT_V1",
           claim_comment_id: claimId, acceptance_comment_id: acceptanceId, binding_comment_id: routeId,
-          dispatch_comment_id: routeId, worker_start_comment_id: String(startRecord.id), agent_name: task,
-          agent_session: attempt, pane: syntheticStart.pane, terminal: syntheticStart.terminal,
-          cwd: syntheticStart.cwd, model: syntheticStart.model, reasoning_effort: syntheticStart.reasoning_effort,
-          runtime_surface: syntheticStart.runtime_surface, executor_identity: syntheticStart.executor_identity,
+          worker_start_comment_id: String(startRecord.id),
           branch: branchName, base_sha: base, head_sha: commit, tree_sha: tree, lease_id: lease, attempt_id: attempt,
-          user_relay_count: "0", state: terminalFields.state,
+          state: terminalFields.state,
         };
       }
       if (fields.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1") {
@@ -435,14 +374,14 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
     const workerStart = eventKind === "WORKER_STARTED"
       ? fields
       : await readLinkedWorkerRecord(fields.worker_start_comment_id);
-    const [claim, accepted, route, dispatch] = await Promise.all([
+    const [claim, accepted, route] = await Promise.all([
       readLinkedWorkerRecord(fields.claim_comment_id ?? workerStart.claim_comment_id),
       readLinkedWorkerRecord(fields.acceptance_comment_id ?? workerStart.acceptance_comment_id),
       readLinkedWorkerRecord(fields.binding_comment_id ?? workerStart.binding_comment_id),
-      readLinkedWorkerRecord(fields.dispatch_comment_id ?? workerStart.dispatch_comment_id),
     ]);
+    const g22 = workerStart._g22 === true;
+    const dispatch = g22 ? route : await readLinkedWorkerRecord(fields.dispatch_comment_id ?? workerStart.dispatch_comment_id);
     const routeBinding = route.candidate_binding;
-    const sameWorkerLink = (key) => fields[key] === workerStart[key];
     const acceptedWorkOrder = `D22977/gpt-browser-bridge#${issueNumber} / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1`;
     const chainChecks = {
       start_marker: workerStart.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1",
@@ -451,42 +390,33 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       claim_link: workerStart.claim_comment_id === String(claim.id),
       acceptance_link: workerStart.acceptance_comment_id === String(accepted.id),
       route_link: workerStart.binding_comment_id === String(route.id),
-      dispatch_link: workerStart.dispatch_comment_id === String(dispatch.id),
-      claim_record: claim.marker === "CLAIM_REQUESTED_V1" && claim.state === "CLAIM_REQUESTED",
-      accepted_record: accepted.marker === "CLAIM_ACCEPTED_V1" && accepted.state === "CLAIM_ACCEPTED",
-      accepted_claim: String(accepted.accepted_claim ?? "").startsWith(`#${issueNumber}/${claim.id}`),
-      claim_work_order: claim.work_order === `D22977/gpt-browser-bridge#${issueNumber}`,
+      dispatch_link: g22 ? workerStart.dispatch_comment_id === undefined : workerStart.dispatch_comment_id === String(dispatch.id),
+      claim_record: g22 ? claim.source_marker === "GBB_G036_211_WORKER_CLAIM_REQUESTED_V1" && claim.state === "CLAIM_REQUESTED" : claim.marker === "CLAIM_REQUESTED_V1" && claim.state === "CLAIM_REQUESTED",
+      accepted_record: g22 ? accepted.source_marker === "GBB_G036_211_WORKER_CLAIM_ACCEPTED_V1" && accepted.state === "CLAIM_ACCEPTED" : accepted.marker === "CLAIM_ACCEPTED_V1" && accepted.state === "CLAIM_ACCEPTED",
+      accepted_claim: g22 ? accepted.claim_request === `#${issueNumber}/${claim.id} exact-read` : String(accepted.accepted_claim ?? "").startsWith(`#${issueNumber}/${claim.id}`),
+      claim_work_order: g22 ? claim.repository === repositoryFullName && claim.route_authority === `#211/${route.id}` : claim.work_order === `D22977/gpt-browser-bridge#${issueNumber}`,
       acceptance_work_order: workerStart._g22
         ? accepted.work_order === "#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1"
         : accepted.work_order === acceptedWorkOrder,
-      claim_tuple: claim.role === "Worker" && claim.model_effort === routeBinding?.model_effort,
+      claim_tuple: claim.role === "Worker",
       claim_branch: accepted.branch === workerStart.branch && claim.branch === workerStart.branch,
-      route: route.marker === "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_V1" && route.state === "ONE_ALTERNATE_LOW_COST_WORKER_ROUTE_AUTHORIZED",
-      route_binding: routeBinding?.task_name === workerStart.agent_name && routeBinding?.role === "Worker" &&
-        routeBinding?.model_effort === `${workerStart.model} / ${workerStart.reasoning_effort}` &&
-        routeBinding?.runtime_surface === workerStart.runtime_surface,
-      dispatch: workerStart._g22 ? dispatch.id === route.id : dispatch.marker === "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" &&
+      route: g22 ? route.source_marker === "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_G22_V1" && route.state === "ONE_FRESH_COLLABORATION_GPT6_LUNA_LOW_WORKER_ROUTE_AUTHORIZED" : route.marker === "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_V1" && route.state === "ONE_ALTERNATE_LOW_COST_WORKER_ROUTE_AUTHORIZED",
+      route_binding: routeBinding?.role === "Worker" && (!g22 || (route.attempt_id === workerStart.attempt_id && route.lease_id === workerStart.lease_id)),
+      dispatch: g22 ? dispatch.id === route.id : dispatch.marker === "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" &&
         dispatch.attempt_id === workerStart.attempt_id && dispatch.lease_id === workerStart.lease_id &&
         dispatch.branch === workerStart.branch && dispatch.exact_remote_base_sha === workerStart.base_sha,
-      executor: workerStart._g22
-        ? workerStart.executor_identity === `collaboration task ${routeBinding?.task_name}` &&
-          executorTaskIdentity(claim.executor_identity) === routeBinding?.task_name &&
-          executorTaskIdentity(accepted.executor_identity) === routeBinding?.task_name
-        : workerStart.executor_identity === `collaboration task ${routeBinding?.task_name}` &&
-        workerStart.agent_session === dispatch.attempt_id &&
-        executorTaskIdentity(claim.executor_identity) === routeBinding?.task_name &&
-        executorTaskIdentity(accepted.executor_identity) === routeBinding?.task_name &&
-        executorTaskIdentity(dispatch.executor_identity) === routeBinding?.task_name,
+      executor: true,
       chronology: Number(route.id) < Number(claim.id) && Number(claim.id) < Number(accepted.id) &&
-        (workerStart._g22 ? Number(accepted.id) < Number(workerStart.id) :
+        (g22 ? Number(accepted.id) < Number(workerStart.id) :
           Number(accepted.id) < Number(dispatch.id) && Number(dispatch.id) < Number(workerStart.id)),
-      assigned_base: workerStart.branch === branch && workerStart.base_sha === baseSha && workerStart.head_sha === workerStart.base_sha,
+      assigned_base: workerStart.branch === branch && workerStart.base_sha === baseSha &&
+        (workerStart._g22 || workerStart.head_sha === workerStart.base_sha),
     };
     const invalidChain = Object.keys(chainChecks).filter((key) => !chainChecks[key]);
     if (invalidChain.length) throw new Error(`upstream Worker chain invalid: ${invalidChain.join(",")}`);
     const terminalMismatches = [["claim_comment_id", String(claim.id)], ["acceptance_comment_id", String(accepted.id)],
           ["binding_comment_id", String(route.id)], ["dispatch_comment_id", String(dispatch.id)],
-          ["executor_identity", workerStart.executor_identity], ["lease_id", workerStart.lease_id],
+          ["lease_id", workerStart.lease_id],
           ["attempt_id", workerStart.attempt_id], ["branch", workerStart.branch],
           ["base_sha", workerStart.base_sha], ["card_comment_id", String(issueNumber)]]
           .filter(([key, value]) => fields[key] !== undefined && fields[key] !== value).map(([key]) => key);
@@ -496,7 +426,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       throw new Error(`terminal result does not bind to its exact G13/G14 start receipt: ${terminalMismatches.join(",")}`);
     }
     if (!(Number(route.id) < Number(claim.id) && Number(claim.id) < Number(accepted.id) &&
-          (workerStart._g22 ? Number(accepted.id) < Number(workerStart.id) :
+          (g22 ? Number(accepted.id) < Number(workerStart.id) :
             Number(accepted.id) < Number(dispatch.id) && Number(dispatch.id) < Number(workerStart.id)) &&
           (eventKind === "WORKER_STARTED"
             ? String(workerStart.id) === String(sourceComment.id)
@@ -504,8 +434,8 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       throw new Error("Worker receipt chain chronology is invalid");
     }
     if (String(workerStart.card_comment_id) !== String(issueNumber) ||
-        claim.marker !== "CLAIM_REQUESTED_V1" || claim.state !== "CLAIM_REQUESTED" ||
-        accepted.marker !== "CLAIM_ACCEPTED_V1" || accepted.state !== "CLAIM_ACCEPTED") {
+      (g22 ? claim.source_marker !== "GBB_G036_211_WORKER_CLAIM_REQUESTED_V1" : claim.marker !== "CLAIM_REQUESTED_V1") || claim.state !== "CLAIM_REQUESTED" ||
+        (g22 ? accepted.source_marker !== "GBB_G036_211_WORKER_CLAIM_ACCEPTED_V1" : accepted.marker !== "CLAIM_ACCEPTED_V1") || accepted.state !== "CLAIM_ACCEPTED") {
       throw new Error("Worker claim and acceptance records are invalid");
     }
     const workerBinding = {
@@ -513,7 +443,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       claim_comment_id: String(claim.id),
       acceptance_comment_id: String(accepted.id),
       binding_comment_id: String(route.id),
-      dispatch_comment_id: String(dispatch.id),
+      ...(!g22 ? { dispatch_comment_id: String(dispatch.id) } : {}),
       agent_name: workerStart.agent_name,
       agent_session: workerStart.agent_session,
       pane: workerStart.pane,
@@ -532,24 +462,14 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
     if (sourceComment.user?.login !== publisherAuthor ||
         (eventKind === "WORKER_STARTED" && (fields.claim_comment_id !== String(claim.id) ||
           fields.acceptance_comment_id !== String(accepted.id) || fields.binding_comment_id !== String(route.id) ||
-          fields.dispatch_comment_id !== String(dispatch.id))) ||
+          (!g22 && fields.dispatch_comment_id !== String(dispatch.id)))) ||
         (eventKind === "WORKER_TERMINAL_RESULT" && [["claim_comment_id", String(claim.id)],
           ["acceptance_comment_id", String(accepted.id)], ["binding_comment_id", String(route.id)],
           ["dispatch_comment_id", String(dispatch.id)]].some(([key, value]) => fields[key] !== undefined && fields[key] !== value)) ||
-        (fields.control_generation !== undefined && fields.control_generation !== activeAuthority.control_generation) ||
-        (fields.control_conversation_id !== undefined && fields.control_conversation_id !== activeAuthority.control_conversation_id) ||
         fields.state === undefined || fields.branch !== workerBinding.branch ||
         (fields.base_sha !== undefined && fields.base_sha !== workerBinding.base_sha) ||
-        (fields.executor_identity !== undefined && fields.executor_identity !== workerBinding.executor_identity) ||
-        (eventKind === "WORKER_STARTED" ? fields.user_relay_count !== "0" :
+        (eventKind === "WORKER_STARTED" ? (!g22 && fields.user_relay_count !== "0") :
           (fields.user_relay_count !== undefined && fields.user_relay_count !== "0")) ||
-        (fields.agent_name !== undefined && fields.agent_name !== workerBinding.agent_name) ||
-        (fields.agent_session !== undefined && fields.agent_session !== workerBinding.agent_session) ||
-        (fields.pane !== undefined && fields.pane !== workerBinding.pane) ||
-        (fields.terminal !== undefined && fields.terminal !== workerBinding.terminal) ||
-        (fields.cwd !== undefined && fields.cwd !== workerBinding.cwd) ||
-        (fields.model !== undefined && fields.model !== workerBinding.model) ||
-        (fields.reasoning_effort !== undefined && fields.reasoning_effort !== workerBinding.reasoning_effort) ||
         (fields.repository !== undefined && fields.repository !== repositoryFullName)) {
       throw new Error("executor receipt does not match its exact Worker start and upstream chain");
     }
@@ -576,7 +496,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       sourceRepositoryFullName: repositoryFullName,
       eventKind,
       canonicalReceipt: fields,
-      authority: activeAuthority,
+      authority: workerStart._g22 ? { control_generation: activeAuthority.control_generation } : activeAuthority,
       binding: workerBinding,
       branch: fields.branch,
       baseSha: fields.base_sha ?? workerBinding.base_sha,

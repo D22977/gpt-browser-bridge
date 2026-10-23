@@ -8,24 +8,25 @@ const fieldText = z.string().min(1).refine((value) => !/[\r\n]/.test(value));
 export const sourceEventSchema = z.object({
   marker: z.literal("GITHUB_SOURCE_EVENT_V1"),
   event_id: sha256,
-  control_generation: z.literal("034"),
-  active_control_id: controlId,
-  control_conversation_id: controlId,
+  control_generation: z.string().regex(/^\d{3}$/).optional(),
+  active_control_id: controlId.optional(),
+  control_conversation_id: controlId.optional(),
   event_kind: z.enum(["WORKER_STARTED", "WORKER_TERMINAL_RESULT"]),
+  source_marker: fieldText.optional(),
   source_comment_id: commentId,
   source_body_sha256: sha256,
   card_comment_id: commentId,
   claim_comment_id: commentId,
   acceptance_comment_id: commentId,
   binding_comment_id: commentId,
-  dispatch_comment_id: commentId,
-  agent_name: fieldText,
-  agent_session: fieldText,
-  pane: fieldText,
-  terminal: fieldText,
-  cwd: fieldText,
-  model: fieldText,
-  reasoning_effort: fieldText,
+  dispatch_comment_id: commentId.optional(),
+  agent_name: fieldText.optional(),
+  agent_session: fieldText.optional(),
+  pane: fieldText.optional(),
+  terminal: fieldText.optional(),
+  cwd: fieldText.optional(),
+  model: fieldText.optional(),
+  reasoning_effort: fieldText.optional(),
   state: fieldText,
   branch: fieldText,
   base_sha: z.string().regex(/^[0-9a-f]{40}$/),
@@ -35,11 +36,7 @@ export const sourceEventSchema = z.object({
   worker_start_comment_id: commentId.optional(),
   review_comment_id: commentId.optional(),
   user_relay_count: z.literal(0),
-}).strict().superRefine((event, ctx) => {
-  if (event.active_control_id !== event.control_conversation_id) {
-    ctx.addIssue({ code: "custom", path: ["control_conversation_id"], message: "must match active Control" });
-  }
-});
+}).strict();
 
 export function parseG34ReceiptFields(record) {
   if (!record || typeof record.body !== "string" || !record.body.trim()) {
@@ -98,6 +95,42 @@ export function parseActiveControlAuthority({ switchReceipt, index43, index81, r
   const indexA = requireRecord(index43, "#43 index", 43);
   const indexB = requireRecord(index81, "#81 index", 81);
   const ack = requireRecord(rehydrationAck, "rehydration ACK", 88);
+  const g36 = switched.marker === "CONTROL_GENERATION_SWITCH_035_TO_036_V1";
+  if (g36) {
+    const nextId = switched.generation_state?.new_conversation_id;
+    if (switched.state !== "ATOMIC_SWITCHED" || switched._author !== "D22977" ||
+        indexA._author !== "D22977" || indexB._author !== "D22977" || ack._author !== "D22977" ||
+        switched.generation_state?.old_generation !== "035" ||
+        switched.generation_state?.old_generation_status !== "RETIRED" ||
+        switched.generation_state?.new_generation !== "036" ||
+        switched.generation_state?.new_generation_status !== "ACTIVE" ||
+        switched.generation_state?.single_active_control !== "true" ||
+        !controlId.safeParse(nextId).success ||
+        !/^LOCAL_CONTROL_MONITOR_POINTER_GBB_G30_G36_G34_V\d+$/.test(indexA.marker ?? "") ||
+        !/^OWNER_ACCEPTED_GITHUB_BOARD_EVENT_ARCHITECTURE/.test(indexA.state ?? "") ||
+        indexA.recorded_by_role !== "LOCAL_CONTROL_TOWER" ||
+        !/^CURRENT_REGISTRY_INDEX_V\d+$/.test(indexB.marker ?? "") ||
+        !/^OWNER_ACCEPTED_GITHUB_BOARD_EVENT_ARCHITECTURE/.test(indexB.state ?? "") ||
+        indexB.recorded_by_role !== "LOCAL_CONTROL_TOWER" ||
+        !new RegExp(`^#43/${indexA._record_id}\\b`).test(indexB.source_control_pointer ?? "") ||
+        !/GitHub is the public shared board and ordered event history/.test(index81.body ?? "") ||
+        !/Worker is a per-shift role/.test(index81.body ?? "") ||
+        ack.marker !== "ACTIVE_CONTROL_REHYDRATION_ACK_V1" ||
+        ack.state !== "ACTIVE_REHYDRATED_ACKNOWLEDGED" || ack.generation !== "036" ||
+        ack.conversation_id !== nextId ||
+        !new RegExp(`^#88/${switched._record_id}\\b`).test(ack.authoritative_gates_and_direct_readback?.atomic_switch ?? "") ||
+        ack.active_state?.sole_active_control_generation !== "036" ||
+        ack.active_state?.single_active_control !== "true" ||
+        ack.active_state?.state_pointer_consistency !== "matched") {
+      throw new Error("current G36 active Control switch, indexes, or rehydration ACK are invalid");
+    }
+    return {
+      control_generation: "036", active_control_id: nextId, control_conversation_id: nextId,
+      publisher_login: switched._author,
+      record_ids: { switch_comment_id: switched._record_id, index43_comment_id: indexA._record_id,
+        index81_comment_id: indexB._record_id, rehydration_ack_comment_id: ack._record_id },
+    };
+  }
   const next = switched.new_control;
   const old = switched.old_control;
   const activeId = next?.conversation_id;

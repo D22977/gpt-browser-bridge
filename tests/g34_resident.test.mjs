@@ -57,6 +57,12 @@ const authorityRecords = {
     "body": "CURRENT_REGISTRY_INDEX_V159\nstate: G34_OPERATIONAL_SOURCE_RUNTIME_PROVENANCE_SPEC_WORKER_CONSUMED_STARTED\nrecorded_by_role: ACTIVE_CONTROL\nrepository: D22977/gpt-browser-bridge\ncontrol_generation: 034 ACTIVE\nsupersedes: #81/6019938137 V158\ncurrent_control: #43/6020264986 V264 exact GET matched\nactive_control_id: 6ac3b22a-a830-83ee-bd71-85838e5f1392\nsingle_active_control: true\nGitHub_sole_durable_semantic_authority: true\n\nGOVERNANCE_PHASE\ncandidate_head: a0ac6092f6ad64d3037d2aca1550dd0b42ce4d97\nformal_review: #162/6019411388 exact GET matched / PASS / gpt-6-sol high\nControl_ACK: #162/6019488883 exact GET matched / governance closeout only\ncandidate remains unmerged; runtime multi-lane remains NOT_IMPLEMENTED\n\nRUNTIME_AND_ARCHITECTURE\ninventory_receipt: #162/6019861481 exact GET matched\narchitecture_review_terminal: #162/6019992885 exact GET matched / NEXT_CARD_SPECIFIED\nG13 enabled Ready / IgnoreNew; TEMP disabled / Parallel\nlocal watcher and state remain G14; runtime-to-repository lineage NOT_DURABLY_MAPPED\nno resident liveness, G34 consume, or activation proven\n\nCURRENT_WORKER\ncard: #162/6020132060 exact GET matched\nbinding: #162/6020168250 exact GET matched\ndispatch: #162/6020183397 exact GET matched\nCONSUMED_STARTED: #162/6020230765 exact GET matched\nworker: /root/gbb_g34_source_runtime_provenance_luna_worker_01 / gpt-6-luna / xhigh / MODEL_SUBAGENT\nHerdr_visible_worker: NOT_BOUND; no Luna was present in fresh Herdr list; this read-only subtask does not satisfy the final exact visible Herdr executor criterion\nterminal: PENDING\nscope: read-only exact lineage and implementation/test allowlist specification; no mutation, tests, activation, copy, integration, task/process action, or transport action\n\nowner_goal: #43/5921003901 exact GET matched / NOT_COMPLETE\noverall_operational_restoration: NOT_COMPLETE\nnext: await exact worker terminal, then Control publishes one next card or a typed blocker\nuser_relay_count: 0\nreadback_required: true\nidempotency_key: CURRENT-REGISTRY-034-V159-G34-PROVENANCE-WORKER-20261007-01"
   }
 };
+const authorityRecords036 = {
+  switchReceipt: { id: "6261344189", url: "https://github.com/D22977/gpt-browser-bridge/issues/88#issuecomment-6261344189", user: { login: "D22977" }, body: "CONTROL_GENERATION_SWITCH_035_TO_036_V1\nstate: ATOMIC_SWITCHED\nrecorded_by_role: LOCAL_CONTROL_TRANSPORT\nGENERATION_STATE\nold_generation: 035\nold_generation_status: RETIRED\nnew_generation: 036\nnew_conversation_id: 6ad58eeb-e2a8-83e8-8c96-7d9d3526a4d6\nnew_generation_status: ACTIVE\nsingle_active_control: true" },
+  index43: { id: "6367001041", url: "https://github.com/D22977/gpt-browser-bridge/issues/43#issuecomment-6367001041", user: { login: "D22977" }, body: "LOCAL_CONTROL_MONITOR_POINTER_GBB_G30_G36_G34_V51\nstate: OWNER_ACCEPTED_GITHUB_BOARD_EVENT_ARCHITECTURE; #235_ACCEPTED_PROOF_PR_236_OPEN; #211_G23_REVIEW_IN_PROGRESS\nrecorded_by_role: LOCAL_CONTROL_TOWER\nsupersedes_pointer_only: #43/6366337299 V50" },
+  index81: { id: "6367018412", url: "https://github.com/D22977/gpt-browser-bridge/issues/81#issuecomment-6367018412", user: { login: "D22977" }, body: "CURRENT_REGISTRY_INDEX_V264\nstate: OWNER_ACCEPTED_GITHUB_BOARD_EVENT_ARCHITECTURE; #235_PROOF_ACCEPTED; #236_OPEN; #211_G23_REVIEW_ACTIVE\nrecorded_by_role: LOCAL_CONTROL_TOWER\nsource_control_pointer: #43/6367001041 V51 exact-read\n\nOPERATING_MODEL\nGitHub is the public shared board and ordered event history. Worker is a per-shift role; account, model, browser tab, pane and session are optional diagnostics, not admission gates." },
+  rehydrationAck: { id: "6261460655", url: "https://github.com/D22977/gpt-browser-bridge/issues/88#issuecomment-6261460655", user: { login: "D22977" }, body: "ACTIVE_CONTROL_REHYDRATION_ACK_V1\nstate: ACTIVE_REHYDRATED_ACKNOWLEDGED\nrecorded_by_role: ACTIVE_CONTROL\nrole: ACTIVE_CONTROL\nrepository: D22977/gpt-browser-bridge\nissue: 88\nrotation_id: GBB-CONTROL-ROTATION-035-036-20261019-01\ngeneration: 036\nconversation_id: 6ad58eeb-e2a8-83e8-8c96-7d9d3526a4d6\n\nAUTHORITATIVE_GATES_AND_DIRECT_READBACK\natomic_switch: #88/6261344189 exact GET matched; state ATOMIC_SWITCHED\n\nACTIVE_STATE\nsole_active_control_generation: 036\nsingle_active_control: true\nstate_pointer_consistency: matched" },
+};
 const authority = parseActiveControlAuthority(structuredClone(authorityRecords));
 const event = {
   event_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -305,14 +311,17 @@ test("only exact-read, authenticated current Control acceptance after review and
   });
 });
 
-test("primary authorization rejects a distinct Control identity outside the exact Control dispatch", async () => {
+test("primary authorization treats Control and Worker identities as optional metadata", async () => {
   const receipt = controlReceipt();
   const wrongControlBinding = `GBB_G34_REVIEWER_BINDING_V1\nstate: REVIEWER_ASSIGNED\nrecorded_by_role: LOCAL_CONTROL_TOWER\ncontrol_task_identity: /root/another-control\nworker_task_identity: ${event.agent_name}\ncard_issue_number: 219\nreviewer_task_identity: /root/g34_219_sol_high_review\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nmodel: gpt-6-sol\nreasoning_effort: high\ncandidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: ${workerBinding.branch}\ncandidate_exact_head_sha: ${event.head_sha}\ncandidate_tree_sha: ${"d".repeat(40)}`;
   const github = githubFor(receipt, (id) => id === "8499" ? {
     id: "8499", url: "https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-8499",
     user: { login: "D22977" }, body: wrongControlBinding,
   } : undefined);
-  await assert.rejects(() => authorizeControlSuccessor({ event, authority, controlReceipt: receipt, github }));
+  assert.deepEqual(await authorizeControlSuccessor({ event, authority, controlReceipt: receipt, github }), {
+    comment_id: "9002", agent_name: workerBinding.agent_name, agent_session: workerBinding.agent_session,
+    pane: workerBinding.pane, terminal: workerBinding.terminal,
+  });
 });
 
 test("primary authorization accepts the actual #223 candidate card with its exact tree pin", async () => {
@@ -356,7 +365,6 @@ test("primary authorization accepts the actual #223 candidate card with its exac
 test("successor gate rejects markerless, stale, unauthenticated, unreviewed, duplicate, or non-current decisions", async () => {
   const invalid = [
     controlReceipt().body.replace("CONTROL_SUCCESSOR_ACCEPTANCE_V1", "ARBITRARY_COMMENT"),
-    controlReceipt({ active_control_id: "7ac3b22a-a830-83ee-bd71-85838e5f1392" }),
     controlReceipt({ independent_review_decision: "FIX_REQUIRED" }),
     controlReceipt({ adjudication_state: "PENDING" }),
     controlReceipt({ successor_count: "2" }),
@@ -393,18 +401,20 @@ test("review approval cannot self-assert an identity or head outside the exact r
     event, authority, controlReceipt: controlReceipt({ reviewed_exact_head_sha: "cccccccccccccccccccccccccccccccccccccccc" }),
     github: githubFor(controlReceipt()),
   }));
-  await assert.rejects(() => authorizeControlSuccessor({
+  assert.deepEqual(await authorizeControlSuccessor({
     event, authority, controlReceipt: controlReceipt(),
     github: githubFor(controlReceipt(), (id) => id === "8499" ? {
       id: "8499", url: "https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-8499",
       user: { login: "D22977" },
       body: `GBB_G34_REVIEWER_BINDING_V1\nstate: REVIEWER_ASSIGNED\nrecorded_by_role: LOCAL_CONTROL_TOWER\ncontrol_task_identity: /root\nworker_task_identity: ${workerBinding.agent_name}\ncard_issue_number: 219\nreviewer_task_identity: ${workerBinding.agent_name}\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nmodel: gpt-6-sol\nreasoning_effort: high\ncandidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: ${workerBinding.branch}\ncandidate_exact_head_sha: ${event.head_sha}\ncandidate_tree_sha: ${"d".repeat(40)}`,
     } : undefined),
-  }));
+  }), {
+    comment_id: "9002", agent_name: workerBinding.agent_name, agent_session: workerBinding.agent_session,
+    pane: workerBinding.pane, terminal: workerBinding.terminal,
+  });
 
   for (const badBinding of [
     `GBB_G34_REVIEWER_BINDING_V1\nstate: REVIEWER_ASSIGNED\nrecorded_by_role: D22977\ncontrol_task_identity: /root\nworker_task_identity: ${workerBinding.agent_name}\ncard_issue_number: 219\nreviewer_task_identity: /root/g34_219_sol_high_review\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nmodel: gpt-6-sol\nreasoning_effort: high\ncandidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: ${workerBinding.branch}\ncandidate_exact_head_sha: ${event.head_sha}\ncandidate_tree_sha: ${"d".repeat(40)}`,
-    `GBB_G34_REVIEWER_BINDING_V1\nstate: REVIEWER_ASSIGNED\nrecorded_by_role: LOCAL_CONTROL_TOWER\ncontrol_task_identity: /root/g34_219_sol_high_review\nworker_task_identity: ${workerBinding.agent_name}\ncard_issue_number: 219\nreviewer_task_identity: /root/g34_219_sol_high_review\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nmodel: gpt-6-sol\nreasoning_effort: high\ncandidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: ${workerBinding.branch}\ncandidate_exact_head_sha: ${event.head_sha}\ncandidate_tree_sha: ${"d".repeat(40)}`,
   ]) {
     await assert.rejects(() => authorizeControlSuccessor({
       event, authority, controlReceipt: controlReceipt(),
@@ -415,20 +425,17 @@ test("review approval cannot self-assert an identity or head outside the exact r
     }));
   }
 
-  for (const controlTaskIdentity of [
-    event.agent_name,
-    event.agent_session,
-    `collaboration task ${event.agent_name}`,
-  ]) {
-    const workerCollisionBinding = `GBB_G34_REVIEWER_BINDING_V1\nstate: REVIEWER_ASSIGNED\nrecorded_by_role: LOCAL_CONTROL_TOWER\ncontrol_task_identity: ${controlTaskIdentity}\nworker_task_identity: ${workerBinding.agent_name}\ncard_issue_number: 219\nreviewer_task_identity: /root/g34_219_sol_high_review\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nmodel: gpt-6-sol\nreasoning_effort: high\ncandidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: ${workerBinding.branch}\ncandidate_exact_head_sha: ${event.head_sha}\ncandidate_tree_sha: ${"d".repeat(40)}`;
-    const collidedGithub = githubFor(controlReceipt(), (id) => id === "8499" ? {
-      id: "8499", url: "https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-8499",
-      user: { login: "D22977" }, body: workerCollisionBinding,
-    } : undefined);
-    await assert.rejects(() => authorizeControlSuccessor({
-      event, authority, controlReceipt: controlReceipt(), github: collidedGithub,
-    }));
-  }
+  const optionalIdentityBinding = `GBB_G34_REVIEWER_BINDING_V1\nstate: REVIEWER_ASSIGNED\nrecorded_by_role: LOCAL_CONTROL_TOWER\ncontrol_task_identity: ${event.agent_name}\nworker_task_identity: ${workerBinding.agent_name}\ncard_issue_number: 219\nreviewer_task_identity: /root/g34_219_sol_high_review\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nmodel: gpt-6-sol\nreasoning_effort: high\ncandidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: ${workerBinding.branch}\ncandidate_exact_head_sha: ${event.head_sha}\ncandidate_tree_sha: ${"d".repeat(40)}`;
+  const optionalIdentityGithub = githubFor(controlReceipt(), (id) => id === "8499" ? {
+    id: "8499", url: "https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-8499",
+    user: { login: "D22977" }, body: optionalIdentityBinding,
+  } : undefined);
+  assert.deepEqual(await authorizeControlSuccessor({
+    event, authority, controlReceipt: controlReceipt(), github: optionalIdentityGithub,
+  }), {
+    comment_id: "9002", agent_name: workerBinding.agent_name, agent_session: workerBinding.agent_session,
+    pane: workerBinding.pane, terminal: workerBinding.terminal,
+  });
 
   const lateBindingGithub = githubFor(controlReceipt(), (id) => id === "8501" ? {
     id: "8501", url: "https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-8501",
@@ -519,35 +526,35 @@ test("resident rejects a terminal receipt with missing start link or mismatched 
   assert.equal(start.id, "4001");
 });
 
-test("resident rejects a source receipt when the exact-read accepted claim names another executor", async () => {
+test("resident accepts identity differences while preserving exact Worker chain validation", async () => {
   const start = workerComment("4001", "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1", "CONSUMED_STARTED", workerBinding.base_sha);
   const forgedClaim = {
     id: workerBinding.acceptance_comment_id,
     url: `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${workerBinding.acceptance_comment_id}`,
     user: { login: "D22977" },
-    body: `CLAIM_ACCEPTED_V1\nstate: CLAIM_ACCEPTED\nwork_order: D22977/gpt-browser-bridge#211\naccepted_claim: #211/${workerBinding.claim_comment_id}\nbranch: ${workerBinding.branch}\nexecutor_identity: collaboration task /root/some-other-worker`,
+    body: `CLAIM_ACCEPTED_V1\nstate: CLAIM_ACCEPTED\nwork_order: D22977/gpt-browser-bridge#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\naccepted_claim: #211/${workerBinding.claim_comment_id} exact GET\nbranch: ${workerBinding.branch}\nexecutor_identity: collaboration task /root/some-other-worker`,
   };
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-cycle-"));
-  await assert.rejects(() => runG34ResidentCycle({
+  await runG34ResidentCycle({
     sourceComments: [start], currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
     issueNumber: 211, runtimeRoot,
     github: fakeSourceGithub([start], { [workerBinding.acceptance_comment_id]: forgedClaim }),
     repositoryFullName: "D22977/gpt-browser-bridge", branch: workerBinding.branch,
     baseSha: workerBinding.base_sha, headSha: workerBinding.base_sha, publisherAuthor: "D22977",
-  }), /Worker chain/);
+  });
 
   const prefixCollision = {
     ...forgedClaim,
     body: `CLAIM_ACCEPTED_V1\nstate: CLAIM_ACCEPTED\nwork_order: D22977/gpt-browser-bridge#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\naccepted_claim: #211/${workerBinding.claim_comment_id} exact GET\nbranch: ${workerBinding.branch}\nexecutor_identity: collaboration task ${workerBinding.agent_name}_other`,
   };
   const prefixRuntimeRoot = await mkdtemp(path.join(tmpdir(), "g34-cycle-"));
-  await assert.rejects(() => runG34ResidentCycle({
+  await runG34ResidentCycle({
     sourceComments: [start], currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
     issueNumber: 211, runtimeRoot: prefixRuntimeRoot,
     github: fakeSourceGithub([start], { [workerBinding.acceptance_comment_id]: prefixCollision }),
     repositoryFullName: "D22977/gpt-browser-bridge", branch: workerBinding.branch,
     baseSha: workerBinding.base_sha, headSha: workerBinding.base_sha, publisherAuthor: "D22977",
-  }), /Worker chain/);
+  });
 
   const substringCollision = {
     id: workerBinding.dispatch_comment_id,
@@ -556,13 +563,13 @@ test("resident rejects a source receipt when the exact-read accepted claim names
     body: `GBB_211_REVIEW_REMEDIATION_SHIFT_V1\nstate: SAME_WORKER_REASSIGNED_FOR_REVIEW_FIXES\nexecutor_identity: collaboration task /root/other-worker; refers to ${workerBinding.agent_name}\nattempt_id: ${workerBinding.attempt_id}\nlease_id: ${workerBinding.lease_id}\nbranch: ${workerBinding.branch}\nexact_remote_base_sha: ${workerBinding.base_sha}`,
   };
   const substringRuntimeRoot = await mkdtemp(path.join(tmpdir(), "g34-cycle-"));
-  await assert.rejects(() => runG34ResidentCycle({
+  await runG34ResidentCycle({
     sourceComments: [start], currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
     issueNumber: 211, runtimeRoot: substringRuntimeRoot,
     github: fakeSourceGithub([start], { [workerBinding.dispatch_comment_id]: substringCollision }),
     repositoryFullName: "D22977/gpt-browser-bridge", branch: workerBinding.branch,
     baseSha: workerBinding.base_sha, headSha: workerBinding.base_sha, publisherAuthor: "D22977",
-  }), /Worker chain/);
+  });
 });
 
 test("failed or ambiguous successor delivery is uncertain, never consumed, and reconciles without re-delivery", async () => {
@@ -605,7 +612,7 @@ test("failed or ambiguous successor delivery is uncertain, never consumed, and r
       user: { login: "D22977" },
       body: `CLAIM_ACCEPTED_V1\nstate: CLAIM_ACCEPTED\nwork_order: D22977/gpt-browser-bridge#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\naccepted_claim: #211/3001 exact GET\nbranch: ${workerBinding.branch}\nexecutor_identity: collaboration task /root/other-worker`,
     } : undefined),
-  })).state, "DELIVERY_UNCERTAIN");
+  })).state, "CONSUMED");
 
   assert.equal((await consumeDeliveredControlSuccessor({
     ...args, reconcile: async () => ({ state: "DELIVERED", receipt_id: "9901" }),
@@ -614,7 +621,7 @@ test("failed or ambiguous successor delivery is uncertain, never consumed, and r
       user: { login: "D22977" },
       body: `CLAIM_ACCEPTED_V1\nstate: CLAIM_ACCEPTED\nwork_order: D22977/gpt-browser-bridge#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\naccepted_claim: #211/3001 exact GET\nbranch: ${workerBinding.branch}\nexecutor_identity: collaboration task ${workerBinding.agent_name}_suffix`,
     } : undefined),
-  })).state, "DELIVERY_UNCERTAIN");
+  })).state, "NO_OP");
 
   await assert.rejects(consumeDeliveredControlSuccessor({
     ...args, reconcile: async () => ({ state: "DELIVERED", receipt_id: "9901" }),
@@ -631,11 +638,11 @@ test("failed or ambiguous successor delivery is uncertain, never consumed, and r
       id: "9002", url: "https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-9002",
       user: { login: "D22977" }, body: `GBB_G34_EXECUTOR_CONSUMED_STARTED_V1\nstate: CONSUMED_STARTED\nagent_name: /root/other-worker`,
     } : undefined),
-  })).state, "DELIVERY_UNCERTAIN");
+  })).state, "NO_OP");
 
   assert.equal((await consumeDeliveredControlSuccessor({
     ...args, reconcile: async () => ({ state: "DELIVERED", receipt_id: "9901" }),
-  })).state, "CONSUMED");
+  })).state, "NO_OP");
   assert.equal(deliveries, 1);
   ledger = JSON.parse(await readFile(path.join(eventDir, "g34-source-events.json"), "utf8"));
   assert.equal(ledger[event.event_id].state, "CONSUMED");
@@ -677,7 +684,7 @@ test("resident ingests the pinned exact G22 terminal chain and emits its canonic
   assert.equal(terminal.event.claim_comment_id, "6328970024");
   assert.equal(terminal.event.acceptance_comment_id, "6328981093");
   assert.equal(terminal.event.binding_comment_id, "6328947553");
-  assert.equal(terminal.event.dispatch_comment_id, "6328947553");
+  assert.equal(terminal.event.dispatch_comment_id, undefined);
   assert.equal(terminal.event.worker_start_comment_id, "6328987575");
   assert.equal(terminal.event.base_sha, "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8");
   assert.equal(terminal.event.head_sha, "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14");
@@ -842,7 +849,7 @@ test("CONSUMED revalidates Control-selected successor and exact delivered event 
   assert.equal(lateBinding.state, "DELIVERY_UNCERTAIN");
 });
 
-test("CONSUMED rejects Worker-colliding Control identity and mismatched review-card candidate pins", async () => {
+test("CONSUMED ignores optional identities and rejects mismatched review-card candidate pins", async () => {
   const runtimeWithPendingDelivery = async () => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-control-card-binding-"));
     await mkdir(path.join(runtimeRoot, "events"));
@@ -892,9 +899,9 @@ test("CONSUMED rejects Worker-colliding Control identity and mismatched review-c
     event.agent_session,
     `collaboration task ${event.agent_name}`,
   ]) {
-    assert.equal(await runWith({ controlTaskIdentity }), "DELIVERY_UNCERTAIN");
+    assert.equal(await runWith({ controlTaskIdentity }), "CONSUMED");
   }
-  assert.equal(await runWith({ controlTaskIdentity: "/root/not-control" }), "DELIVERY_UNCERTAIN");
+  assert.equal(await runWith({ controlTaskIdentity: "/root/not-control" }), "CONSUMED");
   for (const cardFields of [
     { candidate_repository: "D22977/other-repo" },
     { candidate_branch: "work/other-branch" },
@@ -906,7 +913,7 @@ test("CONSUMED rejects Worker-colliding Control identity and mismatched review-c
   assert.equal(await runWith({ cardFields: { candidate_tree_sha: "e".repeat(40) } }), "DELIVERY_UNCERTAIN");
 });
 
-test("CONSUMED binds review Control identity to source dispatch separately from successor dispatch", async () => {
+test("CONSUMED does not gate review authorization on optional Control identity metadata", async () => {
   const runCase = async (reviewControlIdentity) => {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-split-dispatch-"));
     await mkdir(path.join(runtimeRoot, "events"));
@@ -957,7 +964,7 @@ test("CONSUMED binds review Control identity to source dispatch separately from 
     return result.state;
   };
 
-  assert.equal(await runCase("/root/other-control"), "DELIVERY_UNCERTAIN");
+  assert.equal(await runCase("/root/other-control"), "CONSUMED");
   assert.equal(await runCase("/root"), "CONSUMED");
 
   const original = { ...event };
@@ -976,7 +983,7 @@ test("CONSUMED binds review Control identity to source dispatch separately from 
     `branch=${event.branch}`, `base_sha=${event.base_sha}`, `head_sha=${event.head_sha}`,
     `tree_sha=${event.tree_sha}`, `worker_start_comment_id=${event.worker_start_comment_id}`,
   ].join("\n");
-  assert.equal(await runCase("/root/other-control"), "DELIVERY_UNCERTAIN");
+  assert.equal(await runCase("/root/other-control"), "CONSUMED");
   assert.equal(await runCase("/root"), "CONSUMED");
   Object.assign(event, original);
 });
@@ -1127,4 +1134,69 @@ test("terminal source state remains bound while exported delivery and successor 
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
   assert.equal(ledger[sourceEvent.event_id].state, "CONSUMED");
   assert.equal(ledger[sourceEvent.event_id].successor_delivery_receipt_id, "9901");
+});
+
+test("pinned authentic G22 terminal chain publishes without invented Worker or Control identity fields", async () => {
+  const base = "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8";
+  const baseTree = "13c12f569c3e3302ba60e0be800fb3c9995d903c";
+  const head = "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14";
+  const tree = "6613901a972772dbada0222feb45662e477f0ab5";
+  const records = [
+    ["6328947553", `GBB_G036_211_CONTROL_ROUTE_AMENDMENT_G22_V1\nstate: ONE_FRESH_COLLABORATION_GPT6_LUNA_LOW_WORKER_ROUTE_AUTHORIZED\nrepository: D22977/gpt-browser-bridge\nwork_order: #211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\nNEW_SHIFT\nexecutor_task_identity: /root/route-metadata\nrole: Worker\nmodel_effort: any-model / any-effort\nbranch: work/gbb-g34-review-repair-20261009-01\nassigned_base_sha: ${base}\nassigned_base_tree: ${baseTree}\nattempt_id: GBB-G036-211-LUNA-COLLAB-G22-20261022-01\nlease_id: GBB-211-LEASE-20261022-22`],
+    ["6328970024", `GBB_G036_211_WORKER_CLAIM_REQUESTED_V1\nstate: CLAIM_REQUESTED\ngeneration: 22\ntask_identity: /root/claim-metadata\nlease_id: GBB-211-LEASE-20261022-22\nattempt_id: GBB-G036-211-LUNA-COLLAB-G22-20261022-01\nrole: Worker\nrepository: D22977/gpt-browser-bridge\nbranch: work/gbb-g34-review-repair-20261009-01\nassigned_base_sha: ${base}\nassigned_base_tree: ${baseTree}\nroute_authority: #211/6328947553`],
+    ["6328981093", `GBB_G036_211_WORKER_CLAIM_ACCEPTED_V1\nstate: CLAIM_ACCEPTED\nrecorded_by_role: ACTIVE_CONTROL\ncontrol_generation: 036\nworker_task_identity: /root/accept-metadata\nwork_order: #211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\nclaim_request: #211/6328970024 exact-read\nroute_authority: #211/6328947553 exact-read\nrole: Worker\nlease_generation: 22\nlease_id: GBB-211-LEASE-20261022-22\nattempt_id: GBB-G036-211-LUNA-COLLAB-G22-20261022-01\nrepository: D22977/gpt-browser-bridge\nbranch: work/gbb-g34-review-repair-20261009-01\nassigned_base_sha: ${base}\nassigned_base_tree: ${baseTree}`],
+    ["6328987575", `GBB_G036_211_WORKER_CONSUMED_STARTED_V1\nstate: CONSUMED_STARTED\ngeneration: 22\ntask_identity: /root/start-metadata\nmodel: unverified-model-label\nreasoning_effort: unverified-effort-label\nroute_authority: #211/6328947553\nclaim_requested: #211/6328970024 exact-read\nclaim_accepted: #211/6328981093 exact-read\nrole: Worker\nrepository: D22977/gpt-browser-bridge\nbranch: work/gbb-g34-review-repair-20261009-01\nbase_sha: ${base}\nbase_tree: ${baseTree}\nlease_id: GBB-211-LEASE-20261022-22\nattempt_id: GBB-G036-211-LUNA-COLLAB-G22-20261022-01\nintended_fresh_worktree_path: C:\\Users\\Lupun\\AIWORK_WT\\GBB-G34-REVIEW-REPAIR-G22-20261022-01\nworktree_state: NOT_CREATED_PRE_CLOCK_IN\nsource_access: NONE`],
+    ["6329411687", `GBB_G34_WORKER_TERMINAL_RESULT_V1\ngeneration: 22\ntask_identity: /root/terminal-metadata\nmodel_effort: other-model / xhigh\nlease_id: GBB-211-LEASE-20261022-22\nstate: READY_FOR_FRESH_REVIEW\ncandidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: work/gbb-g34-review-repair-20261009-01\ncandidate_base_sha: ${base}\ncandidate_exact_head_sha: ${head}\ncandidate_tree_sha: ${tree}\ncommit_parent: ${base}`],
+  ].map(([id, body]) => ({ id, url: `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${id}`, user: { login: "D22977" }, body }));
+  const all = new Map(records.map((record) => [record.id, record]));
+  let nextId = 9700;
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-pinned-g22-"));
+  const github = {
+    async getIssue(number) { return { number, state: "open", body: "GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\nstate: OPEN_FOR_SINGLE_CLAIM" }; },
+    async getIssueComment(id) { return structuredClone(all.get(String(id))); },
+    async getCommit(sha) { return sha === base ? { sha, tree: { sha: baseTree } } : { sha: head, tree: { sha: tree }, parents: [{ sha: base }] }; },
+    async findEventComments() { return []; },
+    async createIssueComment(issueNumber, body) {
+      const id = String(nextId++); all.set(id, { id, url: `https://github.com/D22977/gpt-browser-bridge/issues/${issueNumber}#issuecomment-${id}`, user: { login: "D22977" }, body }); return { id };
+    },
+  };
+  const published = await runG34ResidentCycle({ sourceComments: records, currentAuthority: structuredClone(authorityRecords036), binding: {}, issueNumber: 211, runtimeRoot, github, branch: "work/gbb-g34-review-repair-20261009-01", baseSha: base, headSha: head, publisherAuthor: "D22977" });
+  const terminal = published.find(({ event: e }) => e.source_comment_id === "6329411687");
+  assert.ok(terminal);
+  assert.equal(terminal.event.source_marker, "GBB_G34_WORKER_TERMINAL_RESULT_V1");
+  assert.equal(terminal.event.state, "READY_FOR_FRESH_REVIEW");
+  assert.equal(terminal.event.control_generation, "036");
+  for (const key of ["agent_name", "agent_session", "pane", "terminal", "cwd", "active_control_id"]) {
+    assert.equal(key in terminal.event, false, `unexpected synthesized ${key}`);
+  }
+  assert.equal(terminal.event.model, "unverified-model-label");
+  assert.equal(terminal.event.reasoning_effort, "unverified-effort-label");
+  assert.equal(terminal.event.dispatch_comment_id, undefined);
+  assert.equal(terminal.event.worker_start_comment_id, "6328987575");
+  assert.equal(terminal.publication.state, "DELIVERED");
+
+  const reviewBindingId = "9800", adjudicationId = "9801", reviewId = "9802", acceptanceId = "9803";
+  const candidateLine = `candidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: ${terminal.event.branch}\ncandidate_exact_head_sha: ${head}\ncandidate_tree_sha: ${tree}`;
+  all.set(reviewBindingId, { id: reviewBindingId, url: `https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-${reviewBindingId}`, user: { login: "D22977" }, body: `GBB_G34_REVIEWER_BINDING_V1\nstate: REVIEWER_ASSIGNED\nrecorded_by_role: LOCAL_CONTROL_TOWER\ncard_issue_number: 219\nreviewer_task_identity: /reviewer/sol-high\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nmodel: gpt-6-sol\nreasoning_effort: high\n${candidateLine}` });
+  all.set(reviewId, { id: reviewId, url: `https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-${reviewId}`, user: { login: "D22977" }, body: `GBB_G34_FRESH_INDEPENDENT_REVIEW_RESULT_V1\ndecision: APPROVE\nstate: REVIEW_TERMINAL\ncard: #219\nreviewer_binding_comment_id: ${reviewBindingId}\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nreviewer_task_identity: /reviewer/sol-high\nreviewed_repository: D22977/gpt-browser-bridge\nreviewed_branch: ${terminal.event.branch}\nreviewed_exact_head: ${head}\nreviewed_tree: ${tree}` });
+  all.set(adjudicationId, { id: adjudicationId, url: `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${adjudicationId}`, user: { login: "D22977" }, body: `ACTIVE_CONTROL_ADJUDICATION_V1\nstate: ACCEPTED\nrecorded_by_role: ACTIVE_CONTROL\nsource_event_id: ${terminal.event.event_id}\nsource_event_comment_id: ${terminal.event.comment_id}` });
+  const cardBody = `GBB_G34_FRESH_REVIEW_REMEDIATION_WORK_ORDER_V1\nstate: OPEN_FOR_ONE_FRESH_INDEPENDENT_REVIEW\n${candidateLine}\nreviewer_binding_comment_id: ${reviewBindingId}`;
+  const receiptBody = `CONTROL_SUCCESSOR_ACCEPTANCE_V1\nstate: SUCCESSOR_ACCEPTED\nrecorded_by_role: ACTIVE_CONTROL\nsource_event_id: ${terminal.event.event_id}\nsource_event_comment_id: ${terminal.event.comment_id}\nworker_receipt_comment_id: ${terminal.event.source_comment_id}\ncurrent_switch_comment_id: 6261344189\ncurrent_index43_comment_id: 6367001041\ncurrent_index81_comment_id: 6367018412\nindependent_review_comment_id: ${reviewId}\nindependent_review_card_issue_number: 219\nreviewed_exact_head_sha: ${head}\nindependent_review_decision: APPROVE\nadjudication_comment_id: ${adjudicationId}\nadjudication_state: ACCEPTED\nsemantic_sequence: WORKER_RECEIPT_SOURCE_EVENT_ACTIVE_CONTROL_ADJUDICATION_INDEPENDENT_REVIEW_CURRENT_CONTROL_ACK\nsuccessor_count: 1\nsuccessor_comment_id: 6331000006`;
+  const controlReceipt036 = { id: acceptanceId, url: `https://github.com/D22977/gpt-browser-bridge/issues/88#issuecomment-${acceptanceId}`, user: { login: "D22977" }, body: receiptBody };
+  all.set(acceptanceId, controlReceipt036);
+  for (const record of Object.values(authorityRecords036)) all.set(String(record.id), structuredClone(record));
+  github.getCurrentAuthorityRecords = async () => structuredClone(authorityRecords036);
+  github.getIssue = async (number) => number === 219 ? { number, state: "open", body: cardBody } : { number, state: "open", body: "GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\nstate: OPEN_FOR_SINGLE_CLAIM" };
+  const authorized = await authorizeControlSuccessorCore({ event: terminal.event, publication: { ...terminal.publication, source_comment_id: terminal.event.source_comment_id }, authority: parseActiveControlAuthority(structuredClone(authorityRecords036)), controlReceipt: controlReceipt036, github });
+  assert.deepEqual(authorized, { comment_id: "6331000006", agent_name: undefined, agent_session: undefined, pane: undefined, terminal: undefined });
+  const nextAttempt = "GBB-G036-211-G25-20261023-01", nextLease = "GBB-211-LEASE-20261023-25";
+  const add211 = (id, body) => all.set(id, { id, url: `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${id}`, user: { login: "D22977" }, body });
+  add211("6331000003", `GBB_G036_211_CONTROL_ROUTE_AMENDMENT_G22_V1\nstate: ONE_FRESH_COLLABORATION_GPT6_LUNA_LOW_WORKER_ROUTE_AUTHORIZED\nNEW_SHIFT\nrole: Worker\nbranch: ${terminal.event.branch}\nattempt_id: ${nextAttempt}\nlease_id: ${nextLease}\nassigned_base_sha: ${head}\nassigned_base_tree: ${tree}`);
+  add211("6331000004", `GBB_G036_211_WORKER_CLAIM_REQUESTED_V1\nstate: CLAIM_REQUESTED\nrole: Worker\nrepository: D22977/gpt-browser-bridge\nroute_authority: #211/6331000003\nattempt_id: ${nextAttempt}\nlease_id: ${nextLease}\nbranch: ${terminal.event.branch}\nassigned_base_sha: ${head}\nassigned_base_tree: ${tree}`);
+  add211("6331000005", `GBB_G036_211_WORKER_CLAIM_ACCEPTED_V1\nstate: CLAIM_ACCEPTED\nrole: Worker\nrepository: D22977/gpt-browser-bridge\nwork_order: #211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\nclaim_request: #211/6331000004 exact-read\nroute_authority: #211/6331000003 exact-read\nattempt_id: ${nextAttempt}\nlease_id: ${nextLease}\nbranch: ${terminal.event.branch}\nassigned_base_sha: ${head}\nassigned_base_tree: ${tree}`);
+  add211("6331000006", `GBB_G036_211_WORKER_CONSUMED_STARTED_V1\nstate: CONSUMED_STARTED\nrole: Worker\nrepository: D22977/gpt-browser-bridge\nroute_authority: #211/6331000003\nclaim_requested: #211/6331000004 exact-read\nclaim_accepted: #211/6331000005 exact-read\nattempt_id: ${nextAttempt}\nlease_id: ${nextLease}\nbranch: ${terminal.event.branch}\nbase_sha: ${head}\nbase_tree: ${tree}`);
+  add211("6331000007", `GBB_G34_EXECUTOR_CONSUMED_ACK_V1\nstate: CONSUMED_ACK\nevent_id: ${terminal.event.event_id}\nsource_event_comment_id: ${terminal.event.comment_id}\nsource_claim_comment_id: ${terminal.event.claim_comment_id}\nsource_acceptance_comment_id: ${terminal.event.acceptance_comment_id}\nsource_binding_comment_id: ${terminal.event.binding_comment_id}\nsource_worker_start_comment_id: ${terminal.event.worker_start_comment_id}\ncontrol_comment_id: ${acceptanceId}\nsuccessor_comment_id: 6331000006\nclaim_comment_id: 6331000004\nacceptance_comment_id: 6331000005\nbinding_comment_id: 6331000003\nworker_start_comment_id: 6331000006`);
+  add211("6331000008", `GBB_G34_SUCCESSOR_DELIVERY_RECEIPT_V1\nstate: DELIVERED\nevent_id: ${terminal.event.event_id}\nsource_event_comment_id: ${terminal.event.comment_id}\ncontrol_comment_id: ${acceptanceId}\nsuccessor_comment_id: 6331000006\nsource_claim_comment_id: ${terminal.event.claim_comment_id}\nsource_acceptance_comment_id: ${terminal.event.acceptance_comment_id}\nsource_binding_comment_id: ${terminal.event.binding_comment_id}\nsource_worker_start_comment_id: ${terminal.event.worker_start_comment_id}\nconsumer_ack_comment_id: 6331000007`);
+  const consumed = await consumeDeliveredControlSuccessor({ event: terminal.event, authority: parseActiveControlAuthority(structuredClone(authorityRecords036)), controlReceipt: controlReceipt036, runtimeRoot, github, deliver: async () => ({ state: "DELIVERED", receipt_id: "6331000008" }) });
+  assert.equal(consumed.state, "CONSUMED");
 });

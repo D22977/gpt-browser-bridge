@@ -115,3 +115,21 @@ test("authority rejects unsectioned synthetic switch records", () => {
   };
   assert.throws(() => parseActiveControlAuthority(synthetic));
 });
+
+test("authority accepts current generation 036 public switch, index, registry, and ACK records", () => {
+  const id = "6ad58eeb-e2a8-83e8-8c96-7d9d3526a4d6";
+  const records = {
+    switchReceipt: { id: "6261344189", url: "https://github.com/D22977/gpt-browser-bridge/issues/88#issuecomment-6261344189", user: { login: "D22977" }, body: `CONTROL_GENERATION_SWITCH_035_TO_036_V1\nstate: ATOMIC_SWITCHED\nrecorded_by_role: LOCAL_CONTROL_TRANSPORT\nGENERATION_STATE\nold_generation: 035\nold_generation_status: RETIRED\nnew_generation: 036\nnew_conversation_id: ${id}\nnew_generation_status: ACTIVE\nsingle_active_control: true` },
+    index43: { id: "6367001041", url: "https://github.com/D22977/gpt-browser-bridge/issues/43#issuecomment-6367001041", user: { login: "D22977" }, body: "LOCAL_CONTROL_MONITOR_POINTER_GBB_G30_G36_G34_V51\nstate: OWNER_ACCEPTED_GITHUB_BOARD_EVENT_ARCHITECTURE; #235_ACCEPTED_PROOF_PR_236_OPEN; #211_G23_REVIEW_IN_PROGRESS\nrecorded_by_role: LOCAL_CONTROL_TOWER\nrepository: D22977/gpt-browser-bridge\nsupersedes_pointer_only: #43/6366337299 V50\nowner_architecture_decision: #162/6361547922\naccepted_architecture_baseline: #43/6361731926" },
+    index81: { id: "6367018412", url: "https://github.com/D22977/gpt-browser-bridge/issues/81#issuecomment-6367018412", user: { login: "D22977" }, body: "CURRENT_REGISTRY_INDEX_V264\nstate: OWNER_ACCEPTED_GITHUB_BOARD_EVENT_ARCHITECTURE; #235_PROOF_ACCEPTED; #236_OPEN; #211_G23_REVIEW_ACTIVE\nrecorded_by_role: LOCAL_CONTROL_TOWER\nrepository: D22977/gpt-browser-bridge\nsupersedes_pointer_only: #81/6366351306 V263\nsource_control_pointer: #43/6367001041 V51 exact-read\nowner_architecture_decision: #162/6361547922\naccepted_architecture_baseline: #43/6361731926\n\nOPERATING_MODEL\nGitHub is the public shared board and ordered event history. Worker is a per-shift role; account, model, browser tab, pane and session are optional diagnostics, not admission gates." },
+    rehydrationAck: { id: "6261460655", url: "https://github.com/D22977/gpt-browser-bridge/issues/88#issuecomment-6261460655", user: { login: "D22977" }, body: `ACTIVE_CONTROL_REHYDRATION_ACK_V1\nstate: ACTIVE_REHYDRATED_ACKNOWLEDGED\nrecorded_by_role: ACTIVE_CONTROL\nrole: ACTIVE_CONTROL\nrepository: D22977/gpt-browser-bridge\nissue: 88\nrotation_id: GBB-CONTROL-ROTATION-035-036-20261019-01\ngeneration: 036\nconversation_id: ${id}\n\nAUTHORITATIVE_GATES_AND_DIRECT_READBACK\natomic_switch: #88/6261344189 exact GET matched; state ATOMIC_SWITCHED\ncurrent_control_index: #43/6261369147 CURRENT_REHYDRATION_INDEX_V288 exact GET matched\ncurrent_registry_index: #81/6261386278 CURRENT_REGISTRY_INDEX_V164 exact GET matched\n\nACTIVE_STATE\nsole_active_control_generation: 036\nsole_active_control_identity_match: true\nsingle_active_control: true\nstate_pointer_consistency: matched` },
+  };
+  const parsed = parseActiveControlAuthority(records);
+  assert.equal(parsed.control_generation, "036");
+  assert.equal(parsed.active_control_id, id);
+  assert.equal(parsed.control_conversation_id, id);
+  assert.deepEqual(parsed.record_ids, {
+    switch_comment_id: "6261344189", index43_comment_id: "6367001041",
+    index81_comment_id: "6367018412", rehydration_ack_comment_id: "6261460655",
+  });
+});

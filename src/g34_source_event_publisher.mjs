@@ -5,11 +5,6 @@ import writeFileAtomic from "write-file-atomic";
 import { parseG34ReceiptFields, parseActiveControlAuthority, sourceEventSchema } from "./g34_contract.mjs";
 
 const sha256Hex = (value) => createHash("sha256").update(value, "utf8").digest("hex");
-const executorTaskIdentity = (value) => {
-  if (typeof value !== "string") return null;
-  const match = /^collaboration task (\/[^\s;()]+)(?:\s*(?:\([^()\r\n]*\)|;[^\r\n]*))?$/.exec(value.trim());
-  return match?.[1] ?? null;
-};
 function commentIssueNumber(comment, repositoryFullName) {
   const id = String(comment?.id ?? "");
   if (!/^[1-9][0-9]*$/.test(id)) return null;
@@ -26,7 +21,7 @@ function commentIssueNumber(comment, repositoryFullName) {
 }
 const eventFields = [
   "marker", "event_id", "control_generation", "active_control_id", "control_conversation_id",
-  "event_kind", "source_comment_id", "source_body_sha256", "card_comment_id",
+  "event_kind", "source_marker", "source_comment_id", "source_body_sha256", "card_comment_id",
   "claim_comment_id", "acceptance_comment_id", "binding_comment_id", "dispatch_comment_id", "agent_name", "agent_session", "pane",
   "terminal", "cwd", "model", "reasoning_effort", "state", "branch", "base_sha", "head_sha", "tree_sha",
   "terminal_comment_id", "worker_start_comment_id", "review_comment_id", "user_relay_count",
@@ -58,9 +53,9 @@ export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssue
   if (typeof expectedAuthor !== "string" || !expectedAuthor.trim()) throw new Error("expected publisher GitHub author is required");
   if (sourceComment.user?.login !== expectedAuthor) throw new Error("source executor comment has an unrelated GitHub author");
   const receipt = canonicalReceipt ?? parseG34ReceiptFields(sourceComment);
-  const expectedMarker = eventKind === "WORKER_STARTED"
-    ? "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1"
-    : eventKind === "WORKER_TERMINAL_RESULT" ? "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1" : null;
+  const expectedMarkers = eventKind === "WORKER_STARTED"
+    ? ["GBB_G34_EXECUTOR_CONSUMED_STARTED_V1", "GBB_G036_211_WORKER_CONSUMED_STARTED_V1"]
+    : eventKind === "WORKER_TERMINAL_RESULT" ? ["GBB_G34_EXECUTOR_TERMINAL_RESULT_V1"] : null;
   const receiptHead = receipt.head_sha ?? receipt.remote_commit ?? receipt.local_tested_commit;
   const receiptTreeKeys = eventKind === "WORKER_STARTED"
     ? ["base_tree_sha", "tree_sha"]
@@ -74,34 +69,29 @@ export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssue
     ["acceptance_comment_id", binding?.acceptance_comment_id],
     ["binding_comment_id", binding?.binding_comment_id],
     ["dispatch_comment_id", binding?.dispatch_comment_id],
-    ["executor_identity", binding?.executor_identity],
     ["user_relay_count", "0"],
   ].every(([key, expected]) => receipt[key] === undefined || receipt[key] === String(expected));
-  const commonReceiptMatches = expectedMarker && exactTree && receipt.marker === expectedMarker &&
+  const commonReceiptMatches = expectedMarkers && exactTree && expectedMarkers.includes(receipt.marker) &&
     receipt.state === state && receipt.branch === branch &&
     receipt.base_sha === baseSha && receiptHead === headSha &&
     (eventKind === "WORKER_STARTED"
-      ? receipt.claim_comment_id === String(binding?.claim_comment_id) &&
+      ? (receipt.claim_comment_id === String(binding?.claim_comment_id) || receipt.claim_requested === `#211/${binding?.claim_comment_id}`) &&
         receipt.acceptance_comment_id === String(binding?.acceptance_comment_id) &&
-        receipt.binding_comment_id === String(binding?.binding_comment_id) &&
-        receipt.dispatch_comment_id === String(binding?.dispatch_comment_id) &&
-        receipt.executor_identity === binding?.executor_identity && receipt.user_relay_count === "0"
+        (receipt.binding_comment_id === String(binding?.binding_comment_id) || receipt.route_authority === `#211/${binding?.binding_comment_id}`) &&
+        (binding?.dispatch_comment_id === undefined || receipt.dispatch_comment_id === String(binding.dispatch_comment_id)) &&
+        (receipt.user_relay_count === undefined || receipt.user_relay_count === "0")
       : optionalTerminalBindingsMatch);
   const startReceiptMatches = eventKind === "WORKER_STARTED" &&
-    receipt.card_comment_id === String(binding?.card_comment_id) &&
-    receipt.control_generation === String(authority?.control_generation) &&
-    receipt.control_conversation_id === String(authority?.control_conversation_id) &&
-    receipt.repository === sourceRepositoryFullName &&
-    receipt.agent_name === binding?.agent_name && receipt.agent_session === binding?.agent_session &&
-    receipt.pane === binding?.pane && receipt.terminal === binding?.terminal && receipt.cwd === binding?.cwd &&
-    receipt.model === binding?.model && receipt.reasoning_effort === binding?.reasoning_effort &&
-    receipt.lease_id === binding?.lease_id && receipt.attempt_id === binding?.attempt_id;
+    (receipt.card_comment_id === String(binding?.card_comment_id) || receipt.work_order === "#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1") &&
+    (receipt.repository === undefined || receipt.repository === sourceRepositoryFullName) &&
+    (receipt.lease_id === undefined || receipt.lease_id === binding?.lease_id) &&
+    (receipt.attempt_id === undefined || receipt.attempt_id === binding?.attempt_id);
   const terminalReceiptMatches = eventKind === "WORKER_TERMINAL_RESULT" &&
     receipt.worker_start_comment_id === String(binding?.start_comment_id) &&
     (receipt.lease_id === undefined || receipt.lease_id === binding?.lease_id) &&
     (receipt.attempt_id === undefined || receipt.attempt_id === binding?.attempt_id);
   const receiptMatches = commonReceiptMatches && (startReceiptMatches || terminalReceiptMatches);
-  if (!receiptMatches) throw new Error("upstream executor receipt does not match its exact card, binding, state, executor, or branch tuple");
+  if (!receiptMatches) throw new Error("upstream executor receipt does not match its exact card, binding, state, or branch tuple");
   if (eventKind === "WORKER_TERMINAL_RESULT" &&
       (!binding?.start_comment_id || receipt.worker_start_comment_id !== String(binding.start_comment_id))) {
     throw new Error("terminal result is not linked to its exact Worker start receipt");
@@ -111,24 +101,25 @@ export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssue
   const parsed = sourceEventSchema.parse({
     marker: "GITHUB_SOURCE_EVENT_V1",
     event_id: eventId,
-    control_generation: authority?.control_generation,
-    active_control_id: authority?.active_control_id,
-    control_conversation_id: authority?.control_conversation_id,
+    ...(authority?.control_generation ? { control_generation: authority.control_generation } : {}),
+    ...(authority?.active_control_id ? { active_control_id: authority.active_control_id } : {}),
+    ...(authority?.control_conversation_id ? { control_conversation_id: authority.control_conversation_id } : {}),
     event_kind: eventKind,
+    ...(receipt.source_marker ? { source_marker: receipt.source_marker } : {}),
     source_comment_id: sourceCommentId,
     source_body_sha256: sha256Hex(sourceComment.body),
     card_comment_id: String(binding?.card_comment_id ?? ""),
     claim_comment_id: String(binding?.claim_comment_id ?? ""),
     acceptance_comment_id: String(binding?.acceptance_comment_id ?? ""),
     binding_comment_id: String(binding?.binding_comment_id ?? ""),
-    dispatch_comment_id: String(binding?.dispatch_comment_id ?? ""),
-    agent_name: binding?.agent_name,
-    agent_session: binding?.agent_session,
-    pane: binding?.pane,
-    terminal: binding?.terminal,
-    cwd: binding?.cwd,
-    model: binding?.model,
-    reasoning_effort: binding?.reasoning_effort,
+    ...(binding?.dispatch_comment_id ? { dispatch_comment_id: String(binding.dispatch_comment_id) } : {}),
+    ...(binding?.agent_name ? { agent_name: binding.agent_name } : {}),
+    ...(binding?.agent_session ? { agent_session: binding.agent_session } : {}),
+    ...(binding?.pane ? { pane: binding.pane } : {}),
+    ...(binding?.terminal ? { terminal: binding.terminal } : {}),
+    ...(binding?.cwd ? { cwd: binding.cwd } : {}),
+    ...(binding?.model ? { model: binding.model } : {}),
+    ...(binding?.reasoning_effort ? { reasoning_effort: binding.reasoning_effort } : {}),
     state,
     branch,
     base_sha: baseSha,
@@ -362,6 +353,125 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
   if (!prior || !["SUCCESSOR_SEND_ATTEMPTED", "SUCCESSOR_DELIVERY_UNCERTAIN"].includes(prior.state)) {
     throw new Error("no pending successor delivery attempt to reconcile");
   }
+  if (event?.source_marker === "GBB_G34_WORKER_TERMINAL_RESULT_V1") {
+    if (uncertain) {
+      ledger[eventId] = { ...prior, state: "SUCCESSOR_DELIVERY_UNCERTAIN" };
+      await saveLedger(file, ledger);
+      return { state: "DELIVERY_UNCERTAIN" };
+    }
+    const readExact = async (commentId, issueNumber) => {
+      if (!/^[1-9][0-9]*$/.test(String(commentId ?? ""))) return null;
+      const id = String(commentId);
+      const [a, b] = await Promise.all([github.getIssueComment(id), github.getIssueComment(id)]);
+      const url = `https://github.com/D22977/gpt-browser-bridge/issues/${issueNumber}#issuecomment-${id}`;
+      if (!a || !b || String(a.id) !== id || String(b.id) !== id || a.url !== url || b.url !== url ||
+          a.body !== b.body || a.user?.login !== "D22977" || b.user?.login !== "D22977") return null;
+      return { ...parseG34ReceiptFields(b), id, body: b.body };
+    };
+    const failClosed = async () => {
+      ledger[eventId] = { ...prior, state: "SUCCESSOR_DELIVERY_UNCERTAIN" };
+      await saveLedger(file, ledger);
+      return { state: "DELIVERY_UNCERTAIN" };
+    };
+    try {
+      if (typeof github?.getIssueComment !== "function" || typeof github?.getCurrentAuthorityRecords !== "function") return await failClosed();
+      const [delivery, source, start, route, claim, accepted, control] = await Promise.all([
+        readExact(receiptId, 211), readExact(event.source_comment_id, 211), readExact(event.worker_start_comment_id, 211),
+        readExact(event.binding_comment_id, 211), readExact(event.claim_comment_id, 211), readExact(event.acceptance_comment_id, 211),
+        readExact(controlCommentId, 88),
+      ]);
+      const pointers = await github.getCurrentAuthorityRecords();
+      const current = {};
+      for (const key of ["switchReceipt", "index43", "index81", "rehydrationAck"]) {
+        const ptr = pointers?.[key];
+        const issue = key === "index43" ? 43 : key === "index81" ? 81 : 88;
+        const id = String(ptr?.id ?? "");
+        const [a, b] = /^[1-9][0-9]*$/.test(id) ? await Promise.all([github.getIssueComment(id), github.getIssueComment(id)]) : [];
+        if (!ptr || !a || !b || String(a.id) !== id || String(b.id) !== id ||
+            a.url !== `https://github.com/D22977/gpt-browser-bridge/issues/${issue}#issuecomment-${id}` ||
+            b.url !== a.url || a.body !== b.body || ptr.url !== a.url || ptr.body !== a.body) return await failClosed();
+        current[key] = b;
+      }
+      const active = parseActiveControlAuthority(current);
+      const s = source ? { ...parseG34ReceiptFields({ body: source.body }), id: source.id } : null;
+      const st = start, rt = route, cl = claim, ac = accepted;
+      const base = event.base_sha;
+      const routeTuple = rt?.new_shift;
+      if (!delivery || delivery.marker !== "GBB_G34_SUCCESSOR_DELIVERY_RECEIPT_V1" || delivery.state !== "DELIVERED" ||
+          delivery.event_id !== eventId || delivery.source_event_comment_id !== String(event.comment_id) ||
+          delivery.control_comment_id !== String(controlCommentId) || delivery.successor_comment_id !== String(successor?.comment_id) ||
+          delivery.source_claim_comment_id !== String(event.claim_comment_id) ||
+          delivery.source_acceptance_comment_id !== String(event.acceptance_comment_id) ||
+          delivery.source_binding_comment_id !== String(event.binding_comment_id) ||
+          delivery.source_worker_start_comment_id !== String(event.worker_start_comment_id) ||
+          !/^[1-9][0-9]*$/.test(String(delivery.consumer_ack_comment_id ?? "")) ||
+          !control || control.marker !== "CONTROL_SUCCESSOR_ACCEPTANCE_V1" || control.state !== "SUCCESSOR_ACCEPTED" ||
+          control.source_event_id !== eventId || control.source_event_comment_id !== String(event.comment_id) ||
+          control.worker_receipt_comment_id !== String(event.source_comment_id) ||
+          control.successor_comment_id !== String(successor?.comment_id) ||
+          control.current_switch_comment_id !== active.record_ids.switch_comment_id ||
+          control.current_index43_comment_id !== active.record_ids.index43_comment_id ||
+          control.current_index81_comment_id !== active.record_ids.index81_comment_id ||
+          !s || s.marker !== "GBB_G34_WORKER_TERMINAL_RESULT_V1" || s.state !== "READY_FOR_FRESH_REVIEW" ||
+          s.candidate_repository !== "D22977/gpt-browser-bridge" || s.candidate_branch !== event.branch ||
+          s.candidate_base_sha !== base || s.candidate_exact_head_sha !== event.head_sha || s.candidate_tree_sha !== event.tree_sha ||
+          !st || st.marker !== "GBB_G036_211_WORKER_CONSUMED_STARTED_V1" || st.state !== "CONSUMED_STARTED" || st.role !== "Worker" ||
+          st.generation !== "22" || st.repository !== "D22977/gpt-browser-bridge" || st.branch !== event.branch ||
+          st.base_sha !== base || st.base_tree !== routeTuple?.assigned_base_tree || st.attempt_id !== routeTuple?.attempt_id || st.lease_id !== routeTuple?.lease_id ||
+          !rt || rt.marker !== "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_G22_V1" || rt.state !== "ONE_FRESH_COLLABORATION_GPT6_LUNA_LOW_WORKER_ROUTE_AUTHORIZED" ||
+          routeTuple?.role !== "Worker" || routeTuple.branch !== event.branch || routeTuple.assigned_base_sha !== base ||
+          !cl || cl.state !== "CLAIM_REQUESTED" || cl.role !== "Worker" || cl.route_authority !== `#211/${rt.id}` ||
+          cl.attempt_id !== routeTuple.attempt_id || cl.lease_id !== routeTuple.lease_id || cl.branch !== event.branch || cl.assigned_base_sha !== base ||
+          !ac || ac.state !== "CLAIM_ACCEPTED" || ac.role !== "Worker" || ac.claim_request !== `#211/${cl.id} exact-read` ||
+          ac.route_authority !== `#211/${rt.id} exact-read` || ac.work_order !== "#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1" ||
+          ac.attempt_id !== routeTuple.attempt_id || ac.lease_id !== routeTuple.lease_id || ac.branch !== event.branch || ac.assigned_base_sha !== base ||
+          Number(rt.id) >= Number(cl.id) || Number(cl.id) >= Number(ac.id) || Number(ac.id) >= Number(st.id) || Number(st.id) >= Number(delivery.consumer_ack_comment_id) ||
+          Number(delivery.consumer_ack_comment_id) >= Number(delivery.id)) return await failClosed();
+      const ack = await readExact(delivery.consumer_ack_comment_id, 211);
+      const [successorStart, successorRoute, successorClaim, successorAccepted] = await Promise.all([
+        readExact(successor?.comment_id, 211),
+        readExact(ack?.binding_comment_id, 211),
+        readExact(ack?.claim_comment_id, 211),
+        readExact(ack?.acceptance_comment_id, 211),
+      ]);
+      const nextTuple = successorRoute?.new_shift;
+      const nextStartValid = successorStart && successorStart.state === "CONSUMED_STARTED" && successorStart.role === "Worker" &&
+        successorStart.repository === "D22977/gpt-browser-bridge" && successorStart.branch === event.branch &&
+        successorStart.base_sha === event.head_sha && successorStart.base_tree === event.tree_sha &&
+        successorStart.attempt_id === nextTuple?.attempt_id && successorStart.lease_id === nextTuple?.lease_id &&
+        (successorStart.marker === "GBB_G036_211_WORKER_CONSUMED_STARTED_V1" || successorStart.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1");
+      const nextRouteValid = successorRoute && successorRoute.state === "ONE_FRESH_COLLABORATION_GPT6_LUNA_LOW_WORKER_ROUTE_AUTHORIZED" &&
+        successorRoute.marker === "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_G22_V1" && nextTuple?.role === "Worker" &&
+        nextTuple.branch === event.branch && nextTuple.assigned_base_sha === event.head_sha && nextTuple.assigned_base_tree === event.tree_sha;
+      const nextClaimValid = successorClaim && successorClaim.state === "CLAIM_REQUESTED" && successorClaim.role === "Worker" &&
+        successorClaim.route_authority === `#211/${successorRoute?.id}` && successorClaim.branch === event.branch &&
+        successorClaim.assigned_base_sha === event.head_sha && successorClaim.assigned_base_tree === event.tree_sha &&
+        successorClaim.attempt_id === nextTuple?.attempt_id && successorClaim.lease_id === nextTuple?.lease_id;
+      const nextAcceptanceValid = successorAccepted && successorAccepted.state === "CLAIM_ACCEPTED" && successorAccepted.role === "Worker" &&
+        successorAccepted.claim_request === `#211/${successorClaim?.id} exact-read` &&
+        successorAccepted.route_authority === `#211/${successorRoute?.id} exact-read` &&
+        successorAccepted.work_order === "#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1" &&
+        successorAccepted.branch === event.branch && successorAccepted.assigned_base_sha === event.head_sha &&
+        successorAccepted.assigned_base_tree === event.tree_sha && successorAccepted.attempt_id === nextTuple?.attempt_id &&
+        successorAccepted.lease_id === nextTuple?.lease_id;
+      if (!ack || ack.marker !== "GBB_G34_EXECUTOR_CONSUMED_ACK_V1" || ack.state !== "CONSUMED_ACK" ||
+          ack.event_id !== eventId || ack.source_event_comment_id !== String(event.comment_id) ||
+          ack.source_claim_comment_id !== String(event.claim_comment_id) || ack.source_acceptance_comment_id !== String(event.acceptance_comment_id) ||
+          ack.source_binding_comment_id !== String(event.binding_comment_id) || ack.source_worker_start_comment_id !== String(event.worker_start_comment_id) ||
+          ack.control_comment_id !== String(controlCommentId) || ack.successor_comment_id !== String(successor?.comment_id) ||
+          ack.claim_comment_id !== successorClaim.id || ack.acceptance_comment_id !== successorAccepted.id || ack.binding_comment_id !== successorRoute.id ||
+          ack.worker_start_comment_id !== String(successor?.comment_id) ||
+          !nextStartValid || !nextRouteValid || !nextClaimValid || !nextAcceptanceValid ||
+          Number(successorRoute?.id) >= Number(successorClaim?.id) || Number(successorClaim?.id) >= Number(successorAccepted?.id) ||
+          Number(successorAccepted?.id) >= Number(successorStart?.id) ||
+          Number(event.comment_id) >= Number(controlCommentId) || Number(controlCommentId) >= Number(rt.id)) return await failClosed();
+      ledger[eventId] = { ...prior, state: "CONSUMED", successor_delivery_receipt_id: String(receiptId) };
+      await saveLedger(file, ledger);
+      return { state: "CONSUMED", receipt_id: String(receiptId) };
+    } catch (error) {
+      return await failClosed();
+    }
+  }
   let exact = null;
   let consumerAckValid = false;
   if (!uncertain && /^[1-9][0-9]*$/.test(String(receiptId ?? "")) && typeof github?.getIssueComment === "function") {
@@ -407,8 +517,6 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
         if (exact && (exact.marker !== "GBB_G34_SUCCESSOR_DELIVERY_RECEIPT_V1" || exact.state !== "DELIVERED" ||
             exact.event_id !== eventId || exact.source_event_comment_id !== String(event?.comment_id ?? "") ||
             exact.control_comment_id !== String(controlCommentId ?? "") || exact.successor_comment_id !== String(successor?.comment_id ?? "") ||
-            exact.successor_agent_name !== successor?.agent_name || exact.successor_agent_session !== successor?.agent_session ||
-            exact.successor_pane !== successor?.pane || exact.successor_terminal !== successor?.terminal ||
             exact.source_claim_comment_id !== String(event?.claim_comment_id ?? "") ||
             exact.source_acceptance_comment_id !== String(event?.acceptance_comment_id ?? "") ||
             exact.source_binding_comment_id !== String(event?.binding_comment_id ?? "") ||
@@ -486,33 +594,20 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
               const cardIssue = await github.getIssue(Number(control.independent_review_card_issue_number));
               const cardFields = cardIssue ? parseG34ReceiptFields(cardIssue) : {};
               reviewerBinding = await readControlLink(cardFields.reviewer_binding_comment_id);
-              const workerExecutorIdentity = start?.executor_identity ?? event.executor_identity ?? `collaboration task ${event.agent_name}`;
-              const controlIdentityIsWorker = reviewerBinding?.control_task_identity === event.agent_name ||
-                reviewerBinding?.control_task_identity === event.agent_session ||
-                reviewerBinding?.control_task_identity === workerExecutorIdentity ||
-                executorTaskIdentity(workerExecutorIdentity) === reviewerBinding?.control_task_identity;
               semanticChainValid = control.marker === "CONTROL_SUCCESSOR_ACCEPTANCE_V1" &&
                 control.state === "SUCCESSOR_ACCEPTED" && control.source_event_id === eventId &&
                 control.source_event_comment_id === String(event?.comment_id ?? "") &&
                 control.worker_receipt_comment_id === String(event?.source_comment_id ?? "") &&
                 control.recorded_by_role === "ACTIVE_CONTROL" &&
-                control.control_generation === activeAuthority.control_generation &&
-                control.active_control_id === activeAuthority.active_control_id &&
                 control.current_switch_comment_id === activeAuthority.record_ids.switch_comment_id &&
                 control.current_index43_comment_id === activeAuthority.record_ids.index43_comment_id &&
                 control.current_index81_comment_id === activeAuthority.record_ids.index81_comment_id &&
                 control.independent_review_decision === "APPROVE" &&
                 control.successor_count === "1" &&
                 control.successor_comment_id === String(successor?.comment_id ?? "") &&
-                control.successor_agent_name === successor?.agent_name &&
-                control.successor_agent_session === successor?.agent_session &&
-                control.successor_pane === successor?.pane &&
-                control.successor_terminal === successor?.terminal &&
                 dispatch?.marker === "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" &&
                 dispatch.state === "SAME_WORKER_REASSIGNED_FOR_REVIEW_FIXES" &&
                 dispatch.recorded_by_role === "LOCAL_CONTROL_TOWER" &&
-                typeof dispatch.control_task_identity === "string" && dispatch.control_task_identity.trim() !== "" &&
-                executorTaskIdentity(dispatch.executor_identity) === successor?.agent_name &&
                 Number(cardIssue?.number) === Number(control.independent_review_card_issue_number) &&
                 cardFields.candidate_repository === event.source_repository_full_name &&
                 cardFields.candidate_branch === event.branch &&
@@ -527,12 +622,9 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 review.reviewed_repository === event.source_repository_full_name && review.reviewed_branch === event.branch &&
                 reviewerBinding?.marker === "GBB_G34_REVIEWER_BINDING_V1" && reviewerBinding.state === "REVIEWER_ASSIGNED" &&
                 reviewerBinding.recorded_by_role === "LOCAL_CONTROL_TOWER" &&
-                typeof reviewerBinding.control_task_identity === "string" && reviewerBinding.control_task_identity.trim() !== "" &&
                 sourceDispatch?.marker === "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" &&
                 sourceDispatch.state === "SAME_WORKER_REASSIGNED_FOR_REVIEW_FIXES" &&
                 sourceDispatch.recorded_by_role === "LOCAL_CONTROL_TOWER" &&
-                typeof sourceDispatch.control_task_identity === "string" && sourceDispatch.control_task_identity.trim() !== "" &&
-                executorTaskIdentity(sourceDispatch.executor_identity) === event.agent_name &&
                 sourceDispatch.branch === event.branch &&
                 sourceStart?.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1" &&
                 sourceStart.state === "CONSUMED_STARTED" && sourceStart.card_comment_id === "211" &&
@@ -540,22 +632,11 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 sourceStart.acceptance_comment_id === String(event?.acceptance_comment_id ?? "") &&
                 sourceStart.binding_comment_id === String(event?.binding_comment_id ?? "") &&
                 sourceStart.dispatch_comment_id === sourceDispatch.id &&
-                sourceStart.executor_identity === sourceDispatch.executor_identity &&
-                sourceStart.agent_name === event.agent_name && sourceStart.agent_session === event.agent_session &&
                 sourceStart.branch === event.branch && sourceStart.base_sha === sourceBaseSha &&
                 sourceStart.head_sha === sourceBaseSha && sourceStart.lease_id === sourceDispatch.lease_id &&
                 sourceStart.attempt_id === sourceDispatch.attempt_id &&
                 sourceDispatch.exact_remote_base_sha === sourceBaseSha && sourceStart.base_sha === sourceDispatch.exact_remote_base_sha &&
                 Number(sourceDispatch.id) < Number(sourceStart.id) &&
-                reviewerBinding.control_task_identity === sourceDispatch.control_task_identity &&
-                !controlIdentityIsWorker &&
-                reviewerBinding.worker_task_identity === event.agent_name &&
-                reviewerBinding.reviewer_task_identity === review.reviewer_task_identity &&
-                reviewerBinding.reviewer_task_identity !== reviewerBinding.control_task_identity &&
-                reviewerBinding.reviewer_task_identity !== event.agent_name &&
-                reviewerBinding.reviewer_task_identity !== event.agent_session &&
-                reviewerBinding.reviewer_task_identity !== workerExecutorIdentity &&
-                executorTaskIdentity(workerExecutorIdentity) !== reviewerBinding.reviewer_task_identity &&
                 reviewerBinding.role === review.role && reviewerBinding.model === "gpt-6-sol" &&
                 reviewerBinding.reasoning_effort === "high" &&
                 reviewerBinding.candidate_repository === event.source_repository_full_name &&
@@ -565,8 +646,6 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
                 reviewerBinding.card_issue_number === String(cardIssue?.number) &&
                 reviewerBinding.candidate_tree_sha === event.tree_sha &&
                 Number(reviewerBinding.id) < Number(review.id) &&
-                reviewerBinding.reviewer_task_identity !== event.agent_name &&
-                reviewerBinding.reviewer_task_identity !== event.agent_session &&
                 review.reviewed_exact_head === event.head_sha &&
                 review.reviewed_tree === cardFields.candidate_tree_sha &&
                 Number(event.comment_id) < Number(adjudication.id) && Number(adjudication.id) < Number(review.id) &&
@@ -583,40 +662,28 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
               ack.worker_start_comment_id === selectedSuccessor?.id &&
               ack.control_comment_id === String(controlCommentId ?? "") &&
               ack.successor_comment_id === String(successor?.comment_id ?? "") &&
-              ack.successor_agent_name === successor?.agent_name && ack.agent_name === successor?.agent_name &&
-              ack.agent_session === successor?.agent_session && ack.pane === successor?.pane && ack.terminal === successor?.terminal &&
-              ack.executor_identity === `collaboration task ${successor?.agent_name}` &&
               claim?.marker === "CLAIM_REQUESTED_V1" && claim.state === "CLAIM_REQUESTED" &&
               accepted?.marker === "CLAIM_ACCEPTED_V1" && accepted.state === "CLAIM_ACCEPTED" &&
               accepted.work_order === "D22977/gpt-browser-bridge#211 / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1" &&
               String(accepted.accepted_claim ?? "").startsWith(`#211/${claim?.id}`) &&
-              executorTaskIdentity(claim.executor_identity) === successor?.agent_name &&
-              executorTaskIdentity(accepted.executor_identity) === successor?.agent_name &&
               route?.marker === "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_V1" &&
               route?.state === "ONE_ALTERNATE_LOW_COST_WORKER_ROUTE_AUTHORIZED" &&
-              routeBinding?.task_name === successor?.agent_name && routeBinding?.role === "Worker" &&
+              routeBinding?.role === "Worker" &&
               dispatch?.marker === "GBB_211_REVIEW_REMEDIATION_SHIFT_V1" &&
-              executorTaskIdentity(dispatch.executor_identity) === successor?.agent_name &&
               dispatch.attempt_id === start?.attempt_id && dispatch.lease_id === start?.lease_id &&
               dispatch.branch === start?.branch && dispatch.exact_remote_base_sha === start?.base_sha &&
               dispatch.exact_remote_base_sha === event?.head_sha &&
               start?.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1" && start.state === "CONSUMED_STARTED" &&
               start.card_comment_id === "211" && start.claim_comment_id === claim?.id &&
               start.acceptance_comment_id === accepted?.id && start.binding_comment_id === route?.id &&
-              start.dispatch_comment_id === dispatch?.id && start.agent_name === successor?.agent_name &&
-              start.agent_session === successor?.agent_session && start.pane === successor?.pane &&
-              start.terminal === successor?.terminal && start.executor_identity === `collaboration task ${successor?.agent_name}` &&
+              start.dispatch_comment_id === dispatch?.id &&
               start.repository === event?.source_repository_full_name && start.branch === event?.branch &&
               start.base_sha === event?.head_sha && start.head_sha === event?.head_sha &&
               (start.source_event_id === undefined || start.source_event_id === eventId) &&
               (start.source_event_comment_id === undefined || start.source_event_comment_id === String(event?.comment_id ?? "")) &&
               selectedSuccessor?.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1" &&
               selectedSuccessor.state === "CONSUMED_STARTED" &&
-              selectedSuccessor.executor_identity === `collaboration task ${successor?.agent_name}` &&
-              selectedSuccessor.agent_name === successor?.agent_name &&
-              selectedSuccessor.agent_session === successor?.agent_session &&
               selectedSuccessor.base_sha === event?.head_sha && selectedSuccessor.head_sha === event?.head_sha &&
-              selectedSuccessor.pane === successor?.pane && selectedSuccessor.terminal === successor?.terminal &&
               selectedSuccessor.claim_comment_id === claim?.id && selectedSuccessor.acceptance_comment_id === accepted?.id &&
               selectedSuccessor.binding_comment_id === route?.id && selectedSuccessor.dispatch_comment_id === dispatch?.id &&
               Number(controlCommentId) < Number(selectedSuccessor?.id) && Number(selectedSuccessor?.id) < Number(ackId) &&

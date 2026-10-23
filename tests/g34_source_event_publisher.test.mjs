@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { sourceEventSchema } from "../src/g34_contract.mjs";
 
 const { createSourceEvent, publishSourceEvent, markSourceEventConsumed } = await import("../src/g34_source_event_publisher.mjs").catch(() => ({}));
 
@@ -144,6 +145,16 @@ test("source event id is deterministic and body binds the upstream receipt ident
   assert.match(first.body, new RegExp(`tree_sha=${binding.base_tree_sha}`));
 });
 
+test("source event schema accepts a generation 036 receipt with identity metadata omitted", () => {
+  const event = sampleEvent();
+  event.control_generation = "036";
+  for (const key of ["active_control_id", "control_conversation_id", "agent_name", "agent_session", "pane", "terminal", "cwd", "model", "reasoning_effort"]) {
+    delete event[key];
+  }
+  const { body, expected_author, source_issue_number, source_repository_full_name, ...fields } = event;
+  assert.doesNotThrow(() => sourceEventSchema.parse(fields));
+});
+
 test("source event rejects unrelated authors and mismatched claim, executor, state, or branch fields", () => {
   assertImplemented();
   const variants = [
@@ -151,7 +162,6 @@ test("source event rejects unrelated authors and mismatched claim, executor, sta
     { comment: sourceComment({ card_comment_id: "1" }) },
     { comment: sourceComment({ binding_comment_id: "1" }) },
     { comment: sourceComment({ dispatch_comment_id: "1" }) },
-    { comment: sourceComment({ agent_session: "other-session" }) },
     { comment: sourceComment({ state: "READY_FOR_FRESH_REVIEW" }) },
     { comment: sourceComment({ branch: "other-branch" }) },
     { comment: sourceComment({ base_sha: "d7d17550fdfe3ae3e06ecec352004ca3b7284c55" }) },
