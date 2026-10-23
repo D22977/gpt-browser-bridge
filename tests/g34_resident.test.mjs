@@ -662,7 +662,7 @@ test("resident ingests the pinned exact G22 terminal chain and emits its canonic
   const github = fakeSourceGithub(records, {}, 9900);
   github.getCommit = async (sha) => sha === "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8"
     ? { sha, tree: { sha: "13c12f569c3e3302ba60e0be800fb3c9995d903c" }, parents: [] }
-    : { sha, tree: { sha: "6613901a972772dbada0222feb45662e477f0ab5" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] };
+    : { sha: sha === "work/gbb-g34-review-repair-20261009-01" ? "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14" : sha, tree: { sha: "6613901a972772dbada0222feb45662e477f0ab5" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] };
   const results = await runG34ResidentCycle({
     sourceComments: records,
     currentAuthority: structuredClone(authorityRecords),
@@ -693,12 +693,14 @@ test("resident ingests the pinned exact G22 terminal chain and emits its canonic
 });
 
 test("resident fails closed on ambiguous, mismatched, or unauthenticated G22 chains", async () => {
-  const run = async (records) => {
+  const run = async (records, branchTip = "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14") => {
     const normalized = structuredClone(records).map((record) => ({ ...record, id: String(record.id) }));
     const github = fakeSourceGithub(normalized, {}, 9900);
     github.getCommit = async (sha) => sha === "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8"
       ? { sha, tree: { sha: "13c12f569c3e3302ba60e0be800fb3c9995d903c" }, parents: [] }
-      : { sha, tree: { sha: "6613901a972772dbada0222feb45662e477f0ab5" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] };
+      : sha === "work/gbb-g34-review-repair-20261009-01"
+        ? { sha: branchTip, tree: { sha: "6613901a972772dbada0222feb45662e477f0ab5" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] }
+        : { sha, tree: { sha: "6613901a972772dbada0222feb45662e477f0ab5" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] };
     return runG34ResidentCycle({
       sourceComments: normalized,
       currentAuthority: structuredClone(authorityRecords),
@@ -739,6 +741,7 @@ test("resident fails closed on ambiguous, mismatched, or unauthenticated G22 cha
     mutate(records);
     await assert.rejects(() => run(records));
   }
+  await assert.rejects(() => run(structuredClone(pinnedG22ReceiptRecords), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), /branch tip/);
 });
 
 test("missing or nonfunction successor deliver leaves the delivered ledger byte-identical", async () => {
@@ -1149,7 +1152,7 @@ test("pinned authentic G22 terminal chain publishes without invented Worker or C
     ["6329411687", `GBB_G34_WORKER_TERMINAL_RESULT_V1\ngeneration: 22\ntask_identity: /root/terminal-metadata\nmodel_effort: other-model / xhigh\nlease_id: GBB-211-LEASE-20261022-22\nstate: READY_FOR_FRESH_REVIEW\ncandidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: work/gbb-g34-review-repair-20261009-01\ncandidate_base_sha: ${base}\ncandidate_exact_head_sha: ${head}\ncandidate_tree_sha: ${tree}\ncommit_parent: ${base}`],
   ].map(([id, body]) => ({ id, url: `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${id}`, user: { login: "D22977" }, body }));
   const all = new Map(records.map((record) => [record.id, record]));
-  let nextId = 9700;
+  let nextId = 6329411688;
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-pinned-g22-"));
   const github = {
     async getIssue(number) { return { number, state: "open", body: "GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\nstate: OPEN_FOR_SINGLE_CLAIM" }; },
@@ -1175,7 +1178,7 @@ test("pinned authentic G22 terminal chain publishes without invented Worker or C
   assert.equal(terminal.event.worker_start_comment_id, "6328987575");
   assert.equal(terminal.publication.state, "DELIVERED");
 
-  const reviewBindingId = "9800", adjudicationId = "9801", reviewId = "9802", acceptanceId = "9803";
+  const reviewBindingId = "6329411690", adjudicationId = "6329411691", reviewId = "6329411692", acceptanceId = "6329411693";
   const candidateLine = `candidate_repository: D22977/gpt-browser-bridge\ncandidate_branch: ${terminal.event.branch}\ncandidate_exact_head_sha: ${head}\ncandidate_tree_sha: ${tree}`;
   all.set(reviewBindingId, { id: reviewBindingId, url: `https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-${reviewBindingId}`, user: { login: "D22977" }, body: `GBB_G34_REVIEWER_BINDING_V1\nstate: REVIEWER_ASSIGNED\nrecorded_by_role: LOCAL_CONTROL_TOWER\ncard_issue_number: 219\nreviewer_task_identity: /reviewer/sol-high\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nmodel: gpt-6-sol\nreasoning_effort: high\n${candidateLine}` });
   all.set(reviewId, { id: reviewId, url: `https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-${reviewId}`, user: { login: "D22977" }, body: `GBB_G34_FRESH_INDEPENDENT_REVIEW_RESULT_V1\ndecision: APPROVE\nstate: REVIEW_TERMINAL\ncard: #219\nreviewer_binding_comment_id: ${reviewBindingId}\nrole: fresh independent GPT-6 Sol High read-only Reviewer\nreviewer_task_identity: /reviewer/sol-high\nreviewed_repository: D22977/gpt-browser-bridge\nreviewed_branch: ${terminal.event.branch}\nreviewed_exact_head: ${head}\nreviewed_tree: ${tree}` });
@@ -1187,6 +1190,19 @@ test("pinned authentic G22 terminal chain publishes without invented Worker or C
   for (const record of Object.values(authorityRecords036)) all.set(String(record.id), structuredClone(record));
   github.getCurrentAuthorityRecords = async () => structuredClone(authorityRecords036);
   github.getIssue = async (number) => number === 219 ? { number, state: "open", body: cardBody } : { number, state: "open", body: "GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\nstate: OPEN_FOR_SINGLE_CLAIM" };
+  const lateReviewId = "6329411694";
+  const lateReview = { ...all.get(reviewId), id: lateReviewId,
+    url: `https://github.com/D22977/gpt-browser-bridge/issues/219#issuecomment-${lateReviewId}` };
+  all.set(lateReviewId, lateReview);
+  const prematureAck = { ...controlReceipt036,
+    body: receiptBody.replace(`independent_review_comment_id: ${reviewId}`, `independent_review_comment_id: ${lateReviewId}`) };
+  all.set(acceptanceId, prematureAck);
+  await assert.rejects(() => authorizeControlSuccessorCore({
+    event: terminal.event, publication: { ...terminal.publication, source_comment_id: terminal.event.source_comment_id },
+    authority: parseActiveControlAuthority(structuredClone(authorityRecords036)), controlReceipt: prematureAck, github,
+  }), /semantic sequence/);
+  all.set(acceptanceId, controlReceipt036);
+  all.delete(lateReviewId);
   const authorized = await authorizeControlSuccessorCore({ event: terminal.event, publication: { ...terminal.publication, source_comment_id: terminal.event.source_comment_id }, authority: parseActiveControlAuthority(structuredClone(authorityRecords036)), controlReceipt: controlReceipt036, github });
   assert.deepEqual(authorized, { comment_id: "6331000006", agent_name: undefined, agent_session: undefined, pane: undefined, terminal: undefined });
   const nextAttempt = "GBB-G036-211-G25-20261023-01", nextLease = "GBB-211-LEASE-20261023-25";
@@ -1199,4 +1215,30 @@ test("pinned authentic G22 terminal chain publishes without invented Worker or C
   add211("6331000008", `GBB_G34_SUCCESSOR_DELIVERY_RECEIPT_V1\nstate: DELIVERED\nevent_id: ${terminal.event.event_id}\nsource_event_comment_id: ${terminal.event.comment_id}\ncontrol_comment_id: ${acceptanceId}\nsuccessor_comment_id: 6331000006\nsource_claim_comment_id: ${terminal.event.claim_comment_id}\nsource_acceptance_comment_id: ${terminal.event.acceptance_comment_id}\nsource_binding_comment_id: ${terminal.event.binding_comment_id}\nsource_worker_start_comment_id: ${terminal.event.worker_start_comment_id}\nconsumer_ack_comment_id: 6331000007`);
   const consumed = await consumeDeliveredControlSuccessor({ event: terminal.event, authority: parseActiveControlAuthority(structuredClone(authorityRecords036)), controlReceipt: controlReceipt036, runtimeRoot, github, deliver: async () => ({ state: "DELIVERED", receipt_id: "6331000008" }) });
   assert.equal(consumed.state, "CONSUMED");
+
+  const rejectsTampering = async (commentId, mutate) => {
+    const prior = structuredClone(all.get(String(commentId)));
+    const replacement = structuredClone(prior);
+    replacement.body = mutate(replacement.body);
+    all.set(String(commentId), replacement);
+    const tamperRoot = await mkdtemp(path.join(tmpdir(), "g34-g22-tamper-"));
+    await mkdir(path.join(tamperRoot, "events"));
+    await writeFile(path.join(tamperRoot, "events", "g34-source-events.json"), JSON.stringify({
+      [terminal.event.event_id]: {
+        state: "SUCCESSOR_SEND_ATTEMPTED", source_comment_id: terminal.event.source_comment_id,
+        comment_id: terminal.event.comment_id, control_comment_id: acceptanceId, successor_comment_id: "6331000006",
+      },
+    }));
+    const result = await recordSuccessorDelivery({
+      eventId: terminal.event.event_id, receiptId: "6331000008", event: terminal.event,
+      controlCommentId: acceptanceId, successor: { comment_id: "6331000006" }, github, runtimeRoot: tamperRoot,
+    });
+    all.set(String(commentId), prior);
+    assert.equal(result.state, "DELIVERY_UNCERTAIN");
+  };
+  await rejectsTampering("6329411687", (body) => `${body}\nmodified_after_publication`);
+  await rejectsTampering(String(terminal.event.comment_id), (body) => `${body}\nmodified_after_publication`);
+  await rejectsTampering("6331000006", (body) => body.replace(
+    "claim_accepted: #211/6331000005 exact-read", "claim_accepted: #211/6331000999 exact-read",
+  ));
 });

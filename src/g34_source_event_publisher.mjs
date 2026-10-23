@@ -375,8 +375,8 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
     };
     try {
       if (typeof github?.getIssueComment !== "function" || typeof github?.getCurrentAuthorityRecords !== "function") return await failClosed();
-      const [delivery, source, start, route, claim, accepted, control] = await Promise.all([
-        readExact(receiptId, 211), readExact(event.source_comment_id, 211), readExact(event.worker_start_comment_id, 211),
+      const [delivery, source, publishedEvent, start, route, claim, accepted, control] = await Promise.all([
+        readExact(receiptId, 211), readExact(event.source_comment_id, 211), readExact(event.comment_id, 211), readExact(event.worker_start_comment_id, 211),
         readExact(event.binding_comment_id, 211), readExact(event.claim_comment_id, 211), readExact(event.acceptance_comment_id, 211),
         readExact(controlCommentId, 88),
       ]);
@@ -413,6 +413,10 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
           control.current_index43_comment_id !== active.record_ids.index43_comment_id ||
           control.current_index81_comment_id !== active.record_ids.index81_comment_id ||
           !s || s.marker !== "GBB_G34_WORKER_TERMINAL_RESULT_V1" || s.state !== "READY_FOR_FRESH_REVIEW" ||
+          sha256Hex(source?.body ?? "") !== event.source_body_sha256 ||
+          !publishedEvent || !publishedEvent.body.startsWith("marker=GITHUB_SOURCE_EVENT_V1\n") ||
+          publishedEvent.body !== event.body || !publishedEvent.body.includes(`event_id=${eventId}\n`) ||
+          !publishedEvent.body.includes(`source_body_sha256=${event.source_body_sha256}\n`) ||
           s.candidate_repository !== "D22977/gpt-browser-bridge" || s.candidate_branch !== event.branch ||
           s.candidate_base_sha !== base || s.candidate_exact_head_sha !== event.head_sha || s.candidate_tree_sha !== event.tree_sha ||
           !st || st.marker !== "GBB_G036_211_WORKER_CONSUMED_STARTED_V1" || st.state !== "CONSUMED_STARTED" || st.role !== "Worker" ||
@@ -438,6 +442,9 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
       const nextStartValid = successorStart && successorStart.state === "CONSUMED_STARTED" && successorStart.role === "Worker" &&
         successorStart.repository === "D22977/gpt-browser-bridge" && successorStart.branch === event.branch &&
         successorStart.base_sha === event.head_sha && successorStart.base_tree === event.tree_sha &&
+        successorStart.route_authority === `#211/${successorRoute?.id}` &&
+        successorStart.claim_requested === `#211/${successorClaim?.id} exact-read` &&
+        successorStart.claim_accepted === `#211/${successorAccepted?.id} exact-read` &&
         successorStart.attempt_id === nextTuple?.attempt_id && successorStart.lease_id === nextTuple?.lease_id &&
         (successorStart.marker === "GBB_G036_211_WORKER_CONSUMED_STARTED_V1" || successorStart.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1");
       const nextRouteValid = successorRoute && successorRoute.state === "ONE_FRESH_COLLABORATION_GPT6_LUNA_LOW_WORKER_ROUTE_AUTHORIZED" &&
@@ -464,7 +471,7 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
           !nextStartValid || !nextRouteValid || !nextClaimValid || !nextAcceptanceValid ||
           Number(successorRoute?.id) >= Number(successorClaim?.id) || Number(successorClaim?.id) >= Number(successorAccepted?.id) ||
           Number(successorAccepted?.id) >= Number(successorStart?.id) ||
-          Number(event.comment_id) >= Number(controlCommentId) || Number(controlCommentId) >= Number(rt.id)) return await failClosed();
+          Number(event.comment_id) >= Number(controlCommentId)) return await failClosed();
       ledger[eventId] = { ...prior, state: "CONSUMED", successor_delivery_receipt_id: String(receiptId) };
       await saveLedger(file, ledger);
       return { state: "CONSUMED", receipt_id: String(receiptId) };

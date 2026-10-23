@@ -149,6 +149,7 @@ export async function authorizeControlSuccessor({ event, publication, authority,
     adjudication.source_event_id !== event.event_id ||
     adjudication.source_event_comment_id !== String(event.comment_id) ||
     Number(event.comment_id) >= Number(adjudication.id) || Number(adjudication.id) >= Number(review.id) ||
+    Number(review.id) >= Number(receipt.id) ||
     Number(adjudication.id) >= Number(receipt.id) ||
     receipt.adjudication_state !== adjudication.state ||
     receipt.semantic_sequence !== "WORKER_RECEIPT_SOURCE_EVENT_ACTIVE_CONTROL_ADJUDICATION_INDEPENDENT_REVIEW_CURRENT_CONTROL_ACK" ||
@@ -322,13 +323,17 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
         throw new Error("G22 exact receipt chain fields do not agree");
       }
       if (terminal) {
-        if (typeof github.getCommit !== "function") throw new Error("exact G22 candidate commit and tree read is required");
-        const [baseCommit, headCommit] = await Promise.all([github.getCommit(base), github.getCommit(commit)]);
+        if (typeof github.getCommit !== "function") throw new Error("exact G22 candidate commit, tree, and branch-tip reads are required");
+        const [baseCommit, headCommit, branchHead] = await Promise.all([
+          github.getCommit(base), github.getCommit(commit), github.getCommit(branchName),
+        ]);
         const baseTree = routeRaw.new_shift?.assigned_base_tree;
         const parents = Array.isArray(headCommit?.parents) ? headCommit.parents.map((p) => p.sha) : [];
         if (String(baseCommit?.sha) !== base || String(baseCommit?.tree?.sha) !== baseTree ||
             String(headCommit?.sha) !== commit || String(headCommit?.tree?.sha) !== tree ||
-            parents.length !== 1 || parents[0] !== base) throw new Error("G22 candidate commit metadata is not exact");
+            parents.length !== 1 || parents[0] !== base || String(branchHead?.sha ?? "") !== commit) {
+          throw new Error("G22 candidate commit metadata or remote branch tip is not exact");
+        }
       }
       const startsForAttempt = starts.filter((r) => {
         const f = parseG34ReceiptFields(r);
