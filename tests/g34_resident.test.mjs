@@ -1238,7 +1238,38 @@ test("pinned authentic G22 terminal chain publishes without invented Worker or C
   };
   await rejectsTampering("6329411687", (body) => `${body}\nmodified_after_publication`);
   await rejectsTampering(String(terminal.event.comment_id), (body) => `${body}\nmodified_after_publication`);
+  await rejectsTampering(acceptanceId, (body) => body.replace(
+    "independent_review_decision: APPROVE", "independent_review_decision: REJECT",
+  ));
   await rejectsTampering("6331000006", (body) => body.replace(
     "claim_accepted: #211/6331000005 exact-read", "claim_accepted: #211/6331000999 exact-read",
   ));
+  const lateControlId = "6331000009";
+  const originalAck = structuredClone(all.get("6331000007"));
+  const originalDelivery = structuredClone(all.get("6331000008"));
+  const lateControl = { ...structuredClone(controlReceipt036), id: lateControlId,
+    url: `https://github.com/D22977/gpt-browser-bridge/issues/88#issuecomment-${lateControlId}` };
+  all.set(lateControlId, lateControl);
+  all.set("6331000007", { ...originalAck, body: originalAck.body.replace(
+    `control_comment_id: ${acceptanceId}`, `control_comment_id: ${lateControlId}`,
+  ) });
+  all.set("6331000008", { ...originalDelivery, body: originalDelivery.body.replace(
+    `control_comment_id: ${acceptanceId}`, `control_comment_id: ${lateControlId}`,
+  ) });
+  const lateControlRoot = await mkdtemp(path.join(tmpdir(), "g34-g22-late-control-"));
+  await mkdir(path.join(lateControlRoot, "events"));
+  await writeFile(path.join(lateControlRoot, "events", "g34-source-events.json"), JSON.stringify({
+    [terminal.event.event_id]: {
+      state: "SUCCESSOR_SEND_ATTEMPTED", source_comment_id: terminal.event.source_comment_id,
+      comment_id: terminal.event.comment_id, control_comment_id: lateControlId, successor_comment_id: "6331000006",
+    },
+  }));
+  const lateControlResult = await recordSuccessorDelivery({
+    eventId: terminal.event.event_id, receiptId: "6331000008", event: terminal.event,
+    controlCommentId: lateControlId, successor: { comment_id: "6331000006" }, github, runtimeRoot: lateControlRoot,
+  });
+  assert.equal(lateControlResult.state, "DELIVERY_UNCERTAIN");
+  all.delete(lateControlId);
+  all.set("6331000007", originalAck);
+  all.set("6331000008", originalDelivery);
 });

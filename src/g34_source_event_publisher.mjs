@@ -374,7 +374,8 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
       return { state: "DELIVERY_UNCERTAIN" };
     };
     try {
-      if (typeof github?.getIssueComment !== "function" || typeof github?.getCurrentAuthorityRecords !== "function") return await failClosed();
+      if (typeof github?.getIssueComment !== "function" || typeof github?.getIssue !== "function" ||
+          typeof github?.getCurrentAuthorityRecords !== "function") return await failClosed();
       const [delivery, source, publishedEvent, start, route, claim, accepted, control] = await Promise.all([
         readExact(receiptId, 211), readExact(event.source_comment_id, 211), readExact(event.comment_id, 211), readExact(event.worker_start_comment_id, 211),
         readExact(event.binding_comment_id, 211), readExact(event.claim_comment_id, 211), readExact(event.acceptance_comment_id, 211),
@@ -397,6 +398,43 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
       const st = start, rt = route, cl = claim, ac = accepted;
       const base = event.base_sha;
       const routeTuple = rt?.new_shift;
+      const reviewCardNumber = Number(control?.independent_review_card_issue_number);
+      const [review, adjudication, reviewCard, reviewCardExact] = await Promise.all([
+        readExact(control?.independent_review_comment_id, reviewCardNumber),
+        readExact(control?.adjudication_comment_id, 211),
+        Number.isSafeInteger(reviewCardNumber) && reviewCardNumber > 0 ? github.getIssue(reviewCardNumber) : null,
+        Number.isSafeInteger(reviewCardNumber) && reviewCardNumber > 0 ? github.getIssue(reviewCardNumber) : null,
+      ]);
+      const reviewCardFields = reviewCard ? parseG34ReceiptFields(reviewCard) : {};
+      const reviewerBinding = await readExact(reviewCardFields.reviewer_binding_comment_id, reviewCardNumber);
+      const reviewChainValid = review && adjudication && reviewCard && reviewCardExact && reviewerBinding &&
+        Number(reviewCard.number) === reviewCardNumber && Number(reviewCardExact.number) === reviewCardNumber &&
+        reviewCard.state === "open" && reviewCardExact.state === reviewCard.state && reviewCardExact.body === reviewCard.body &&
+        String(reviewCard.body ?? "").startsWith("GBB_G34_FRESH_REVIEW_REMEDIATION_WORK_ORDER_V1") &&
+        reviewCardFields.candidate_repository === "D22977/gpt-browser-bridge" &&
+        reviewCardFields.candidate_branch === event.branch && reviewCardFields.candidate_exact_head_sha === event.head_sha &&
+        reviewCardFields.candidate_tree_sha === event.tree_sha &&
+        review.marker === "GBB_G34_FRESH_INDEPENDENT_REVIEW_RESULT_V1" && review.state === "REVIEW_TERMINAL" &&
+        review.decision === "APPROVE" && review.card === `#${reviewCardNumber}` &&
+        review.reviewer_binding_comment_id === reviewerBinding.id &&
+        review.reviewed_repository === "D22977/gpt-browser-bridge" && review.reviewed_branch === event.branch &&
+        review.reviewed_exact_head === event.head_sha && review.reviewed_tree === event.tree_sha &&
+        /^fresh independent GPT-6 Sol High read-only Reviewer$/i.test(review.role ?? "") &&
+        reviewerBinding.marker === "GBB_G34_REVIEWER_BINDING_V1" && reviewerBinding.state === "REVIEWER_ASSIGNED" &&
+        reviewerBinding.recorded_by_role === "LOCAL_CONTROL_TOWER" && reviewerBinding.card_issue_number === String(reviewCardNumber) &&
+        reviewerBinding.role === "fresh independent GPT-6 Sol High read-only Reviewer" &&
+        reviewerBinding.model === "gpt-6-sol" && reviewerBinding.reasoning_effort === "high" &&
+        reviewerBinding.candidate_repository === "D22977/gpt-browser-bridge" &&
+        reviewerBinding.candidate_branch === event.branch && reviewerBinding.candidate_exact_head_sha === event.head_sha &&
+        reviewerBinding.candidate_tree_sha === event.tree_sha &&
+        adjudication.marker === "ACTIVE_CONTROL_ADJUDICATION_V1" && adjudication.state === "ACCEPTED" &&
+        adjudication.recorded_by_role === "ACTIVE_CONTROL" && adjudication.source_event_id === eventId &&
+        adjudication.source_event_comment_id === String(event.comment_id) &&
+        Number(event.comment_id) < Number(adjudication.id) && Number(adjudication.id) < Number(review.id) &&
+        Number(reviewerBinding.id) < Number(review.id) && Number(review.id) < Number(controlCommentId) &&
+        control.independent_review_comment_id === review.id && control.independent_review_decision === "APPROVE" &&
+        control.adjudication_comment_id === adjudication.id && control.adjudication_state === adjudication.state &&
+        control.semantic_sequence === "WORKER_RECEIPT_SOURCE_EVENT_ACTIVE_CONTROL_ADJUDICATION_INDEPENDENT_REVIEW_CURRENT_CONTROL_ACK";
       if (!delivery || delivery.marker !== "GBB_G34_SUCCESSOR_DELIVERY_RECEIPT_V1" || delivery.state !== "DELIVERED" ||
           delivery.event_id !== eventId || delivery.source_event_comment_id !== String(event.comment_id) ||
           delivery.control_comment_id !== String(controlCommentId) || delivery.successor_comment_id !== String(successor?.comment_id) ||
@@ -406,6 +444,7 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
           delivery.source_worker_start_comment_id !== String(event.worker_start_comment_id) ||
           !/^[1-9][0-9]*$/.test(String(delivery.consumer_ack_comment_id ?? "")) ||
           !control || control.marker !== "CONTROL_SUCCESSOR_ACCEPTANCE_V1" || control.state !== "SUCCESSOR_ACCEPTED" ||
+          !reviewChainValid ||
           control.source_event_id !== eventId || control.source_event_comment_id !== String(event.comment_id) ||
           control.worker_receipt_comment_id !== String(event.source_comment_id) ||
           control.successor_comment_id !== String(successor?.comment_id) ||
@@ -471,6 +510,7 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
           !nextStartValid || !nextRouteValid || !nextClaimValid || !nextAcceptanceValid ||
           Number(successorRoute?.id) >= Number(successorClaim?.id) || Number(successorClaim?.id) >= Number(successorAccepted?.id) ||
           Number(successorAccepted?.id) >= Number(successorStart?.id) ||
+          Number(controlCommentId) >= Number(successorRoute?.id) ||
           Number(event.comment_id) >= Number(controlCommentId)) return await failClosed();
       ledger[eventId] = { ...prior, state: "CONSUMED", successor_delivery_receipt_id: String(receiptId) };
       await saveLedger(file, ledger);
