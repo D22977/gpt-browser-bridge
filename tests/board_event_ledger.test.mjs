@@ -51,6 +51,16 @@ function createFakeGitHub({ head = SEED } = {}) {
     async readRef(ref) {
       return state.head ? { ref, sha: state.head } : null;
     },
+    async readCommit(sha) {
+      const commit = state.commits.get(sha);
+      if (!commit) return null;
+      return {
+        sha,
+        parent: commit.parent,
+        parents: commit.parent ? [{ sha: commit.parent }] : [],
+        event: commit.event,
+      };
+    },
     async createCommit({ parent, message, event }) {
       counter += 1;
       const sha = counter.toString(16).padStart(40, "0");
@@ -295,15 +305,19 @@ test("lease expiry is observable and handoff keeps the same work order and check
   assert.equal(expired.state, "EXPIRED");
   assert.equal(expired.active, false);
 
-  const handoff = buildHandoffEvent(claim, {
-    event_id: "EVT-HANDOFF",
-    attempt_id: "ATT-2",
-    idempotency_key: "IDEM-HANDOFF",
-    predecessor_commit: SEED,
-    handoff_utc: "2026-10-23T09:11:00+00:00",
-    clock_in_utc: "2026-10-23T09:12:00+00:00",
-    lease_expires_utc: "2026-10-23T09:30:00+00:00",
-  });
+  const handoff = buildHandoffEvent(
+    claim,
+    {
+      event_id: "EVT-HANDOFF",
+      attempt_id: "ATT-2",
+      idempotency_key: "IDEM-HANDOFF",
+      predecessor_commit: SEED,
+      handoff_utc: "2026-10-23T09:11:00+00:00",
+      clock_in_utc: "2026-10-23T09:12:00+00:00",
+      lease_expires_utc: "2026-10-23T09:30:00+00:00",
+    },
+    { commit_sha: SEED }
+  );
 
   assert.equal(handoff.work_order_id, claim.work_order_id);
   assert.equal(handoff.checkpoint, claim.checkpoint);
@@ -520,12 +534,261 @@ test("REGRESSION finding4: buildHandoffEvent requires predecessor commit provena
       }),
     /predecessor_commit/
   );
-  const handoff = buildHandoffEvent(prior, {
-    event_id: "EVT-HANDOFF",
-    attempt_id: "ATT-2",
-    idempotency_key: "IDEM-HANDOFF",
-    predecessor_commit: SEED,
-    clock_in_utc: "2026-10-23T09:12:00+00:00",
-  });
+  const handoff = buildHandoffEvent(
+    prior,
+    {
+      event_id: "EVT-HANDOFF",
+      attempt_id: "ATT-2",
+      idempotency_key: "IDEM-HANDOFF",
+      predecessor_commit: SEED,
+      clock_in_utc: "2026-10-23T09:12:00+00:00",
+    },
+    { commit_sha: SEED }
+  );
   assert.equal(handoff.predecessor_commit, SEED);
+});
+
+function createCommitBoundGitHub(headSha, headEvent) {
+  const state = { head: headSha, commits: new Map(), updates: [] };
+  state.commits.set(headSha, { sha: headSha, parent: SEED, message: "head", event: headEvent });
+  let counter = 0;
+  return {
+    state,
+    async readRef(ref) {
+      return { ref, sha: state.head };
+    },
+    async readCommit(sha) {
+      const c = state.commits.get(sha);
+      if (!c) return null;
+      return { sha: c.sha, parent: c.parent, parents: c.parent ? [{ sha: c.parent }] : [], event: c.event };
+    },
+    async createCommit({ parent, message, event }) {
+      counter += 1;
+      const sha = (1000 + counter).toString(16).padStart(40, "0");
+      state.commits.set(sha, { sha, parent, message, event });
+      return { sha };
+    },
+    async updateRef({ ref, sha, expectedSha, force }) {
+      state.updates.push({ ref, sha, expectedSha, force });
+      if (force !== false) {
+        throw Object.assign(new Error("force update is forbidden"), { code: "FORCE_FORBIDDEN" });
+      }
+      if (state.head !== expectedSha) {
+        throw Object.assign(new Error("Update is not a fast forward"), { code: "STALE_HEAD", status: 422 });
+      }
+      const commit = state.commits.get(sha);
+      if (!commit || commit.parent !== state.head) {
+        throw Object.assign(new Error("Update is not a fast forward"), { code: "STALE_HEAD", status: 422 });
+      }
+      state.head = sha;
+      return { ref, sha };
+    },
+  };
+}
+
+test("REGRESSION review1: forged caller history that does not match the ref commit is rejected", async () => {
+  const headSha = "a".repeat(40);
+  const headEvent = createEvent(baseEvent({ event_id: "EVT-HEAD", idempotency_key: "IDEM-HEAD", sequence: 1, generation: 1, predecessor_commit: null, predecessor_event_id: null }));
+  const github = createCommitBoundGitHub(headSha, headEvent);
+
+  const forgedPrior = createEvent(baseEvent({ event_id: "EVT-OLD", idempotency_key: "IDEM-OLD", sequence: 1, generation: 1, predecessor_event_id: null, predecessor_commit: null }));
+  const candidate = baseEvent({
+    event_id: "EVT-NEW",
+    idempotency_key: "IDEM-NEW",
+    sequence: 2,
+    generation: 2,
+    predecessor_event_id: "EVT-OLD",
+    predecessor_commit: headSha,
+  });
+
+  const result = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: headSha, event: candidate, history: [forgedPrior] });
+  assert.equal(result.published, false);
+  assert.equal(result.outcome, "INVALID_HISTORY");
+  assert.equal(github.state.head, headSha);
+});
+
+test("REGRESSION review1b: omitted history cannot create a second root when the ref already exists", async () => {
+  const headSha = "a".repeat(40);
+  const headEvent = createEvent(baseEvent({ event_id: "EVT-HEAD", idempotency_key: "IDEM-HEAD" }));
+  const github = createCommitBoundGitHub(headSha, headEvent);
+
+  const rootCandidate = baseEvent({
+    event_id: "EVT-ROOT2",
+    idempotency_key: "IDEM-ROOT2",
+    predecessor_event_id: null,
+    predecessor_commit: null,
+  });
+  const result = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: headSha, event: rootCandidate });
+  assert.equal(result.published, false);
+  assert.equal(result.outcome, "INVALID_HISTORY");
+  assert.equal(github.state.head, headSha);
+});
+
+test("REGRESSION review2: projectEvents is input-order invariant and quarantines forks", () => {
+  const root = createEvent(baseEvent({ event_id: "R", idempotency_key: "K-R", sequence: 0, generation: 0, predecessor_event_id: null }));
+  const a = createEvent(baseEvent({ event_id: "A", idempotency_key: "K-A", sequence: 1, generation: 1, predecessor_event_id: "R" }));
+  const b = createEvent(baseEvent({ event_id: "B", idempotency_key: "K-B", sequence: 1, generation: 1, predecessor_event_id: "R" }));
+
+  for (const order of [[root, a, b], [root, b, a], [a, root, b]]) {
+    const projection = projectEvents(order);
+    assert.equal(projection.active.length, 1, JSON.stringify(order));
+    assert.equal(projection.active[0].event_id, "R", JSON.stringify(order));
+    assert.ok(projection.quarantined_event_ids.includes("A"), JSON.stringify(order));
+    assert.ok(projection.quarantined_event_ids.includes("B"), JSON.stringify(order));
+  }
+});
+
+test("REGRESSION review2b: duplicate event id with changed payload is quarantined", () => {
+  const first = createEvent(baseEvent({ event_id: "E", idempotency_key: "K-1", sequence: 1, generation: 1 }));
+  const changed = createEvent(baseEvent({ event_id: "E", idempotency_key: "K-2", sequence: 2, generation: 2 }));
+  const projection = projectEvents([first, changed]);
+  assert.equal(projection.active.length, 0);
+  assert.ok(projection.quarantined_event_ids.includes("E"));
+});
+
+test("REGRESSION review2c: multiple roots quarantine the whole history", () => {
+  const r1 = createEvent(baseEvent({ event_id: "R1", idempotency_key: "K-R1", sequence: 0, generation: 0, predecessor_event_id: null }));
+  const r2 = createEvent(baseEvent({ event_id: "R2", idempotency_key: "K-R2", sequence: 0, generation: 0, predecessor_event_id: null }));
+  const projection = projectEvents([r1, r2]);
+  assert.equal(projection.active.length, 0);
+  assert.ok(projection.quarantined_event_ids.includes("R1"));
+  assert.ok(projection.quarantined_event_ids.includes("R2"));
+});
+
+test("REGRESSION review3: active lease cannot be self-fenced by listing predecessor in fenced_event_ids", async () => {
+  const github = createFakeGitHub();
+  github.readCommit = async (sha) => {
+    const c = github.state.commits.get(sha);
+    if (!c) return null;
+    return { sha, parent: c.parent, parents: c.parent ? [{ sha: c.parent }] : [], event: c.event };
+  };
+  const prior = createEvent(baseEvent({
+    event_id: "PRIOR",
+    idempotency_key: "IDEM-PRIOR",
+    predecessor_commit: SEED,
+    lease_expires_utc: "2026-10-23T10:00:00+00:00",
+  }));
+  const first = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: SEED, event: prior });
+  assert.equal(first.outcome, "ACCEPTED");
+
+  const candidate = baseEvent({
+    event_id: "NEXT",
+    idempotency_key: "IDEM-NEXT",
+    sequence: 2,
+    generation: 2,
+    predecessor_event_id: "PRIOR",
+    predecessor_commit: first.commit_sha,
+    fenced_event_ids: ["PRIOR"],
+  });
+  const result = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: first.commit_sha,
+    event: candidate,
+    history: [first.event],
+    trustedNowUtc: "2026-10-23T09:30:00+00:00",
+  });
+  assert.equal(result.published, false);
+  assert.equal(result.outcome, "INVALID_HISTORY");
+});
+
+test("REGRESSION review3b: expired lease permits successor publication", async () => {
+  const github = createFakeGitHub();
+  github.readCommit = async (sha) => {
+    const c = github.state.commits.get(sha);
+    if (!c) return null;
+    return { sha, parent: c.parent, parents: c.parent ? [{ sha: c.parent }] : [], event: c.event };
+  };
+  const prior = createEvent(baseEvent({
+    event_id: "PRIOR",
+    idempotency_key: "IDEM-PRIOR",
+    predecessor_commit: SEED,
+    lease_expires_utc: "2026-10-23T09:10:00+00:00",
+  }));
+  const first = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: SEED, event: prior });
+  assert.equal(first.outcome, "ACCEPTED");
+
+  const candidate = baseEvent({
+    event_id: "NEXT",
+    idempotency_key: "IDEM-NEXT",
+    sequence: 2,
+    generation: 2,
+    predecessor_event_id: "PRIOR",
+    predecessor_commit: first.commit_sha,
+  });
+  const result = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: first.commit_sha,
+    event: candidate,
+    history: [first.event],
+    trustedNowUtc: "2026-10-23T09:30:00+00:00",
+  });
+  assert.equal(result.outcome, "ACCEPTED");
+  assert.equal(result.published, true);
+});
+
+test("REGRESSION review3c: illegal transition value is rejected", async () => {
+  const github = createFakeGitHub();
+  const result = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: SEED,
+    event: baseEvent({ transition: "ILLEGAL_TRANSITION", predecessor_commit: SEED }),
+  });
+  assert.equal(result.published, false);
+  assert.equal(result.outcome, "INVALID_HISTORY");
+});
+
+test("REGRESSION review4: buildHandoffEvent rejects an arbitrary 40-hex commit without provenance", () => {
+  const prior = createEvent(baseEvent({ predecessor_commit: null }));
+  assert.throws(
+    () =>
+      buildHandoffEvent(prior, {
+        event_id: "EVT-HANDOFF",
+        attempt_id: "ATT-2",
+        idempotency_key: "IDEM-HANDOFF",
+        predecessor_commit: "f".repeat(40),
+        clock_in_utc: "2026-10-23T09:12:00+00:00",
+      }),
+    /provenance/
+  );
+});
+
+test("REGRESSION review5: reconcilePublication fails closed for unverified history even when head equals attempted commit", async () => {
+  const headSha = "a".repeat(40);
+  const headEvent = createEvent(baseEvent({ event_id: "EVT-HEAD", idempotency_key: "IDEM-HEAD" }));
+  const github = createCommitBoundGitHub(headSha, headEvent);
+
+  const prior = createEvent(baseEvent({ event_id: "EVT-PRIOR", idempotency_key: "IDEM-PRIOR" }));
+  const conflicting = baseEvent({ event_id: "EVT-OTHER", idempotency_key: "IDEM-PRIOR", state: "DIFFERENT" });
+
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: headSha,
+    expectedHead: "b".repeat(40),
+    history: [prior],
+    event: conflicting,
+  });
+  assert.equal(result.accepted, false);
+  assert.notEqual(result.outcome, "PUBLISHED");
+});
+
+test("REGRESSION review5b: reconcilePublication does not report PUBLISHED for a changed payload when history is absent", async () => {
+  const headSha = "a".repeat(40);
+  const headEvent = createEvent(baseEvent({ event_id: "EVT-HEAD", idempotency_key: "IDEM-HEAD", state: "ORIGINAL" }));
+  const github = createCommitBoundGitHub(headSha, headEvent);
+
+  const conflicting = baseEvent({ event_id: "EVT-CAND", idempotency_key: "IDEM-HEAD", state: "CHANGED" });
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: headSha,
+    expectedHead: headSha,
+    history: [],
+    event: conflicting,
+  });
+  assert.equal(result.accepted, false);
+  assert.notEqual(result.outcome, "PUBLISHED");
 });

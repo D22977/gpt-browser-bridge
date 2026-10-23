@@ -139,7 +139,7 @@ function parseMaybeEvent(value) {
   return null;
 }
 
-async function readCommitEvent(github, sha) {
+async function readCommitRaw(github, sha) {
   if (isGenesisHead(sha)) return null;
   const methodNames = [
     "readCommit",
@@ -156,14 +156,40 @@ async function readCommitEvent(github, sha) {
     if (typeof github?.[name] === "function") {
       try {
         const result = await github[name](sha);
-        const parsed = parseMaybeEvent(result);
-        if (parsed) return parsed;
-        return null;
+        if (result && typeof result === "object") {
+          const reportedSha =
+            (typeof result.sha === "string" && result.sha) ||
+            (typeof result?.commit?.sha === "string" && result.commit.sha) ||
+            null;
+          if (reportedSha && reportedSha !== sha) continue;
+          return result;
+        }
       } catch {
-        return null;
+        // try the next adapter method
       }
     }
   }
+  return null;
+}
+
+async function readCommitEvent(github, sha) {
+  if (isGenesisHead(sha)) return null;
+  const raw = await readCommitRaw(github, sha);
+  if (!raw) return null;
+  return parseMaybeEvent(raw);
+}
+
+function extractParentSha(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (typeof raw.parent === "string") return raw.parent;
+  if (Array.isArray(raw.parents) && raw.parents.length > 0 && typeof raw.parents[0]?.sha === "string") {
+    return raw.parents[0].sha;
+  }
+  if (raw.commit && Array.isArray(raw.commit.parents) && raw.commit.parents.length > 0 && typeof raw.commit.parents[0]?.sha === "string") {
+    return raw.commit.parents[0].sha;
+  }
+  if (typeof raw.parent_sha === "string") return raw.parent_sha;
+  if (raw.commit && typeof raw.commit.parent === "string") return raw.commit.parent;
   return null;
 }
 
@@ -195,9 +221,62 @@ async function verifyHistoryAtHead(github, expectedHead, history) {
   }
   const prior = resolveCanonicalPrior(history);
   if (!prior) return { ok: false, canonicalPrior: null };
-  const commitEvent = await readCommitEvent(github, expectedHead);
+
+  const raw = await readCommitRaw(github, expectedHead);
+  const commitEvent = raw ? parseMaybeEvent(raw) : null;
   if (!commitEvent) return { ok: false, canonicalPrior: null };
   if (eventDigest(commitEvent) !== eventDigest(prior)) return { ok: false, canonicalPrior: null };
+
+  const parsedHistory = (Array.isArray(history) ? history : [])
+    .map((item) => {
+      try { return boardEventSchema.parse(item); } catch { return null; }
+    })
+    .filter(Boolean);
+
+  // Verify the committed ancestry chain, not just the immediate head.
+  const visited = new Set();
+  let currentSha = expectedHead;
+  let currentRaw = raw;
+  let currentEvent = prior;
+  while (currentEvent.predecessor_event_id !== null) {
+    if (visited.has(currentEvent.event_id)) return { ok: false, canonicalPrior: null };
+    visited.add(currentEvent.event_id);
+
+    const predecessorEvent = parsedHistory.find((item) => item.event_id === currentEvent.predecessor_event_id);
+    if (!predecessorEvent) return { ok: false, canonicalPrior: null };
+
+    const expectedParentSha = currentEvent.predecessor_commit;
+    if (isGenesisHead(expectedParentSha)) return { ok: false, canonicalPrior: null };
+
+    const actualParentSha = extractParentSha(currentRaw);
+    if (actualParentSha !== expectedParentSha) return { ok: false, canonicalPrior: null };
+
+    const parentRaw = await readCommitRaw(github, expectedParentSha);
+    const parentEvent = parentRaw ? parseMaybeEvent(parentRaw) : null;
+    if (!parentEvent || eventDigest(parentEvent) !== eventDigest(predecessorEvent)) {
+      return { ok: false, canonicalPrior: null };
+    }
+    const reportedParentSha =
+      (typeof parentRaw?.sha === "string" && parentRaw.sha) ||
+      (typeof parentRaw?.commit?.sha === "string" && parentRaw.commit.sha) ||
+      null;
+    if (reportedParentSha && reportedParentSha !== expectedParentSha) {
+      return { ok: false, canonicalPrior: null };
+    }
+
+    currentSha = expectedParentSha;
+    currentRaw = parentRaw;
+    currentEvent = predecessorEvent;
+  }
+
+  // A root event's commit should not carry a non-genesis parent.
+  if (currentEvent.predecessor_event_id === null) {
+    const rootParent = extractParentSha(currentRaw);
+    if (rootParent && !isGenesisHead(rootParent)) {
+      return { ok: false, canonicalPrior: null };
+    }
+  }
+
   return { ok: true, canonicalPrior: prior };
 }
 
@@ -273,7 +352,7 @@ export function projectEvents(events) {
       if (duplicateEventIdValues.has(event.event_id)) quarantined.add(event.event_id);
     }
 
-    // duplicate idempotency keys
+    // duplicate idempotency keys (later occurrences)
     const seenKeys = new Set();
     const duplicateKeyEventIds = new Set();
     for (const event of list) {
@@ -287,16 +366,19 @@ export function projectEvents(events) {
       if (duplicateKeyEventIds.has(event.event_id)) quarantined.add(event.event_id);
     }
 
-    const roots = list.filter((event) => event.predecessor_event_id === null);
-
-    const viableRoots = roots.filter((root) => !quarantined.has(root.event_id));
-
+    // build children map deterministically (sorted)
     const children = new Map();
-    for (const event of list) {
+    for (const event of [...list].sort((a, b) => a.event_id.localeCompare(b.event_id))) {
       const key = event.predecessor_event_id ?? "__root__";
       if (!children.has(key)) children.set(key, []);
       children.get(key).push(event);
     }
+
+    const roots = list
+      .filter((event) => event.predecessor_event_id === null)
+      .sort((a, b) => a.event_id.localeCompare(b.event_id));
+
+    const viableRoots = roots.filter((root) => !quarantined.has(root.event_id));
 
     let head = null;
     const valid = new Set();
@@ -305,37 +387,34 @@ export function projectEvents(events) {
       for (const event of list) quarantined.add(event.event_id);
     } else {
       const root = viableRoots[0];
-      if (quarantined.has(root.event_id)) {
-        // no active chain
-      } else {
-        valid.add(root.event_id);
-        let current = root;
-        let stop = false;
-        while (!stop) {
-          const kids = children.get(current.event_id) ?? [];
-          const validKids = kids.filter(
-            (kid) =>
-              !quarantined.has(kid.event_id) &&
-              kid.sequence > current.sequence &&
-              kid.generation >= current.generation
-          );
-          if (validKids.length === 0) break;
-          if (validKids.length > 1) {
-            for (const kid of validKids) quarantined.add(kid.event_id);
-            head = current;
-            active.push(head);
-            stop = true;
-            break;
-          }
-          const next = validKids[0];
-          valid.add(next.event_id);
-          current = next;
-        }
-        if (!stop) {
+      valid.add(root.event_id);
+      let current = root;
+      let stop = false;
+      while (!stop) {
+        const kids = (children.get(current.event_id) ?? [])
+          .filter((kid) => !quarantined.has(kid.event_id))
+          .sort((a, b) => a.event_id.localeCompare(b.event_id));
+        const validKids = kids.filter(
+          (kid) =>
+            kid.sequence > current.sequence &&
+            kid.generation >= current.generation
+        );
+        if (validKids.length === 0) break;
+        if (validKids.length > 1) {
+          // fork: quarantine all competing children, stop chain
+          for (const kid of validKids) quarantined.add(kid.event_id);
           head = current;
-          active.push(head);
+          stop = true;
+          break;
         }
+        const next = validKids[0];
+        valid.add(next.event_id);
+        current = next;
       }
+      if (!stop) {
+        head = current;
+      }
+      if (head) active.push(head);
     }
 
     for (const event of list) {
@@ -433,8 +512,11 @@ export function buildHandoffEvent(priorInput, next = {}, provenance = {}) {
     prior?.predecessor_commit,
   ].filter((value) => typeof value === "string");
 
-  const expectedCommit = provenanceCandidates.length > 0 ? provenanceCandidates[0] : null;
-  if (expectedCommit && expectedCommit !== next.predecessor_commit) {
+  if (provenanceCandidates.length === 0) {
+    throw new Error("buildHandoffEvent: predecessor_commit provenance is required");
+  }
+  const expectedCommit = provenanceCandidates[0];
+  if (expectedCommit !== next.predecessor_commit) {
     throw new Error("buildHandoffEvent: predecessor_commit must match verified commit provenance");
   }
 
@@ -518,9 +600,10 @@ function requireGithub(github) {
     !github ||
     typeof github.readRef !== "function" ||
     typeof github.createCommit !== "function" ||
-    typeof github.updateRef !== "function"
+    typeof github.updateRef !== "function" ||
+    typeof github.readCommit !== "function"
   ) {
-    throw new Error("github adapter must provide readRef, createCommit and updateRef");
+    throw new Error("github adapter must provide readRef, createCommit and updateRef (readCommit required for committed ancestry)");
   }
 }
 
@@ -618,6 +701,17 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
         status: "INVALID_HISTORY",
         reason: "INVALID_HISTORY",
         error: "canonical history requires a bound head commit",
+        next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
+      };
+    }
+    if (Array.isArray(candidate.fenced_event_ids) && candidate.fenced_event_ids.includes(canonicalPrior.event_id)) {
+      return {
+        outcome: "INVALID_HISTORY",
+        published: false,
+        accepted: false,
+        status: "INVALID_HISTORY",
+        reason: "INVALID_HISTORY",
+        error: "candidate cannot fence the canonical predecessor",
         next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
       };
     }
@@ -803,10 +897,18 @@ export async function reconcilePublication({
   requireGithub(github);
   const originalHistory = Array.isArray(history) ? history : [];
   let normalizedHistory = [...originalHistory];
+  let historyVerified = originalHistory.length === 0;
 
-  if (normalizedHistory.length > 0 && expectedHead !== null && expectedHead !== undefined) {
+  if (originalHistory.length > 0 && expectedHead !== null && expectedHead !== undefined) {
     const verification = await verifyHistoryAtHead(github, expectedHead, normalizedHistory);
-    if (!verification.ok) normalizedHistory = [];
+    if (verification.ok) {
+      historyVerified = true;
+    } else {
+      normalizedHistory = [];
+      historyVerified = false;
+    }
+  } else if (originalHistory.length > 0) {
+    historyVerified = false;
   }
 
   const head = await readHead(github, ref);
@@ -846,6 +948,15 @@ export async function reconcilePublication({
 
       // If history is missing/unverified, do not trust attempted commit blindly.
       if (normalizedHistory.length === 0) {
+        if (!historyVerified) {
+          return {
+            outcome: "UNCERTAIN",
+            accepted: false,
+            head,
+            attempted_commit_sha: attemptedCommitSha,
+            next_legal_action: "REREAD_CANONICAL_LEDGER_NO_BLIND_RETRY",
+          };
+        }
         if (head !== null && head === attemptedCommitSha) {
           const commitEvent = await readCommitEvent(github, head);
           if (commitEvent && eventDigest(commitEvent) === eventDigest(candidate)) {
@@ -870,12 +981,21 @@ export async function reconcilePublication({
   }
 
   if (head !== null && head === attemptedCommitSha) {
+    if (historyVerified) {
+      return {
+        outcome: "PUBLISHED",
+        accepted: true,
+        head,
+        attempted_commit_sha: attemptedCommitSha,
+        next_legal_action: "CONTINUE_FROM_PUBLISHED_EVENT",
+      };
+    }
     return {
-      outcome: "PUBLISHED",
-      accepted: true,
+      outcome: "UNCERTAIN",
+      accepted: false,
       head,
       attempted_commit_sha: attemptedCommitSha,
-      next_legal_action: "CONTINUE_FROM_PUBLISHED_EVENT",
+      next_legal_action: "REREAD_CANONICAL_LEDGER_NO_BLIND_RETRY",
     };
   }
   if (head === expectedHead) {
