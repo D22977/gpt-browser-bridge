@@ -161,7 +161,7 @@ async function readCommitRaw(github, sha) {
             (typeof result.sha === "string" && result.sha) ||
             (typeof result?.commit?.sha === "string" && result.commit.sha) ||
             null;
-          if (reportedSha && reportedSha !== sha) continue;
+          if (reportedSha !== sha) continue;
           return result;
         }
       } catch {
@@ -280,24 +280,7 @@ async function verifyHistoryAtHead(github, expectedHead, history) {
   return { ok: true, canonicalPrior: prior };
 }
 
-function resolveTrustedNow(github, options = {}) {
-  const candidates = [
-    options?.trustedNowUtc,
-    options?.trusted_now_utc,
-    options?.trustedNow,
-    options?.trusted_now,
-    options?.now,
-    options?.nowUtc,
-    options?.now_utc,
-    options?.atUtc,
-    options?.at_utc,
-    options?.at,
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && Number.isFinite(Date.parse(candidate))) {
-      return candidate;
-    }
-  }
+function resolveTrustedNow(github) {
   if (typeof github?.now === "function") {
     try {
       const value = github.now();
@@ -317,8 +300,31 @@ function resolveTrustedNow(github, options = {}) {
   return new Date().toISOString();
 }
 
-function isIllegalValue(value) {
-  return /illegal|invalid|bad|wrong|forbidden/i.test(String(value ?? ""));
+const ALLOWED_ROLE_TRANSITIONS = new Map([
+  ["Control", new Map([
+    ["AUTHORIZE_BOUNDED_IMPLEMENTATION_AND_PROOF_SHIFT", new Set(["READY_FOR_SINGLE_WORKER_CLAIM"])],
+    ["RECONCILE_DISPATCH", new Set(["PROMPT_NOT_CONSUMED_PRE_SEND_FAILURE"])],
+    ["FENCE_STALLED_WORKER_SHIFT_AND_CHECKPOINT", new Set(["HANDOFF_READY_TDD_RESET_REQUIRED"])],
+    ["AUTHORIZE_FRESH_BOUNDED_WORKER_SHIFT", new Set(["READY_FOR_SINGLE_WORKER_CLAIM"])],
+    ["FENCE_PAUSED_WORKER_AND_RECONCILE_PARTIAL_PROOF", new Set(["HANDOFF_READY_AFTER_FIRST_REF_ADVANCE"])],
+    ["AUTHORIZE_SUCCESSOR_SHIFT_FROM_PARTIAL_CAS_CHECKPOINT", new Set(["READY_FOR_SINGLE_WORKER_CLAIM"])],
+    ["AUTHORIZE_BOUNDED_REWORK", new Set(["READY_FOR_SINGLE_WORKER_CLAIM"])],
+  ])],
+  ["Worker", new Map([
+    ["CLAIM_REQUESTED_AND_CLOCK_IN", new Set(["READ_ONLY_SOURCE_INSPECTION"])],
+    ["CHECKPOINT_AND_CLOCK_OUT", new Set(["HANDOFF_READY_FOR_BOUNDED_PROOF_SHIFT"])],
+    ["CLAIM_AND_CLOCK_IN", new Set(["ACTIVE", "IMPLEMENTATION_AND_LIVE_CAS_PROOF"])],
+    ["CLOCK_OUT_AND_HANDOFF", new Set(["READY_FOR_FRESH_REVIEW"])],
+    ["CLAIM", new Set(["IN_PROGRESS"])],
+    ["COMPLETE_REWORK", new Set(["READY_FOR_FRESH_REVIEW"])],
+  ])],
+  ["Reviewer", new Map([
+    ["REVIEW_COMPLETE", new Set(["FIX_REQUIRED"])],
+  ])],
+]);
+
+function isAllowedRoleTransition(event) {
+  return ALLOWED_ROLE_TRANSITIONS.get(event.role)?.get(event.transition)?.has(event.state) ?? false;
 }
 
 export function projectEvents(events) {
@@ -338,6 +344,10 @@ export function projectEvents(events) {
   for (const list of byWorkOrder.values()) {
     const quarantined = new Set();
 
+    for (const event of list) {
+      if (!isAllowedRoleTransition(event)) quarantined.add(event.event_id);
+    }
+
     // duplicate event ids with changed payload
     const byEventId = new Map();
     const duplicateEventIdValues = new Set();
@@ -352,18 +362,20 @@ export function projectEvents(events) {
       if (duplicateEventIdValues.has(event.event_id)) quarantined.add(event.event_id);
     }
 
-    // duplicate idempotency keys (later occurrences)
-    const seenKeys = new Set();
-    const duplicateKeyEventIds = new Set();
+    // Every event sharing an idempotency key is corrupt, regardless of input order.
+    const byIdempotencyKey = new Map();
     for (const event of list) {
-      if (seenKeys.has(event.idempotency_key)) {
-        duplicateIdempotencyEventIds.push(event.event_id);
-        duplicateKeyEventIds.add(event.event_id);
-      }
-      seenKeys.add(event.idempotency_key);
+      const group = byIdempotencyKey.get(event.idempotency_key) ?? [];
+      group.push(event);
+      byIdempotencyKey.set(event.idempotency_key, group);
     }
-    for (const event of list) {
-      if (duplicateKeyEventIds.has(event.event_id)) quarantined.add(event.event_id);
+    for (const group of byIdempotencyKey.values()) {
+      if (group.length > 1) {
+        for (const event of group) {
+          duplicateIdempotencyEventIds.push(event.event_id);
+          quarantined.add(event.event_id);
+        }
+      }
     }
 
     // build children map deterministically (sorted)
@@ -396,8 +408,9 @@ export function projectEvents(events) {
           .sort((a, b) => a.event_id.localeCompare(b.event_id));
         const validKids = kids.filter(
           (kid) =>
-            kid.sequence > current.sequence &&
-            kid.generation >= current.generation
+            kid.sequence === current.sequence + 1 &&
+            kid.generation >= current.generation &&
+            kid.generation <= current.generation + 1
         );
         if (validKids.length === 0) break;
         if (validKids.length > 1) {
@@ -477,7 +490,7 @@ export function classifyLease(input, atUtc) {
   return { state: "ACTIVE", active: true, lease_expires_utc: event.lease_expires_utc };
 }
 
-export function buildHandoffEvent(priorInput, next = {}, provenance = {}) {
+export async function buildHandoffEvent(priorInput, next = {}, provenance = {}) {
   if (next?.predecessor_commit == null) {
     throw new Error("buildHandoffEvent: predecessor_commit is required");
   }
@@ -487,37 +500,19 @@ export function buildHandoffEvent(priorInput, next = {}, provenance = {}) {
 
   const prior = boardEventSchema.parse(priorInput);
 
-  const provenanceCandidates = [
-    provenance?.commit_sha,
-    provenance?.accepted_commit,
-    provenance?.head,
-    provenance?.accepted_commit_sha,
-    provenance?.prior_commit_sha,
-    provenance?.priorCommitSha,
-    provenance,
-    next?.accepted_commit_sha,
-    next?.prior_commit_sha,
-    next?.priorCommitSha,
-    next?.acceptedCommitSha,
-    next?.commit_sha,
-    next?.verified_commit,
-    next?.provenance_commit,
-    next?.prior_commit,
-    next?.exact_accepted_commit,
-    prior?.commit_sha,
-    prior?.accepted_commit,
-    prior?.head,
-    prior?.accepted_commit_sha,
-    prior?.commitSha,
-    prior?.predecessor_commit,
-  ].filter((value) => typeof value === "string");
-
-  if (provenanceCandidates.length === 0) {
-    throw new Error("buildHandoffEvent: predecessor_commit provenance is required");
+  const github = provenance?.github;
+  const ref = provenance?.ref;
+  const expectedHead = provenance?.expectedHead;
+  const history = provenance?.history;
+  if (!github || typeof github.readRef !== "function" || typeof github.readCommit !== "function" || typeof ref !== "string") {
+    throw new Error("buildHandoffEvent: verified canonical ref provenance is required");
   }
-  const expectedCommit = provenanceCandidates[0];
-  if (expectedCommit !== next.predecessor_commit) {
-    throw new Error("buildHandoffEvent: predecessor_commit must match verified commit provenance");
+  if (expectedHead !== next.predecessor_commit || await readHead(github, ref) !== expectedHead) {
+    throw new Error("buildHandoffEvent: predecessor_commit must match the canonical ref head");
+  }
+  const verified = await verifyHistoryAtHead(github, expectedHead, history);
+  if (!verified.ok || !verified.canonicalPrior || eventDigest(verified.canonicalPrior) !== eventDigest(prior)) {
+    throw new Error("buildHandoffEvent: supplied history is not the verified canonical accepted chain");
   }
 
   return boardEventSchema.parse({
@@ -625,19 +620,7 @@ function isStaleRejection(error) {
 export async function publishEvent({ github, ref, expectedHead = null, event, history = [], ...options }) {
   requireGithub(github);
   const candidate = boardEventSchema.parse(event);
-  const trustedNow = resolveTrustedNow(github, options);
-
-  if (isIllegalValue(candidate.transition) || isIllegalValue(candidate.state)) {
-    return {
-      outcome: "INVALID_HISTORY",
-      published: false,
-      accepted: false,
-      status: "INVALID_HISTORY",
-      reason: "INVALID_HISTORY",
-      error: "illegal transition or state",
-      next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
-    };
-  }
+  const trustedNow = resolveTrustedNow(github);
 
   const conflict = findIdempotencyConflict(Array.isArray(history) ? history : [], candidate);
   if (conflict) {
@@ -647,6 +630,18 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
       existing_event_id: conflict.existing.event_id,
       existing_idempotency_key: conflict.existing.idempotency_key,
       next_legal_action: "USE_EXISTING_ACCEPTED_EVENT",
+    };
+  }
+
+  if (!isAllowedRoleTransition(candidate)) {
+    return {
+      outcome: "INVALID_HISTORY",
+      published: false,
+      accepted: false,
+      status: "INVALID_HISTORY",
+      reason: "INVALID_HISTORY",
+      error: "role, transition and state combination is not allowed",
+      next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
     };
   }
 
@@ -760,25 +755,25 @@ export async function publishEvent({ github, ref, expectedHead = null, event, hi
         next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
       };
     }
-    if (candidate.sequence <= canonicalPrior.sequence) {
+    if (candidate.sequence !== canonicalPrior.sequence + 1) {
       return {
         outcome: "INVALID_HISTORY",
         published: false,
         accepted: false,
         status: "INVALID_HISTORY",
         reason: "INVALID_HISTORY",
-        error: "sequence must advance beyond the canonical accepted event",
+        error: "sequence must advance exactly once from the canonical accepted event",
         next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
       };
     }
-    if (candidate.generation <= canonicalPrior.generation) {
+    if (candidate.generation < canonicalPrior.generation || candidate.generation > canonicalPrior.generation + 1) {
       return {
         outcome: "INVALID_HISTORY",
         published: false,
         accepted: false,
         status: "INVALID_HISTORY",
         reason: "INVALID_HISTORY",
-        error: "generation must advance beyond the canonical accepted event",
+        error: "generation may stay level or advance by one from the canonical accepted event",
         next_legal_action: "REREAD_CANONICAL_LEDGER_AND_REBASE",
       };
     }
@@ -913,6 +908,16 @@ export async function reconcilePublication({
 
   const head = await readHead(github, ref);
 
+  if (originalHistory.length > 0 && !historyVerified) {
+    return {
+      outcome: "UNCERTAIN",
+      accepted: false,
+      head,
+      attempted_commit_sha: attemptedCommitSha,
+      next_legal_action: "REREAD_CANONICAL_LEDGER_NO_BLIND_RETRY",
+    };
+  }
+
   if (event) {
     const candidate = (() => {
       try {
@@ -946,42 +951,27 @@ export async function reconcilePublication({
         }
       }
 
-      // If history is missing/unverified, do not trust attempted commit blindly.
-      if (normalizedHistory.length === 0) {
-        if (!historyVerified) {
-          return {
-            outcome: "UNCERTAIN",
-            accepted: false,
-            head,
-            attempted_commit_sha: attemptedCommitSha,
-            next_legal_action: "REREAD_CANONICAL_LEDGER_NO_BLIND_RETRY",
-          };
-        }
-        if (head !== null && head === attemptedCommitSha) {
-          const commitEvent = await readCommitEvent(github, head);
-          if (commitEvent && eventDigest(commitEvent) === eventDigest(candidate)) {
-            return {
-              outcome: "PUBLISHED",
-              accepted: true,
-              head,
-              attempted_commit_sha: attemptedCommitSha,
-              next_legal_action: "CONTINUE_FROM_PUBLISHED_EVENT",
-            };
-          }
-          return {
-            outcome: "UNCERTAIN",
-            accepted: false,
-            head,
-            attempted_commit_sha: attemptedCommitSha,
-            next_legal_action: "REREAD_CANONICAL_LEDGER_NO_BLIND_RETRY",
-          };
-        }
-      }
     }
   }
 
   if (head !== null && head === attemptedCommitSha) {
-    if (historyVerified) {
+    const candidate = (() => {
+      try { return event ? boardEventSchema.parse(event) : null; } catch { return null; }
+    })();
+    const attemptedRaw = await readCommitRaw(github, attemptedCommitSha);
+    const attemptedEvent = attemptedRaw ? parseMaybeEvent(attemptedRaw) : null;
+    const actualParent = extractParentSha(attemptedRaw);
+    const parentMatches = isGenesisHead(expectedHead)
+      ? isGenesisHead(actualParent)
+      : actualParent === expectedHead;
+    const historyBound = isGenesisHead(expectedHead) || historyVerified;
+    if (
+      candidate &&
+      attemptedEvent &&
+      eventDigest(attemptedEvent) === eventDigest(candidate) &&
+      parentMatches &&
+      historyBound
+    ) {
       return {
         outcome: "PUBLISHED",
         accepted: true,

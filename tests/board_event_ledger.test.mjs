@@ -289,10 +289,10 @@ test("projectEvents reports duplicate idempotency keys in corrupt history", () =
   const first = createEvent(baseEvent({ event_id: "EVT-1", generation: 1, sequence: 1 }));
   const dup = createEvent(baseEvent({ event_id: "EVT-2", generation: 2, sequence: 2 }));
   const projection = projectEvents([first, dup]);
-  assert.deepEqual(projection.duplicate_idempotency_event_ids, ["EVT-2"]);
+  assert.deepEqual(projection.duplicate_idempotency_event_ids, ["EVT-1", "EVT-2"]);
 });
 
-test("lease expiry is observable and handoff keeps the same work order and checkpoint", () => {
+test("lease expiry is observable and handoff keeps the same work order and checkpoint", async () => {
   const claim = createEvent(
     baseEvent({
       lease_expires_utc: "2026-10-23T09:10:00+00:00",
@@ -305,26 +305,31 @@ test("lease expiry is observable and handoff keeps the same work order and check
   assert.equal(expired.state, "EXPIRED");
   assert.equal(expired.active, false);
 
-  const handoff = buildHandoffEvent(
-    claim,
-    {
+  const headSha = "a".repeat(40);
+  const github = createCommitBoundGitHub(headSha, claim);
+  let handoff;
+  await assert.doesNotReject(async () => {
+    handoff = await buildHandoffEvent(
+      claim,
+      {
       event_id: "EVT-HANDOFF",
       attempt_id: "ATT-2",
       idempotency_key: "IDEM-HANDOFF",
-      predecessor_commit: SEED,
+      predecessor_commit: headSha,
       handoff_utc: "2026-10-23T09:11:00+00:00",
       clock_in_utc: "2026-10-23T09:12:00+00:00",
       lease_expires_utc: "2026-10-23T09:30:00+00:00",
-    },
-    { commit_sha: SEED }
-  );
+      },
+      { github, ref: "refs/heads/proof", expectedHead: headSha, history: [claim] }
+    );
+  });
 
   assert.equal(handoff.work_order_id, claim.work_order_id);
   assert.equal(handoff.checkpoint, claim.checkpoint);
   assert.equal(handoff.generation, claim.generation + 1);
   assert.equal(handoff.sequence, claim.sequence + 1);
   assert.equal(handoff.predecessor_event_id, claim.event_id);
-  assert.equal(handoff.predecessor_commit, SEED);
+  assert.equal(handoff.predecessor_commit, headSha);
   assert.equal(classifyLease(handoff, "2026-10-23T09:15:00+00:00").state, "HANDED_OFF");
 });
 
@@ -382,6 +387,7 @@ test("uncertain delivery that did apply reconciles as published and never republ
     ref: "refs/heads/proof",
     attemptedCommitSha: result.attempted_commit_sha,
     expectedHead: SEED,
+    event: baseEvent({ predecessor_commit: SEED }),
   });
   assert.equal(reconciled.outcome, "PUBLISHED");
   assert.equal(reconciled.accepted, true);
@@ -511,20 +517,22 @@ test("REGRESSION finding2: reconcilePublication preserves IDEMPOTENCY_CONFLICT a
   assert.equal(reconciled.accepted, false);
 });
 
-test("REGRESSION finding3: projectEvents does not select invalid events as active", () => {
+test("REGRESSION finding3: projectEvents quarantines every member of an idempotency conflict", () => {
   const first = createEvent(baseEvent({ event_id: "EVT-1", idempotency_key: "IDEM-1", generation: 1, sequence: 1 }));
   const invalid = createEvent(
     baseEvent({ event_id: "EVT-2", idempotency_key: "IDEM-1", generation: 99, sequence: 99 })
   );
   const projection = projectEvents([first, invalid]);
-  assert.equal(projection.active.length, 1);
-  assert.equal(projection.active[0].event_id, "EVT-1");
+  assert.equal(projection.active.length, 0);
+  assert.ok(projection.quarantined_event_ids.includes("EVT-1"));
   assert.ok(projection.quarantined_event_ids.includes("EVT-2"));
 });
 
-test("REGRESSION finding4: buildHandoffEvent requires predecessor commit provenance", () => {
+test("REGRESSION finding4: buildHandoffEvent requires predecessor commit provenance", async () => {
   const prior = createEvent(baseEvent({ predecessor_commit: null }));
-  assert.throws(
+  const headSha = "a".repeat(40);
+  const github = createCommitBoundGitHub(headSha, prior);
+  await assert.rejects(
     () =>
       buildHandoffEvent(prior, {
         event_id: "EVT-HANDOFF",
@@ -534,18 +542,21 @@ test("REGRESSION finding4: buildHandoffEvent requires predecessor commit provena
       }),
     /predecessor_commit/
   );
-  const handoff = buildHandoffEvent(
-    prior,
-    {
+  let handoff;
+  await assert.doesNotReject(async () => {
+    handoff = await buildHandoffEvent(
+      prior,
+      {
       event_id: "EVT-HANDOFF",
       attempt_id: "ATT-2",
       idempotency_key: "IDEM-HANDOFF",
-      predecessor_commit: SEED,
+      predecessor_commit: headSha,
       clock_in_utc: "2026-10-23T09:12:00+00:00",
-    },
-    { commit_sha: SEED }
-  );
-  assert.equal(handoff.predecessor_commit, SEED);
+      },
+      { github, ref: "refs/heads/proof", expectedHead: headSha, history: [prior] }
+    );
+  });
+  assert.equal(handoff.predecessor_commit, headSha);
 });
 
 function createCommitBoundGitHub(headSha, headEvent) {
@@ -740,10 +751,10 @@ test("REGRESSION review3c: illegal transition value is rejected", async () => {
   assert.equal(result.outcome, "INVALID_HISTORY");
 });
 
-test("REGRESSION review4: buildHandoffEvent rejects an arbitrary 40-hex commit without provenance", () => {
+test("REGRESSION review4: buildHandoffEvent rejects an arbitrary 40-hex commit without provenance", async () => {
   const prior = createEvent(baseEvent({ predecessor_commit: null }));
-  assert.throws(
-    () =>
+  await assert.rejects(
+    async () =>
       buildHandoffEvent(prior, {
         event_id: "EVT-HANDOFF",
         attempt_id: "ATT-2",
@@ -791,4 +802,191 @@ test("REGRESSION review5b: reconcilePublication does not report PUBLISHED for a 
   });
   assert.equal(result.accepted, false);
   assert.notEqual(result.outcome, "PUBLISHED");
+});
+
+test("REGRESSION review5c: reconcilePublication does not accept a duplicate from unverified history", async () => {
+  const headSha = "a".repeat(40);
+  const committed = createEvent(baseEvent({ event_id: "EVT-COMMITTED", idempotency_key: "IDEM-SAME" }));
+  const github = createCommitBoundGitHub(headSha, committed);
+  const forgedPrior = createEvent(baseEvent({ event_id: "EVT-FORGED", idempotency_key: "IDEM-SAME" }));
+
+  const result = await reconcilePublication({
+    github,
+    ref: "refs/heads/proof",
+    attemptedCommitSha: headSha,
+    expectedHead: "b".repeat(40),
+    history: [forgedPrior],
+    event: forgedPrior,
+  });
+
+  assert.equal(result.accepted, false);
+  assert.notEqual(result.outcome, "DUPLICATE");
+});
+
+test("REGRESSION review6: caller time cannot expire a lease before the trusted GitHub clock", async () => {
+  const github = createFakeGitHub();
+  github.now = () => "2026-10-23T09:05:00+00:00";
+  github.readCommit = async (sha) => {
+    const c = github.state.commits.get(sha);
+    if (!c) return null;
+    return { sha, parent: c.parent, parents: c.parent ? [{ sha: c.parent }] : [], event: c.event };
+  };
+  const prior = createEvent(baseEvent({
+    event_id: "PRIOR-TIMED",
+    idempotency_key: "IDEM-PRIOR-TIMED",
+    lease_expires_utc: "2026-10-23T10:00:00+00:00",
+  }));
+  const first = await publishEvent({ github, ref: "refs/heads/proof", expectedHead: SEED, event: prior });
+  assert.equal(first.outcome, "ACCEPTED");
+
+  const candidate = baseEvent({
+    event_id: "NEXT-TIMED",
+    idempotency_key: "IDEM-NEXT-TIMED",
+    sequence: 2,
+    generation: 2,
+    predecessor_event_id: prior.event_id,
+    predecessor_commit: first.commit_sha,
+  });
+  const result = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: first.commit_sha,
+    event: candidate,
+    history: [first.event],
+    trustedNowUtc: "2026-10-23T13:00:00+00:00",
+  });
+
+  assert.equal(result.published, false);
+  assert.equal(result.outcome, "INVALID_HISTORY");
+});
+
+test("REGRESSION review7: role transition state combinations use an explicit allowlist", async () => {
+  const valid = [
+    { role: "Control", transition: "AUTHORIZE_BOUNDED_REWORK", state: "READY_FOR_SINGLE_WORKER_CLAIM" },
+    { role: "Control", transition: "RECONCILE_DISPATCH", state: "PROMPT_NOT_CONSUMED_PRE_SEND_FAILURE" },
+    { role: "Worker", transition: "CLAIM_REQUESTED_AND_CLOCK_IN", state: "READ_ONLY_SOURCE_INSPECTION" },
+    { role: "Worker", transition: "CLAIM_AND_CLOCK_IN", state: "IMPLEMENTATION_AND_LIVE_CAS_PROOF" },
+    { role: "Worker", transition: "CLAIM", state: "IN_PROGRESS" },
+    { role: "Worker", transition: "COMPLETE_REWORK", state: "READY_FOR_FRESH_REVIEW" },
+    { role: "Reviewer", transition: "REVIEW_COMPLETE", state: "FIX_REQUIRED" },
+  ];
+  for (const [index, combination] of valid.entries()) {
+    const github = createFakeGitHub();
+    const result = await publishEvent({
+      github,
+      ref: "refs/heads/proof",
+      expectedHead: SEED,
+      event: baseEvent({
+        ...combination,
+        event_id: `EVT-ROLE-${index}`,
+        idempotency_key: `IDEM-ROLE-${index}`,
+        predecessor_commit: SEED,
+      }),
+    });
+    assert.equal(result.outcome, "ACCEPTED", JSON.stringify(combination));
+  }
+
+  for (const combination of [
+    { role: "Watcher", transition: "AUTHORIZE_BOUNDED_REWORK", state: "READY_FOR_SINGLE_WORKER_CLAIM" },
+    { role: "Control", transition: "WARP", state: "READY_FOR_SINGLE_WORKER_CLAIM" },
+    { role: "Worker", transition: "MADE_UP", state: "IN_PROGRESS" },
+    { role: "Worker", transition: "CLAIM", state: "READY_FOR_FRESH_REVIEW" },
+  ]) {
+    const github = createFakeGitHub();
+    const invalidEvent = createEvent(baseEvent({ ...combination, event_id: "INVALID-ROLE-STATE", idempotency_key: "INVALID-ROLE-STATE-KEY" }));
+    const projection = projectEvents([invalidEvent]);
+    assert.equal(projection.active.length, 0, JSON.stringify(combination));
+    assert.ok(projection.quarantined_event_ids.includes("INVALID-ROLE-STATE"), JSON.stringify(combination));
+    const result = await publishEvent({
+      github,
+      ref: "refs/heads/proof",
+      expectedHead: SEED,
+      event: { ...invalidEvent, predecessor_commit: SEED },
+    });
+    assert.equal(result.published, false, JSON.stringify(combination));
+    assert.equal(result.outcome, "INVALID_HISTORY", JSON.stringify(combination));
+  }
+});
+
+test("REGRESSION review8: all duplicate idempotency key members quarantine independent of input order", () => {
+  const first = createEvent(baseEvent({ event_id: "DUP-A", idempotency_key: "IDEM-DUP", predecessor_event_id: null, sequence: 0, generation: 0 }));
+  const second = createEvent(baseEvent({ event_id: "DUP-B", idempotency_key: "IDEM-DUP", predecessor_event_id: "DUP-A", sequence: 1, generation: 1 }));
+  for (const events of [[first, second], [second, first]]) {
+    const projection = projectEvents(events);
+    assert.equal(projection.active.length, 0);
+    assert.deepEqual(projection.duplicate_idempotency_event_ids, ["DUP-A", "DUP-B"]);
+    assert.deepEqual(projection.quarantined_event_ids, ["DUP-A", "DUP-B"]);
+  }
+});
+
+test("REGRESSION review9: projection quarantines sequence and generation jumps", () => {
+  const root = createEvent(baseEvent({ event_id: "SEQ-ROOT", idempotency_key: "IDEM-SEQ-ROOT", predecessor_event_id: null, sequence: 0, generation: 0 }));
+  const jump = createEvent(baseEvent({ event_id: "SEQ-JUMP", idempotency_key: "IDEM-SEQ-JUMP", predecessor_event_id: "SEQ-ROOT", sequence: 99, generation: 99 }));
+  const projection = projectEvents([root, jump]);
+  assert.equal(projection.active[0]?.event_id, "SEQ-ROOT");
+  assert.ok(projection.quarantined_event_ids.includes("SEQ-JUMP"));
+});
+
+test("REGRESSION review10: handoff requires a commit containing the canonical prior event", async () => {
+  const headSha = "a".repeat(40);
+  const prior = createEvent(baseEvent({ event_id: "HANDOFF-PRIOR", idempotency_key: "IDEM-HANDOFF-PRIOR", predecessor_event_id: null, predecessor_commit: null }));
+  const github = createCommitBoundGitHub(headSha, prior);
+  const next = {
+    event_id: "HANDOFF-NEXT",
+    attempt_id: "ATT-2",
+    idempotency_key: "IDEM-HANDOFF-NEXT",
+    predecessor_commit: headSha,
+    clock_in_utc: "2026-10-23T09:12:00+00:00",
+  };
+
+  await assert.rejects(async () => buildHandoffEvent(prior, next, { commit_sha: headSha }), /provenance|verified|canonical/i);
+  await assert.rejects(async () => buildHandoffEvent(prior, next), /provenance|verified|canonical/i);
+  const forgedSha = "f".repeat(40);
+  const selfAttestedPrior = createEvent({ ...prior, predecessor_commit: forgedSha });
+  await assert.rejects(
+    async () => buildHandoffEvent(selfAttestedPrior, { ...next, predecessor_commit: forgedSha }, {
+      github,
+      ref: "refs/heads/proof",
+      expectedHead: forgedSha,
+      history: [selfAttestedPrior],
+    }),
+    /canonical|verified/i
+  );
+
+  let handoff;
+  await assert.doesNotReject(async () => {
+    handoff = await buildHandoffEvent(prior, next, {
+      github,
+      ref: "refs/heads/proof",
+      expectedHead: headSha,
+      history: [prior],
+    });
+  });
+  assert.equal(handoff.predecessor_commit, headSha);
+  assert.equal(handoff.predecessor_event_id, prior.event_id);
+});
+
+test("REGRESSION review11: readCommit fails closed when adapter omits the requested commit SHA", async () => {
+  const headSha = "a".repeat(40);
+  const prior = createEvent(baseEvent({ event_id: "SHA-PRIOR", idempotency_key: "IDEM-SHA-PRIOR", predecessor_event_id: null, predecessor_commit: null }));
+  const github = createCommitBoundGitHub(headSha, prior);
+  github.readCommit = async () => ({ parent: null, event: prior });
+  const candidate = baseEvent({
+    event_id: "SHA-NEXT",
+    idempotency_key: "IDEM-SHA-NEXT",
+    sequence: 2,
+    generation: 2,
+    predecessor_event_id: prior.event_id,
+    predecessor_commit: headSha,
+  });
+
+  const result = await publishEvent({
+    github,
+    ref: "refs/heads/proof",
+    expectedHead: headSha,
+    event: candidate,
+    history: [prior],
+  });
+  assert.equal(result.published, false);
+  assert.equal(result.outcome, "INVALID_HISTORY");
 });
