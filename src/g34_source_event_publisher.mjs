@@ -131,7 +131,7 @@ export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssue
   const consistentHeads = declaredHeads.every((value) => value === receiptHead);
   const receiptTreeKeys = eventKind === "WORKER_STARTED"
     ? ["base_tree_sha", "tree_sha"]
-    : ["tree_sha", "remote_api_tree", "remote_tree", "local_tested_tree"];
+    : ["tree_sha", "remote_api_tree", "remote_tree", "local_tested_tree", "candidate_tree_sha"];
   const declaredTrees = receiptTreeKeys.flatMap((key) => receiptValues(receipt, key));
   const receiptTree = declaredTrees[0];
   const exactTree = /^[0-9a-f]{40}$/.test(String(receiptTree ?? "")) &&
@@ -533,7 +533,11 @@ export async function publishSourceEvent(args) {
       assertTreeAliases(receipt, ["base_tree_sha", "tree_sha"], String(headCommit.tree.sha), "candidate");
     } else {
       assertTreeAliases(bindingReceipt, ["base_tree_sha", "tree_sha"], String(baseCommit.tree.sha), "base");
-      assertTreeAliases(receipt, ["tree_sha", "remote_tree", "remote_api_tree", "local_tested_tree"], String(headCommit.tree.sha), "candidate");
+      const terminalBaseTrees = receiptValues(receipt, "base_tree_sha");
+      if (terminalBaseTrees.some((tree) => tree !== String(baseCommit.tree.sha))) {
+        throw new Error("exact Worker terminal base tree metadata does not match its GitHub base commit or linked Worker start");
+      }
+      assertTreeAliases(receipt, ["tree_sha", "remote_tree", "remote_api_tree", "local_tested_tree", "candidate_tree_sha"], String(headCommit.tree.sha), "candidate");
       const declaredParents = ["remote_parent", "commit_parent", "parent_sha"]
         .flatMap((key) => receiptValues(receipt, key));
       const exactHeadParents = Array.isArray(headCommit.parents)

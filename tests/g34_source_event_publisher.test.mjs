@@ -88,7 +88,9 @@ const sourceBody = (overrides = {}) => {
   };
   const marker = fields.marker;
   delete fields.marker;
-  return marker + "\n" + Object.entries(fields).map(([key, value]) => `${key}: ${value}`).join("\n");
+  return marker + "\n" + Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => `${key}: ${value}`).join("\n");
 };
 
 function sourceComment(overrides = {}) {
@@ -427,9 +429,13 @@ test("exported publisher reconstructs a terminal event from the exact linked Wor
 
 test("exported publisher checks every start tree alias against the exact GitHub base tree before ledger mutation", async () => {
   for (const treeAlias of ["tree_sha", "base_tree_sha"]) {
+    for (const placement of ["top-level", "nested"]) {
     const declaredTree = "a".repeat(40);
-    const source = { ...sourceComment({ base_tree_sha: declaredTree, tree_sha: declaredTree }) };
-    source.body += `\nBASE_TREE_EVIDENCE\nbase_tree_sha: ${declaredTree}`;
+    const source = { ...sourceComment({
+      base_tree_sha: placement === "top-level" && treeAlias === "base_tree_sha" ? declaredTree : null,
+      tree_sha: placement === "top-level" && treeAlias === "tree_sha" ? declaredTree : null,
+    }) };
+    if (placement === "nested") source.body += `\nBASE_TREE_EVIDENCE\n${treeAlias}: ${declaredTree}`;
     const event = createSourceEvent({
       sourceComment: source,
       canonicalReceipt: parseG34ReceiptFields(source),
@@ -444,13 +450,14 @@ test("exported publisher checks every start tree alias against the exact GitHub 
       state: "CONSUMED_STARTED",
       expectedAuthor: "D22977",
     });
-    const runtimeRoot = await mkdtemp(path.join(tmpdir(), `g34-start-tree-alias-${treeAlias}-`));
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), `g34-start-tree-alias-${treeAlias}-${placement}-`));
     const github = clientFor(event.body, { sourceComment: source });
     github.getCommit = async (sha) => ({ sha, tree: { sha: "d".repeat(40) }, parents: [] });
     await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github }), /tree metadata/);
     assert.equal(github.calls.create, 0);
     assert.equal(github.calls.find, 0);
     await assert.rejects(readFile(path.join(runtimeRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
+    }
   }
 });
 
@@ -463,7 +470,8 @@ test("exported publisher checks every terminal tree alias against exact GitHub h
     user: { login: "D22977" },
     body: sourceBody(),
   };
-  for (const treeAlias of ["remote_tree", "remote_api_tree", "local_tested_tree"]) {
+  for (const treeAlias of ["tree_sha", "remote_tree", "remote_api_tree", "local_tested_tree", "candidate_tree_sha"]) {
+    for (const placement of ["top-level", "nested"]) {
     const head = "e".repeat(40);
     const declaredTree = "a".repeat(40);
     const source = {
@@ -475,11 +483,14 @@ test("exported publisher checks every terminal tree alias against exact GitHub h
         state: "READY_FOR_FRESH_REVIEW",
         worker_start_comment_id: startId,
         head_sha: head,
-        tree_sha: declaredTree,
-        [treeAlias]: declaredTree,
+        tree_sha: placement === "top-level" && treeAlias === "tree_sha" ? declaredTree : null,
+        remote_tree: placement === "top-level" && treeAlias === "remote_tree" ? declaredTree : null,
+        remote_api_tree: placement === "top-level" && treeAlias === "remote_api_tree" ? declaredTree : null,
+        local_tested_tree: placement === "top-level" && treeAlias === "local_tested_tree" ? declaredTree : null,
+        candidate_tree_sha: placement === "top-level" && treeAlias === "candidate_tree_sha" ? declaredTree : null,
       }),
     };
-    source.body += `\nCANDIDATE_TREE_EVIDENCE\n${treeAlias}: ${declaredTree}`;
+    if (placement === "nested") source.body += `\nCANDIDATE_TREE_EVIDENCE\n${treeAlias}: ${declaredTree}`;
     const event = createSourceEvent({
       sourceComment: source,
       canonicalReceipt: parseG34ReceiptFields(source),
@@ -495,7 +506,7 @@ test("exported publisher checks every terminal tree alias against exact GitHub h
       terminalCommentId: terminalId,
       expectedAuthor: "D22977",
     });
-    const runtimeRoot = await mkdtemp(path.join(tmpdir(), `g34-terminal-tree-alias-${treeAlias}-`));
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), `g34-terminal-tree-alias-${treeAlias}-${placement}-`));
     const github = clientFor(event.body, { sourceComments: { [startId]: start, [terminalId]: source } });
     github.getCommit = async (sha) => sha === "c7d17550fdfe3ae3e06ecec352004ca3b7284c55"
       ? { sha, tree: { sha: "d".repeat(40) }, parents: [] }
@@ -504,7 +515,111 @@ test("exported publisher checks every terminal tree alias against exact GitHub h
     assert.equal(github.calls.create, 0);
     assert.equal(github.calls.find, 0);
     await assert.rejects(readFile(path.join(runtimeRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
+    }
   }
+});
+
+test("exported publisher rejects a terminal base_tree_sha mismatch, including nested evidence, before ledger mutation", async () => {
+  const startId = "6083330250";
+  const terminalId = "6083330251";
+  const base = "c7d17550fdfe3ae3e06ecec352004ca3b7284c55";
+  const start = {
+    id: startId,
+    url: `https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-${startId}`,
+    user: { login: "D22977" },
+    body: sourceBody(),
+  };
+  for (const placement of ["top-level", "nested"]) {
+    const source = {
+      id: terminalId,
+      url: `https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-${terminalId}`,
+      user: { login: "D22977" },
+      body: sourceBody({
+        marker: "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1",
+        state: "READY_FOR_FRESH_REVIEW",
+        worker_start_comment_id: startId,
+        head_sha: "e".repeat(40),
+        tree_sha: "a".repeat(40),
+        base_tree_sha: placement === "top-level" ? "b".repeat(40) : null,
+      }),
+    };
+    if (placement === "nested") source.body += `\nBASE_TREE_EVIDENCE\nbase_tree_sha: ${"b".repeat(40)}`;
+    const event = createSourceEvent({
+      sourceComment: source,
+      canonicalReceipt: parseG34ReceiptFields(source),
+      sourceIssueNumber: 202,
+      sourceRepositoryFullName: "D22977/gpt-browser-bridge",
+      eventKind: "WORKER_TERMINAL_RESULT",
+      authority,
+      binding: { ...binding, start_comment_id: startId },
+      branch: "work/gbb-g34-source-event-20261009-01",
+      baseSha: base,
+      headSha: "e".repeat(40),
+      state: "READY_FOR_FRESH_REVIEW",
+      terminalCommentId: terminalId,
+      expectedAuthor: "D22977",
+    });
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), `g34-terminal-base-tree-${placement}-`));
+    const github = clientFor(event.body, { sourceComments: { [startId]: start, [terminalId]: source } });
+    github.getCommit = async (sha) => sha === base
+      ? { sha, tree: { sha: "d".repeat(40) }, parents: [] }
+      : { sha, tree: { sha: "a".repeat(40) }, parents: [{ sha: base }] };
+    await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github }), /base tree metadata/);
+    assert.equal(github.calls.find, 0);
+    assert.equal(github.calls.create, 0);
+    await assert.rejects(readFile(path.join(runtimeRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
+  }
+});
+
+test("exported publisher rejects a nested candidate_tree_sha conflict before ledger mutation or GitHub event lookup", async () => {
+  const startId = "6083330270";
+  const terminalId = "6083330271";
+  const base = "c7d17550fdfe3ae3e06ecec352004ca3b7284c55";
+  const start = {
+    id: startId,
+    url: `https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-${startId}`,
+    user: { login: "D22977" },
+    body: sourceBody(),
+  };
+  const source = {
+    id: terminalId,
+    url: `https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-${terminalId}`,
+    user: { login: "D22977" },
+    body: sourceBody({
+      marker: "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1",
+      state: "READY_FOR_FRESH_REVIEW",
+      worker_start_comment_id: startId,
+      head_sha: "e".repeat(40),
+      tree_sha: "a".repeat(40),
+    }),
+  };
+  const event = createSourceEvent({
+    sourceComment: source,
+    canonicalReceipt: parseG34ReceiptFields(source),
+    sourceIssueNumber: 202,
+    sourceRepositoryFullName: "D22977/gpt-browser-bridge",
+    eventKind: "WORKER_TERMINAL_RESULT",
+    authority,
+    binding: { ...binding, start_comment_id: startId },
+    branch: "work/gbb-g34-source-event-20261009-01",
+    baseSha: base,
+    headSha: "e".repeat(40),
+    state: "READY_FOR_FRESH_REVIEW",
+    terminalCommentId: terminalId,
+    expectedAuthor: "D22977",
+  });
+  source.body += `\nCANDIDATE_TREE_EVIDENCE\ncandidate_tree_sha: ${"b".repeat(40)}`;
+  event.source_body_sha256 = createHash("sha256").update(source.body, "utf8").digest("hex");
+  event.body = sourceEventPayloadBody(event);
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-candidate-tree-conflict-"));
+  const github = clientFor(event.body, { sourceComments: { [startId]: start, [terminalId]: source } });
+  github.getCommit = async (sha) => sha === base
+    ? { sha, tree: { sha: "d".repeat(40) }, parents: [] }
+    : { sha, tree: { sha: "a".repeat(40) }, parents: [{ sha: base }] };
+  await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github }), /receipt|tree/);
+  assert.equal(github.calls.find, 0);
+  assert.equal(github.calls.create, 0);
+  await assert.rejects(readFile(path.join(runtimeRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
 });
 
 test("exported publisher proves bounded single-parent descent and rejects unrelated or ambiguous ancestry", async () => {
@@ -558,14 +673,32 @@ test("exported publisher proves bounded single-parent descent and rejects unrela
   goodGithub.getCommit = async (sha) => goodCommit(sha);
   assert.equal((await publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot: goodRoot, github: goodGithub })).state, "DELIVERED");
 
-  for (const ancestry of ["unrelated", "multiparent"]) {
+  const overDepthNodes = Array.from({ length: 66 }, (_, index) => (index + 1).toString(16).padStart(40, "0"));
+  for (const ancestry of ["unrelated", "multiparent", "cycle", "over-depth", "malformed-intermediate-sha", "malformed-intermediate-parent", "intermediate-multiparent"]) {
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), `g34-terminal-${ancestry}-`));
     const github = clientFor(event.body, { sourceComments });
-    github.getCommit = async (sha) => sha === base
-      ? goodCommit(sha)
-      : sha === head
-        ? { sha, tree: { sha: "a".repeat(40) }, parents: ancestry === "multiparent" ? [{ sha: mid }, { sha: "f".repeat(40) }] : [{ sha: "f".repeat(40) }] }
-        : { sha: "f".repeat(40), tree: { sha: "f".repeat(40) }, parents: [] };
+    github.getCommit = async (sha) => {
+      if (sha === base) return goodCommit(sha);
+      if (sha === head) {
+        if (ancestry === "unrelated") return { sha, tree: { sha: "a".repeat(40) }, parents: [{ sha: "f".repeat(40) }] };
+        if (ancestry === "multiparent") return { sha, tree: { sha: "a".repeat(40) }, parents: [{ sha: mid }, { sha: "f".repeat(40) }] };
+        if (ancestry === "over-depth") return { sha, tree: { sha: "a".repeat(40) }, parents: [{ sha: overDepthNodes[0] }] };
+        return { sha, tree: { sha: "a".repeat(40) }, parents: [{ sha: mid }] };
+      }
+      if (sha === mid) {
+        if (ancestry === "cycle") return { sha, tree: { sha: "c".repeat(40) }, parents: [{ sha: head }] };
+        if (ancestry === "malformed-intermediate-sha") return { sha: "f".repeat(40), tree: { sha: "c".repeat(40) }, parents: [{ sha: base }] };
+        if (ancestry === "malformed-intermediate-parent") return { sha, tree: { sha: "c".repeat(40) }, parents: [{ sha: "not-a-git-sha" }] };
+        if (ancestry === "intermediate-multiparent") return { sha, tree: { sha: "c".repeat(40) }, parents: [{ sha: base }, { sha: "f".repeat(40) }] };
+        return goodCommit(sha);
+      }
+      const overDepthIndex = overDepthNodes.indexOf(sha);
+      if (overDepthIndex >= 0) {
+        const parent = overDepthNodes[overDepthIndex + 1] ?? "f".repeat(40);
+        return { sha, tree: { sha: "1".repeat(40) }, parents: [{ sha: parent }] };
+      }
+      return { sha, tree: { sha: "f".repeat(40) }, parents: [] };
+    };
     await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github }), /parent|ancestry/);
     assert.equal(github.calls.create, 0);
     assert.equal(github.calls.find, 0);
