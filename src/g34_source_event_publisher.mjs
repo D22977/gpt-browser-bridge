@@ -76,6 +76,17 @@ export async function readCurrentControlAuthority(github, expectedAuthority, pha
   return liveAuthority;
 }
 
+async function validateSourceEventAuthority(github, currentAuthority, event, expectedAuthor, phase) {
+  const liveAuthority = await readCurrentControlAuthority(github, currentAuthority, phase);
+  if (event.control_generation !== liveAuthority.control_generation ||
+      event.active_control_id !== liveAuthority.active_control_id ||
+      event.control_conversation_id !== liveAuthority.control_conversation_id ||
+      expectedAuthor !== liveAuthority.publisher_login) {
+    throw new Error("source event identity does not match live Control authority");
+  }
+  return liveAuthority;
+}
+
 export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssueNumber, sourceRepositoryFullName, eventKind, authority, binding, branch, baseSha, headSha, state, terminalCommentId, reviewCommentId, expectedAuthor }) {
   if (!sourceComment || !/^[1-9][0-9]*$/.test(String(sourceComment.id ?? "")) || typeof sourceComment.body !== "string") {
     throw new Error("source executor comment metadata is required");
@@ -269,6 +280,7 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
       if (error.message.startsWith("DUPLICATE_EVENT:")) throw error;
     }
     if (exact) {
+      await validateSourceEventAuthority(github, currentAuthority, validated, expectedAuthor, "source-event delivery reconciliation");
       ledger[validated.event_id] = {
         ...prior,
         state: "DELIVERED",
@@ -286,6 +298,7 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
   if (prior?.state === "DELIVERED" || prior?.state === "CONSUMED") {
     const exact = await findMatch({ ...validated, body, expected_author: expectedAuthor }, issueNumber, repositoryFullName, github);
     if (!exact || String(exact.id) !== prior.comment_id) throw new Error("DUPLICATE_EVENT: delivered ledger does not match GitHub");
+    await validateSourceEventAuthority(github, currentAuthority, validated, expectedAuthor, "source-event duplicate reconciliation");
     return { state: "NO_OP", comment_id: String(exact.id) };
   }
 
@@ -294,11 +307,13 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
     if (!exact || String(exact.id) !== String(prior.comment_id)) {
       throw new Error("UNCERTAIN_SUCCESSOR_DELIVERY: source event must retain its pending successor state");
     }
+    await validateSourceEventAuthority(github, currentAuthority, validated, expectedAuthor, "source-event successor reconciliation");
     return { state: "DELIVERY_UNCERTAIN", comment_id: String(exact.id) };
   }
 
   const existing = await findMatch({ ...validated, body, expected_author: expectedAuthor }, issueNumber, repositoryFullName, github);
   if (existing) {
+    await validateSourceEventAuthority(github, currentAuthority, validated, expectedAuthor, "source-event deduplication");
     ledger[validated.event_id] = {
       state: "DELIVERED",
       source_publication_state: "DELIVERED",
@@ -313,13 +328,7 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
   await saveLedger(file, ledger);
   ledger[validated.event_id].state = "CLAIMED";
   await saveLedger(file, ledger);
-  const liveAuthority = await readCurrentControlAuthority(github, currentAuthority, "source-event GitHub create");
-  if (validated.control_generation !== liveAuthority.control_generation ||
-      validated.active_control_id !== liveAuthority.active_control_id ||
-      validated.control_conversation_id !== liveAuthority.control_conversation_id ||
-      expectedAuthor !== liveAuthority.publisher_login) {
-    throw new Error("source event identity does not match live Control authority");
-  }
+  await validateSourceEventAuthority(github, currentAuthority, validated, expectedAuthor, "source-event GitHub create");
   ledger[validated.event_id].state = "SEND_ATTEMPTED";
   await saveLedger(file, ledger);
   let created;

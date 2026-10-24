@@ -363,6 +363,47 @@ for (const [field, mutate] of [
   });
 }
 
+test("existing-event dedup validates live Control authority before recording DELIVERED", async () => {
+  assertImplemented();
+  const event = sampleEvent();
+  event.active_control_id = "11111111-1111-1111-1111-111111111111";
+  event.control_conversation_id = event.active_control_id;
+  event.body = sourceEventPayloadBody(event);
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-existing-event-authority-"));
+  const github = clientFor(event.body, { matches: [{ id: "9001" }] });
+
+  await assert.rejects(() => publishWithCurrentAuthority({
+    event, issueNumber: 202, runtimeRoot, github,
+  }), /does not match live Control authority/);
+  assert.equal(github.calls.create, 0);
+  const ledgerPath = path.join(runtimeRoot, "events", "g34-source-events.json");
+  let ledger = {};
+  try { ledger = JSON.parse(await readFile(ledgerPath, "utf8")); } catch (error) { if (error.code !== "ENOENT") throw error; }
+  assert.notEqual(ledger[event.event_id]?.state, "DELIVERED");
+});
+
+test("SEND_ATTEMPTED recovery validates live authority before reconciling an existing event to DELIVERED", async () => {
+  assertImplemented();
+  const event = sampleEvent();
+  event.active_control_id = "11111111-1111-1111-1111-111111111111";
+  event.control_conversation_id = event.active_control_id;
+  event.body = sourceEventPayloadBody(event);
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-send-recovery-authority-"));
+  const ledgerPath = path.join(runtimeRoot, "events", "g34-source-events.json");
+  await mkdir(path.dirname(ledgerPath), { recursive: true });
+  await writeFile(ledgerPath, JSON.stringify({
+    [event.event_id]: { state: "SEND_ATTEMPTED", source_comment_id: event.source_comment_id },
+  }));
+  const github = clientFor(event.body, { matches: [{ id: "9001" }] });
+
+  await assert.rejects(() => publishWithCurrentAuthority({
+    event, issueNumber: 202, runtimeRoot, github,
+  }), /does not match live Control authority/);
+  assert.equal(github.calls.create, 0);
+  const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+  assert.equal(ledger[event.event_id].state, "SEND_ATTEMPTED");
+});
+
 test("uncertain send is reconciled without blindly reposting", async () => {
   assertImplemented();
   const event = sampleEvent();
