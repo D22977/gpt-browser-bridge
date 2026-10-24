@@ -313,15 +313,15 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
   await saveLedger(file, ledger);
   ledger[validated.event_id].state = "CLAIMED";
   await saveLedger(file, ledger);
+  const liveAuthority = await readCurrentControlAuthority(github, currentAuthority, "source-event GitHub create");
+  if (validated.control_generation !== liveAuthority.control_generation ||
+      validated.active_control_id !== liveAuthority.active_control_id ||
+      validated.control_conversation_id !== liveAuthority.control_conversation_id ||
+      expectedAuthor !== liveAuthority.publisher_login) {
+    throw new Error("source event identity does not match live Control authority");
+  }
   ledger[validated.event_id].state = "SEND_ATTEMPTED";
   await saveLedger(file, ledger);
-  try {
-    await readCurrentControlAuthority(github, currentAuthority, "source-event GitHub create");
-  } catch (error) {
-    ledger[validated.event_id].state = "CLAIMED";
-    await saveLedger(file, ledger);
-    throw error;
-  }
   let created;
   try {
     created = await github.createIssueComment(issueNumber, body);

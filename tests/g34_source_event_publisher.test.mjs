@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseActiveControlAuthority } from "../src/g34_contract.mjs";
 
-const { createSourceEvent, publishSourceEvent, markSourceEventConsumed } = await import("../src/g34_source_event_publisher.mjs").catch(() => ({}));
+const { createSourceEvent, publishSourceEvent, sourceEventPayloadBody, markSourceEventConsumed } = await import("../src/g34_source_event_publisher.mjs").catch(() => ({}));
 
 const binding = {
   card_comment_id: "5777732770",
@@ -127,6 +127,7 @@ function clientFor(body, options = {}) {
     calls,
     async getCurrentAuthorityRecords() {
       options.onAuthorityRead?.();
+      if (options.currentAuthorityRead) return options.currentAuthorityRead();
       return structuredClone(options.authorityRecords?.() ?? authorityRecords);
     },
     async findEventComments() { calls.find++; options.onFind?.(); return options.matches ?? []; },
@@ -310,6 +311,57 @@ test("publisher exact-reads current Control after event lookup and ignores calle
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
   assert.equal(ledger[event.event_id].state, "CLAIMED");
 });
+
+test("a pending authority read never leaves a durable send-attempt state", async () => {
+  assertImplemented();
+  const event = sampleEvent();
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-pending-authority-read-"));
+  let signalAuthorityRead;
+  let rejectAuthorityRead;
+  const authorityReadStarted = new Promise((resolve) => { signalAuthorityRead = resolve; });
+  const github = clientFor(event.body, {
+    onAuthorityRead: signalAuthorityRead,
+    currentAuthorityRead: () => new Promise((_resolve, reject) => { rejectAuthorityRead = reject; }),
+  });
+
+  const pendingPublish = publishSourceEvent({
+    event, issueNumber: 202, runtimeRoot, github, currentAuthority: authorityRecords,
+  });
+  await authorityReadStarted;
+  const pathToLedger = path.join(runtimeRoot, "events", "g34-source-events.json");
+  const duringRead = JSON.parse(await readFile(pathToLedger, "utf8"));
+  assert.equal(duringRead[event.event_id].state, "CLAIMED");
+
+  rejectAuthorityRead(new Error("authority read unavailable"));
+  await assert.rejects(() => pendingPublish, /authority read unavailable/);
+  const afterFailure = JSON.parse(await readFile(pathToLedger, "utf8"));
+  assert.equal(afterFailure[event.event_id].state, "CLAIMED");
+  assert.equal(github.calls.create, 0);
+});
+
+for (const [field, mutate] of [
+  ["active_control_id/control_conversation_id", (event) => {
+    event.active_control_id = "11111111-1111-1111-1111-111111111111";
+    event.control_conversation_id = event.active_control_id;
+  }],
+  ["expected_author", (event) => { event.expected_author = "untrusted-publisher"; }],
+]) {
+  test(`publisher rejects an event whose ${field} disagrees with live Control authority`, async () => {
+    assertImplemented();
+    const event = sampleEvent();
+    mutate(event);
+    event.body = sourceEventPayloadBody(event);
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), `g34-mismatched-${field.replaceAll("/", "-")}-`));
+    const github = clientFor(event.body);
+
+    await assert.rejects(() => publishWithCurrentAuthority({
+      event, issueNumber: 202, runtimeRoot, github,
+    }), /does not match live Control authority/);
+    assert.equal(github.calls.create, 0);
+    const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
+    assert.equal(ledger[event.event_id].state, "CLAIMED");
+  });
+}
 
 test("uncertain send is reconciled without blindly reposting", async () => {
   assertImplemented();
