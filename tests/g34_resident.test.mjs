@@ -1355,7 +1355,7 @@ test("resident cycle rereads the Control pointer set after publisher lookups and
     baseSha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8",
     headSha: "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14", publisherAuthor: "D22977",
   }), /current Control authority changed before source-event GitHub create/);
-  assert.equal(authorityReads, 3);
+  assert.equal(authorityReads, 4);
   assert.equal(publishedEvents, 0);
 });
 

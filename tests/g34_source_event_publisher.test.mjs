@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { parseActiveControlAuthority } from "../src/g34_contract.mjs";
+import { parseActiveControlAuthority, parseG34ReceiptFields } from "../src/g34_contract.mjs";
 
 const { createSourceEvent, publishSourceEvent, sourceEventPayloadBody, markSourceEventConsumed, beginSuccessorDelivery } = await import("../src/g34_source_event_publisher.mjs").catch(() => ({}));
 
@@ -142,6 +142,7 @@ function clientFor(body, options = {}) {
     async getIssueComment(id) {
       const pointer = Object.values(options.currentAuthorityRecords?.() ?? authorityRecords).find((record) => String(record.id) === String(id));
       if (pointer) return structuredClone(pointer);
+      if (options.sourceComments?.[String(id)]) return structuredClone(options.sourceComments[String(id)]);
       if (String(id) === "6083328488") {
         calls.sourceGet++;
         const source = sourceComment();
@@ -312,6 +313,88 @@ test("publisher binds source identity, issue, repository, and body hash before l
   }
 });
 
+test("exported publisher rejects source-derived Worker field tampering despite the genuine source hash", async () => {
+  for (const [field, value] of [
+    ["head_sha", "e".repeat(40)],
+    ["tree_sha", "f".repeat(40)],
+    ["state", "BLOCKED_NETWORK"],
+    ["agent_name", "forged-worker"],
+    ["branch", "work/forged-branch"],
+  ]) {
+    const event = sampleEvent();
+    event[field] = value;
+    event.body = sourceEventPayloadBody(event);
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), `g34-event-field-tamper-${field}-`));
+    const github = clientFor(event.body);
+    await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github }), /does not match exact Worker source receipt/);
+    assert.equal(github.calls.create, 0);
+    assert.equal(github.calls.find, 0);
+    const ledgerPath = path.join(runtimeRoot, "events", "g34-source-events.json");
+    await assert.rejects(() => readFile(ledgerPath), { code: "ENOENT" });
+  }
+});
+
+test("exported publisher reconstructs a terminal event from the exact linked Worker start", async () => {
+  const startId = "6083330000";
+  const terminalId = "6083330001";
+  const start = {
+    id: startId,
+    url: `https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-${startId}`,
+    user: { login: "D22977" },
+    body: sourceBody(),
+  };
+  const terminalBody = [
+    "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1",
+    "state: READY_FOR_FRESH_REVIEW",
+    `worker_start_comment_id: ${startId}`,
+    `card_comment_id: ${binding.card_comment_id}`,
+    `claim_comment_id: ${binding.claim_comment_id}`,
+    `acceptance_comment_id: ${binding.acceptance_comment_id}`,
+    `binding_comment_id: ${binding.binding_comment_id}`,
+    `dispatch_comment_id: ${binding.dispatch_comment_id}`,
+    `executor_identity: collaboration task ${binding.agent_name}`,
+    `agent_name: ${binding.agent_name}`,
+    `agent_session: ${binding.agent_session}`,
+    `pane: ${binding.pane}`,
+    `terminal: ${binding.terminal}`,
+    `cwd: ${binding.cwd}`,
+    `model: ${binding.model}`,
+    `reasoning_effort: ${binding.reasoning_effort}`,
+    `lease_id: ${binding.lease_id}`,
+    `attempt_id: ${binding.attempt_id}`,
+    "branch: work/gbb-g34-source-event-20261009-01",
+    "base_sha: c7d17550fdfe3ae3e06ecec352004ca3b7284c55",
+    `head_sha: ${"e".repeat(40)}`,
+    `tree_sha: ${"a".repeat(40)}`,
+  ].join("\n");
+  const source = {
+    id: terminalId,
+    url: `https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-${terminalId}`,
+    user: { login: "D22977" },
+    body: terminalBody,
+  };
+  const event = createSourceEvent({
+    sourceComment: source,
+    canonicalReceipt: parseG34ReceiptFields(source),
+    sourceIssueNumber: 202,
+    sourceRepositoryFullName: "D22977/gpt-browser-bridge",
+    eventKind: "WORKER_TERMINAL_RESULT",
+    authority,
+    binding: { ...binding, start_comment_id: startId },
+    branch: "work/gbb-g34-source-event-20261009-01",
+    baseSha: "c7d17550fdfe3ae3e06ecec352004ca3b7284c55",
+    headSha: "e".repeat(40),
+    state: "READY_FOR_FRESH_REVIEW",
+    terminalCommentId: terminalId,
+    expectedAuthor: "D22977",
+  });
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-terminal-event-reconstruction-"));
+  const github = clientFor(event.body, { sourceComments: { [startId]: start, [terminalId]: source } });
+  const result = await publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github });
+  assert.equal(result.state, "DELIVERED");
+  assert.equal(github.calls.create, 1);
+});
+
 test("overlapping publishers for one source event create at most one GitHub event comment", async () => {
   const event = sampleEvent();
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-parallel-publication-"));
@@ -388,7 +471,7 @@ test("publisher exact-reads current Control after event lookup and ignores calle
     event, issueNumber: 202, runtimeRoot, github, currentAuthority: authorityRecords,
     beforeCreate: async () => {},
   }), /current Control authority changed before source-event GitHub create/);
-  assert.deepEqual(order, ["find", "authority"]);
+  assert.deepEqual(order, ["authority", "find", "authority"]);
   assert.equal(github.calls.create, 0);
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
   assert.equal(ledger[event.event_id].state, "CLAIMED");
@@ -411,26 +494,24 @@ test("a pending authority read never leaves a durable send-attempt state", async
   });
   await authorityReadStarted;
   const pathToLedger = path.join(runtimeRoot, "events", "g34-source-events.json");
-  const duringRead = JSON.parse(await readFile(pathToLedger, "utf8"));
-  assert.equal(duringRead[event.event_id].state, "CLAIMED");
+  await assert.rejects(() => readFile(pathToLedger), { code: "ENOENT" });
 
   rejectAuthorityRead(new Error("authority read unavailable"));
   await assert.rejects(() => pendingPublish, /authority read unavailable/);
-  const afterFailure = JSON.parse(await readFile(pathToLedger, "utf8"));
-  assert.equal(afterFailure[event.event_id].state, "CLAIMED");
+  await assert.rejects(() => readFile(pathToLedger), { code: "ENOENT" });
   assert.equal(github.calls.create, 0);
   await assert.rejects(() => readFile(`${pathToLedger}.lock`), { code: "ENOENT" });
 });
 
-test("publisher reclaims an old lock only after its owner process is dead", async () => {
+test("publisher uses OS lock ownership without creating path-based lock sidecars", async () => {
   const event = sampleEvent();
-  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-dead-owner-lock-"));
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-os-lock-"));
   const lockPath = path.join(runtimeRoot, "events", "g34-source-events.json.lock");
   await mkdir(path.dirname(lockPath), { recursive: true });
-  await writeFile(lockPath, JSON.stringify({ pid: 2147483647, token: "dead-owner", created_at: 1 }));
+  await writeFile(lockPath, "partial owner record");
   const result = await publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github: clientFor(event.body) });
   assert.equal(result.state, "DELIVERED");
-  await assert.rejects(() => readFile(lockPath), { code: "ENOENT" });
+  assert.equal(await readFile(lockPath, "utf8"), "partial owner record");
 });
 
 for (const [field, mutate] of [
@@ -452,10 +533,9 @@ for (const [field, mutate] of [
 
     await assert.rejects(() => publishWithCurrentAuthority({
       event, issueNumber: 202, runtimeRoot, github,
-    }), /does not match live Control authority/);
+    }), /does not match live Control authority|does not match exact Worker source receipt|exact current Control publisher/);
     assert.equal(github.calls.create, 0);
-    const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
-    assert.equal(ledger[event.event_id].state, "CLAIMED");
+    await assert.rejects(() => readFile(path.join(runtimeRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
   });
 }
 
@@ -470,7 +550,7 @@ test("existing-event dedup validates live Control authority before recording DEL
 
   await assert.rejects(() => publishWithCurrentAuthority({
     event, issueNumber: 202, runtimeRoot, github,
-  }), /does not match live Control authority/);
+  }), /does not match live Control authority|does not match exact Worker source receipt/);
   assert.equal(github.calls.create, 0);
   const ledgerPath = path.join(runtimeRoot, "events", "g34-source-events.json");
   let ledger = {};
@@ -494,7 +574,7 @@ test("SEND_ATTEMPTED recovery validates live authority before reconciling an exi
 
   await assert.rejects(() => publishWithCurrentAuthority({
     event, issueNumber: 202, runtimeRoot, github,
-  }), /does not match live Control authority/);
+  }), /does not match live Control authority|does not match exact Worker source receipt/);
   assert.equal(github.calls.create, 0);
   const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
   assert.equal(ledger[event.event_id].state, "SEND_ATTEMPTED");

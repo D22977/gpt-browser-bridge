@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdir, open, readFile, unlink } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, readFile } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import path from "node:path";
 import writeFileAtomic from "write-file-atomic";
 import { parseG34ReceiptFields, parseActiveControlAuthority, sourceEventSchema } from "./g34_contract.mjs";
@@ -228,60 +230,60 @@ async function saveLedger(file, ledger) {
   await writeFileAtomic(file, JSON.stringify(ledger, null, 2) + "\n");
 }
 
-const LEDGER_LOCK_STALE_MS = 30_000;
-const LEDGER_LOCK_WAIT_MS = 15_000;
+const LEDGER_MUTEX_WAIT_MS = 15_000;
+
+async function acquireLedgerMutex(runtimeRoot) {
+  if (process.platform !== "win32") throw new Error("G34 ledger requires the Windows abandoned-mutex lock provider");
+  const mutexSuffix = sha256Hex(path.resolve(runtimeRoot).toLocaleLowerCase("en-US"));
+  const mutexName = `Global\\GBB-G34-${mutexSuffix}`;
+  const quotedName = mutexName.replaceAll("'", "''");
+  const script = `$ErrorActionPreference='Stop'; $name='${quotedName}'; $mutex=[System.Threading.Mutex]::new($false,$name); $held=$false; try { try { $held=$mutex.WaitOne(${LEDGER_MUTEX_WAIT_MS}) } catch [System.Threading.AbandonedMutexException] { $held=$true }; if (-not $held) { [Console]::Out.WriteLine('GBB_LOCK_TIMEOUT'); [Console]::Out.Flush(); exit 2 }; [Console]::Out.WriteLine('GBB_LOCK_ACQUIRED'); [Console]::Out.Flush(); [Console]::In.ReadLine() | Out-Null } finally { if ($held) { $mutex.ReleaseMutex() }; $mutex.Dispose() }`;
+  const child = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+  const lines = createInterface({ input: child.stdout });
+  let timer;
+  const acquire = new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, release) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) { lines.close(); child.kill(); reject(error); } else resolve(release);
+    };
+    lines.on("line", (line) => {
+      if (line === "GBB_LOCK_ACQUIRED") {
+        finish(null, async () => new Promise((done) => {
+          child.once("close", (...args) => { lines.close(); done(...args); });
+          child.stdin.end("release\n");
+          setTimeout(() => { if (child.exitCode === null) child.kill(); }, 3000).unref();
+        }));
+      } else if (line === "GBB_LOCK_TIMEOUT") {
+        finish(new Error("timed out waiting for exclusive G34 Windows mutex"));
+      }
+    });
+    child.once("error", (error) => finish(new Error(`cannot start G34 mutex provider: ${error.message}`)));
+    child.once("close", (code) => {
+      if (!settled) finish(new Error(`G34 mutex provider exited before acquisition (${code}): ${stderr.trim()}`));
+    });
+    timer = setTimeout(() => {
+      child.kill();
+      finish(new Error("timed out starting G34 Windows mutex provider"));
+    }, LEDGER_MUTEX_WAIT_MS + 10_000);
+  });
+  return acquire;
+}
 
 async function withLedgerLock(runtimeRoot, operation) {
   const file = ledgerPathFor(runtimeRoot);
-  const lockPath = `${file}.lock`;
-  await mkdir(path.dirname(file), { recursive: true });
-  const token = `${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
-  const deadline = Date.now() + LEDGER_LOCK_WAIT_MS;
-  let handle;
-  while (!handle) {
-    try {
-      handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(JSON.stringify({ pid: process.pid, token, created_at: Date.now() }));
-      await handle.sync();
-    } catch (error) {
-      if (handle) {
-        await handle.close().catch(() => {});
-        await unlink(lockPath).catch((unlinkError) => { if (unlinkError.code !== "ENOENT") throw unlinkError; });
-        handle = undefined;
-      }
-      if (error.code !== "EEXIST") throw error;
-      let owner;
-      let lockContents;
-      try {
-        lockContents = await readFile(lockPath, "utf8");
-        owner = JSON.parse(lockContents);
-      } catch (readError) {
-        if (readError.code !== "ENOENT") throw new Error(`cannot inspect G34 ledger lock: ${readError.message}`);
-      }
-      let ownerAlive = true;
-      if (Number.isInteger(owner?.pid) && owner.pid > 0) {
-        try { process.kill(owner.pid, 0); }
-        catch (probeError) { ownerAlive = probeError.code !== "ESRCH"; }
-      }
-      if (owner && !ownerAlive && Date.now() - Number(owner.created_at ?? Date.now()) >= LEDGER_LOCK_STALE_MS) {
-        try {
-          if (await readFile(lockPath, "utf8") === lockContents) await unlink(lockPath);
-        } catch (recoveryError) {
-          if (recoveryError.code !== "ENOENT") throw recoveryError;
-        }
-      }
-      if (Date.now() >= deadline) throw new Error("timed out waiting for exclusive G34 ledger lock");
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-  }
+  const release = await acquireLedgerMutex(runtimeRoot);
   try {
     return await operation(file);
   } finally {
-    let current;
-    try { current = JSON.parse(await readFile(lockPath, "utf8")); }
-    catch (error) { if (error.code !== "ENOENT") throw error; }
-    await handle.close();
-    if (current?.token === token) await unlink(lockPath).catch((error) => { if (error.code !== "ENOENT") throw error; });
+    await release();
   }
 }
 
@@ -423,6 +425,7 @@ export async function publishSourceEvent(args) {
       !expectedAuthor || typeof github?.getIssueComment !== "function") {
     throw new Error("exact upstream source comment metadata is required");
   }
+  if (!args.currentAuthority) throw new Error("exact current Control authority snapshot is required");
   return withLedgerLock(args.runtimeRoot, async () => {
     const exactSource = await github.getIssueComment(validated.source_comment_id);
     if (!exactSource || String(exactSource.id) !== validated.source_comment_id ||
@@ -431,8 +434,221 @@ export async function publishSourceEvent(args) {
         sha256Hex(exactSource.body) !== validated.source_body_sha256) {
       throw new Error("exact upstream source comment does not match the event identity, issue, repository, author, or body hash");
     }
+    const liveAuthority = await readCurrentControlAuthority(github, args.currentAuthority, "source-event reconstruction");
+    if (expectedAuthor !== liveAuthority.publisher_login) {
+      throw new Error("source event publisher does not match the exact current Control publisher");
+    }
+    const receipt = parseG34ReceiptFields(exactSource);
+    const legacyG22Start = receipt.marker === "GBB_G036_211_WORKER_CONSUMED_STARTED_V1";
+    const legacyG22Terminal = receipt.marker === "GBB_G34_WORKER_TERMINAL_RESULT_V1";
+    const eventKind = legacyG22Start || receipt.marker === "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1"
+      ? "WORKER_STARTED"
+      : legacyG22Terminal || receipt.marker === "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1" ? "WORKER_TERMINAL_RESULT" : null;
+    if (legacyG22Start || legacyG22Terminal) {
+      const reconstructed = await reconstructLegacyG22Event({
+        event, receipt, exactSource, github, issueNumber, repositoryFullName, liveAuthority,
+        eventKind, isLegacyStart: legacyG22Start,
+      });
+      if (reconstructed.body !== event.body) throw new Error("source event does not match exact Worker source receipt");
+      return publishSourceEventUnlocked(args);
+    }
+    if (!eventKind || (eventKind === "WORKER_STARTED" && receipt.state !== "CONSUMED_STARTED") ||
+        (eventKind === "WORKER_TERMINAL_RESULT" &&
+          !(receipt.state === "READY_FOR_FRESH_REVIEW" || /^BLOCKED_[A-Z0-9_]+$/.test(receipt.state ?? "")))) {
+      throw new Error("exact source comment is not an allowed Worker start or terminal receipt");
+    }
+    let bindingReceipt = receipt;
+    let startComment;
+    if (eventKind === "WORKER_TERMINAL_RESULT") {
+      const startId = String(receipt.worker_start_comment_id ?? "");
+      if (!/^[1-9][0-9]*$/.test(startId) || startId === validated.source_comment_id) {
+        throw new Error("terminal source event lacks a distinct exact Worker start receipt");
+      }
+      startComment = await github.getIssueComment(startId);
+      if (!startComment || String(startComment.id) !== startId ||
+          commentIssueNumber(startComment, repositoryFullName) !== sourceIssueNumber ||
+          startComment.user?.login !== liveAuthority.publisher_login || typeof startComment.body !== "string") {
+        throw new Error("terminal source event Worker start is not an exact comment from the active publisher on the same issue");
+      }
+      bindingReceipt = parseG34ReceiptFields(startComment);
+      if (bindingReceipt.marker !== "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1" ||
+          bindingReceipt.state !== "CONSUMED_STARTED" || bindingReceipt.branch !== receipt.branch ||
+          bindingReceipt.base_sha !== receipt.base_sha) {
+        throw new Error("terminal source event does not match its exact Worker start branch or base");
+      }
+      for (const key of ["card_comment_id", "claim_comment_id", "acceptance_comment_id", "binding_comment_id",
+        "dispatch_comment_id", "agent_name", "agent_session", "pane", "terminal", "cwd", "model",
+        "reasoning_effort", "executor_identity", "lease_id", "attempt_id"]) {
+        if (receipt[key] !== undefined && receipt[key] !== bindingReceipt[key]) {
+          throw new Error(`terminal source event ${key} does not match its exact Worker start`);
+        }
+      }
+    }
+    const binding = {
+      card_comment_id: bindingReceipt.card_comment_id,
+      claim_comment_id: bindingReceipt.claim_comment_id,
+      acceptance_comment_id: bindingReceipt.acceptance_comment_id,
+      binding_comment_id: bindingReceipt.binding_comment_id,
+      dispatch_comment_id: bindingReceipt.dispatch_comment_id,
+      executor_identity: bindingReceipt.executor_identity,
+      agent_name: bindingReceipt.agent_name,
+      agent_session: bindingReceipt.agent_session,
+      pane: bindingReceipt.pane,
+      terminal: bindingReceipt.terminal,
+      cwd: bindingReceipt.cwd,
+      model: bindingReceipt.model,
+      reasoning_effort: bindingReceipt.reasoning_effort,
+      lease_id: bindingReceipt.lease_id,
+      attempt_id: bindingReceipt.attempt_id,
+      ...(startComment ? { start_comment_id: String(startComment.id) } : {}),
+    };
+    const receiptHead = receipt.head_sha ?? receipt.remote_commit ?? receipt.local_tested_commit;
+    const reconstructed = createSourceEvent({
+      sourceComment: exactSource,
+      canonicalReceipt: receipt,
+      sourceIssueNumber,
+      sourceRepositoryFullName,
+      eventKind,
+      authority: liveAuthority,
+      binding,
+      branch: receipt.branch,
+      baseSha: receipt.base_sha,
+      headSha: receiptHead,
+      state: receipt.state,
+      ...(eventKind === "WORKER_TERMINAL_RESULT" ? { terminalCommentId: String(exactSource.id) } : {}),
+      expectedAuthor: liveAuthority.publisher_login,
+    });
+    if (reconstructed.body !== event.body || reconstructed.expected_author !== expectedAuthor) {
+      throw new Error("source event does not match exact Worker source receipt");
+    }
     return publishSourceEventUnlocked(args);
   });
+}
+
+async function reconstructLegacyG22Event({ event, receipt, exactSource, github, issueNumber, repositoryFullName, liveAuthority, eventKind, isLegacyStart }) {
+  const readLinked = async (id, label) => {
+    const comment = await github.getIssueComment(String(id));
+    if (!comment || String(comment.id) !== String(id) ||
+        commentIssueNumber(comment, repositoryFullName) !== issueNumber ||
+        comment.user?.login !== liveAuthority.publisher_login || typeof comment.body !== "string") {
+      throw new Error(`G22 ${label} is not an exact comment from the active publisher on the source issue`);
+    }
+    return { comment, fields: parseG34ReceiptFields(comment) };
+  };
+  const readPointer = (value, exactRead = true) => {
+    const match = new RegExp(`^#${issueNumber}/([1-9][0-9]*)${exactRead ? " exact-read" : ""}$`).exec(String(value ?? ""));
+    if (!match) throw new Error("G22 Worker start has a malformed exact chain pointer");
+    return match[1];
+  };
+  const startId = isLegacyStart ? String(exactSource.id) : String(event.worker_start_comment_id ?? "");
+  if (!/^[1-9][0-9]*$/.test(startId)) throw new Error("G22 terminal source event lacks its exact Worker start pointer");
+  const startRecord = isLegacyStart ? { comment: exactSource, fields: receipt } : await readLinked(startId, "Worker start");
+  const start = startRecord.fields;
+  if (String(startRecord.comment.id) !== startId || start.marker !== "GBB_G036_211_WORKER_CONSUMED_STARTED_V1" ||
+      start.state !== "CONSUMED_STARTED" || start.role !== "Worker" || start.repository !== repositoryFullName ||
+      start.generation !== "22") throw new Error("G22 Worker start receipt identity or state is invalid");
+  const routeId = readPointer(start.route_authority, false);
+  const claimId = readPointer(start.claim_requested, true);
+  const acceptanceId = readPointer(start.claim_accepted, true);
+  const [routeRecord, claimRecord, acceptanceRecord] = await Promise.all([
+    readLinked(routeId, "route authority"), readLinked(claimId, "claim"), readLinked(acceptanceId, "acceptance"),
+  ]);
+  const route = routeRecord.fields;
+  const claim = claimRecord.fields;
+  const accepted = acceptanceRecord.fields;
+  const nextShift = route.new_shift;
+  const task = start.task_identity;
+  const attempt = start.attempt_id;
+  const lease = start.lease_id;
+  const branch = nextShift?.branch;
+  const base = nextShift?.assigned_base_sha;
+  const baseTree = nextShift?.assigned_base_tree;
+  const chainChecks = [
+    ["route marker", route.marker === "GBB_G036_211_CONTROL_ROUTE_AMENDMENT_G22_V1"],
+    ["route state", route.state === "ONE_FRESH_COLLABORATION_GPT6_LUNA_LOW_WORKER_ROUTE_AUTHORIZED"],
+    ["route role", route.recorded_by_role === "ACTIVE_CONTROL"],
+    ["route repository", route.repository === repositoryFullName],
+    ["route work order", route.work_order === `#${issueNumber} / GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1`],
+    ["route active Control", /^generation 036 \/ conversation [0-9a-f-]{36}$/i.test(route.active_control ?? "")],
+    ["route task", nextShift?.executor_task_identity === task],
+    ["route Worker role", nextShift?.role === "Worker"],
+    ["route lease", nextShift?.lease_id === lease],
+    ["route attempt", nextShift?.attempt_id === attempt],
+    ["route model", nextShift?.model_effort === "gpt-6-luna / low"],
+    ["claim marker", claim.marker === "GBB_G036_211_WORKER_CLAIM_REQUESTED_V1"],
+    ["claim state", claim.state === "CLAIM_REQUESTED"],
+    ["claim generation", claim.generation === "22"],
+    ["claim role", claim.role === "Worker"],
+    ["claim repository", claim.repository === repositoryFullName],
+    ["claim task", claim.task_identity === task],
+    ["claim attempt", claim.attempt_id === attempt],
+    ["claim lease", claim.lease_id === lease],
+    ["claim branch", claim.branch === branch],
+    ["claim base", claim.assigned_base_sha === base],
+    ["claim tree", claim.assigned_base_tree === baseTree],
+    ["claim route", claim.route_authority === `#${issueNumber}/${routeId}`],
+    ["acceptance marker", accepted.marker === "GBB_G036_211_WORKER_CLAIM_ACCEPTED_V1"],
+    ["acceptance state", accepted.state === "CLAIM_ACCEPTED"],
+    ["acceptance generation", accepted.control_generation === "036"],
+    ["acceptance repository", accepted.repository === repositoryFullName],
+    ["acceptance role", accepted.role === "Worker"],
+    ["acceptance task", accepted.worker_task_identity === task],
+    ["acceptance attempt", accepted.attempt_id === attempt],
+    ["acceptance lease", accepted.lease_id === lease],
+    ["acceptance branch", accepted.branch === branch],
+    ["acceptance base", accepted.assigned_base_sha === base],
+    ["acceptance tree", accepted.assigned_base_tree === baseTree],
+    ["acceptance claim", accepted.claim_request === `#${issueNumber}/${claimId} exact-read`],
+    ["acceptance route", accepted.route_authority === `#${issueNumber}/${routeId} exact-read`],
+    ["start task", start.task_identity === task],
+    ["start lease", start.lease_id === lease],
+    ["start attempt", start.attempt_id === attempt],
+    ["start branch", start.branch === branch],
+    ["start base", start.base_sha === base],
+    ["start tree", start.base_tree === baseTree],
+  ];
+  const failedChecks = chainChecks.filter(([, passed]) => !passed).map(([name]) => name);
+  if (failedChecks.length) throw new Error(`G22 exact Worker route, claim, acceptance, or start chain does not match: ${failedChecks.join(", ")}`);
+  const state = isLegacyStart ? "CONSUMED_STARTED" : receipt.state;
+  const head = isLegacyStart ? base : receipt.candidate_exact_head_sha;
+  const tree = isLegacyStart ? baseTree : receipt.candidate_tree_sha;
+  if (!isLegacyStart && (receipt.generation !== "22" || receipt.task_identity !== task ||
+      receipt.lease_id !== lease || receipt.candidate_repository !== repositoryFullName ||
+      receipt.candidate_branch !== branch || receipt.candidate_base_sha !== base || receipt.commit_parent !== base ||
+      !(state === "READY_FOR_FRESH_REVIEW" || /^BLOCKED_[A-Z0-9_]+$/.test(state ?? "")) ||
+      String(event.worker_start_comment_id) !== startId)) {
+    throw new Error("G22 terminal receipt does not match the exact authenticated Worker start chain");
+  }
+  const canonical = sourceEventSchema.parse({
+    marker: "GITHUB_SOURCE_EVENT_V1",
+    event_id: sha256Hex(JSON.stringify([liveAuthority.control_generation, eventKind, String(exactSource.id)])),
+    control_generation: liveAuthority.control_generation,
+    active_control_id: liveAuthority.active_control_id,
+    control_conversation_id: liveAuthority.control_conversation_id,
+    event_kind: eventKind,
+    source_comment_id: String(exactSource.id),
+    source_body_sha256: sha256Hex(exactSource.body),
+    card_comment_id: String(issueNumber),
+    claim_comment_id: claimId,
+    acceptance_comment_id: acceptanceId,
+    binding_comment_id: routeId,
+    dispatch_comment_id: routeId,
+    agent_name: task,
+    agent_session: attempt,
+    pane: "collaboration-managed",
+    terminal: "collaboration-managed",
+    cwd: start.intended_fresh_worktree_path,
+    model: "gpt-6-luna",
+    reasoning_effort: "low",
+    state,
+    branch,
+    base_sha: base,
+    head_sha: head,
+    tree_sha: tree,
+    ...(isLegacyStart ? {} : { terminal_comment_id: String(exactSource.id), worker_start_comment_id: startId }),
+    user_relay_count: 0,
+  });
+  return { body: sourceEventPayloadBody(canonical) };
 }
 
 async function markSourceEventConsumedUnlocked({ eventId, sourceCommentId, controlCommentId, runtimeRoot }) {
