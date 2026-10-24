@@ -1,5 +1,5 @@
-import { parseG34ReceiptFields, parseActiveControlAuthority } from "./g34_contract.mjs";
-import { createSourceEvent, sourceEventPayloadBody, publishSourceEvent, readSourceEventPublication, beginSuccessorDelivery, recordSuccessorDelivery } from "./g34_source_event_publisher.mjs";
+import { parseG34ReceiptFields } from "./g34_contract.mjs";
+import { createSourceEvent, sourceEventPayloadBody, publishSourceEvent, readSourceEventPublication, beginSuccessorDelivery, recordSuccessorDelivery, readCurrentControlAuthority } from "./g34_source_event_publisher.mjs";
 
 const nonEmpty = (value) => typeof value === "string" && value.trim().length > 0;
 const executorTaskIdentity = (value) => {
@@ -18,38 +18,6 @@ function receiptFields(receipt) {
     throw new Error("exact #88 Control ACK metadata is required");
   }
   return { ...parseG34ReceiptFields(receipt), id, author: receipt.user.login, url: receipt.url, body: receipt.body };
-}
-
-async function readCurrentControlAuthority(github, expectedAuthority, phase) {
-  if (typeof github?.getIssueComment !== "function" ||
-      typeof github?.getCurrentAuthorityRecords !== "function") {
-    throw new Error("exact current GitHub Control authority reads are required");
-  }
-  const liveRecords = await github.getCurrentAuthorityRecords();
-  const live = {};
-  for (const key of ["switchReceipt", "index43", "index81", "rehydrationAck"]) {
-    const pointer = liveRecords?.[key];
-    if (!pointer || !/^[1-9][0-9]*$/.test(String(pointer.id ?? ""))) {
-      throw new Error("current Control authority pointer set is incomplete");
-    }
-    const exactPointer = await github.getIssueComment(String(pointer.id));
-    if (!exactPointer || String(exactPointer.id) !== String(pointer.id) ||
-        exactPointer.url !== pointer.url || exactPointer.body !== pointer.body ||
-        exactPointer.user?.login !== pointer.user?.login) {
-      throw new Error("current Control authority exact reread mismatch");
-    }
-    live[key] = exactPointer;
-  }
-  const liveAuthority = parseActiveControlAuthority(live);
-  const expectedRecords = expectedAuthority?.source_records ?? expectedAuthority;
-  const expected = parseActiveControlAuthority(expectedRecords);
-  const pointerKeys = ["switch_comment_id", "index43_comment_id", "index81_comment_id", "rehydration_ack_comment_id"];
-  if (liveAuthority.control_generation !== expected.control_generation ||
-      liveAuthority.active_control_id !== expected.active_control_id ||
-      pointerKeys.some((key) => liveAuthority.record_ids[key] !== expected.record_ids[key])) {
-    throw new Error(`current Control authority changed before ${phase}`);
-  }
-  return liveAuthority;
 }
 
 export async function authorizeControlSuccessor({ event, publication, authority, controlReceipt, github }) {
@@ -628,8 +596,7 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
     });
     await readCurrentControlAuthority(github, activeAuthority, "resident publication");
     const publication = await publishSourceEvent({
-      event, issueNumber, runtimeRoot, github, repositoryFullName,
-      beforeCreate: () => readCurrentControlAuthority(github, activeAuthority, "source-event GitHub create"),
+      event, issueNumber, runtimeRoot, github, repositoryFullName, currentAuthority: activeAuthority,
     });
     results.push({ event: { ...event, comment_id: publication.comment_id }, publication });
   }

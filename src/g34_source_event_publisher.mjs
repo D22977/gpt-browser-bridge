@@ -44,6 +44,38 @@ export function sourceEventPayloadBody(event) {
   return eventBody(sourceEventSchema.parse(payload));
 }
 
+export async function readCurrentControlAuthority(github, expectedAuthority, phase) {
+  if (typeof github?.getIssueComment !== "function" ||
+      typeof github?.getCurrentAuthorityRecords !== "function") {
+    throw new Error("exact current GitHub Control authority reads are required");
+  }
+  const liveRecords = await github.getCurrentAuthorityRecords();
+  const live = {};
+  for (const key of ["switchReceipt", "index43", "index81", "rehydrationAck"]) {
+    const pointer = liveRecords?.[key];
+    if (!pointer || !/^[1-9][0-9]*$/.test(String(pointer.id ?? ""))) {
+      throw new Error("current Control authority pointer set is incomplete");
+    }
+    const exactPointer = await github.getIssueComment(String(pointer.id));
+    if (!exactPointer || String(exactPointer.id) !== String(pointer.id) ||
+        exactPointer.url !== pointer.url || exactPointer.body !== pointer.body ||
+        exactPointer.user?.login !== pointer.user?.login) {
+      throw new Error("current Control authority exact reread mismatch");
+    }
+    live[key] = exactPointer;
+  }
+  const liveAuthority = parseActiveControlAuthority(live);
+  const expectedRecords = expectedAuthority?.source_records ?? expectedAuthority;
+  const expected = parseActiveControlAuthority(expectedRecords);
+  const pointerKeys = ["switch_comment_id", "index43_comment_id", "index81_comment_id", "rehydration_ack_comment_id"];
+  if (liveAuthority.control_generation !== expected.control_generation ||
+      liveAuthority.active_control_id !== expected.active_control_id ||
+      pointerKeys.some((key) => liveAuthority.record_ids[key] !== expected.record_ids[key])) {
+    throw new Error(`current Control authority changed before ${phase}`);
+  }
+  return liveAuthority;
+}
+
 export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssueNumber, sourceRepositoryFullName, eventKind, authority, binding, branch, baseSha, headSha, state, terminalCommentId, reviewCommentId, expectedAuthor }) {
   if (!sourceComment || !/^[1-9][0-9]*$/.test(String(sourceComment.id ?? "")) || typeof sourceComment.body !== "string") {
     throw new Error("source executor comment metadata is required");
@@ -209,14 +241,14 @@ async function verifyComment(event, issueNumber, repositoryFullName, metadata, g
   return exact;
 }
 
-export async function publishSourceEvent({ event, issueNumber, runtimeRoot, github, beforeCreate, repositoryFullName = "D22977/gpt-browser-bridge" }) {
+export async function publishSourceEvent({ event, issueNumber, runtimeRoot, github, currentAuthority, repositoryFullName = "D22977/gpt-browser-bridge" }) {
   const { body, expected_author: expectedAuthor, source_issue_number: sourceIssueNumber, source_repository_full_name: sourceRepositoryFullName, ...fields } = event ?? {};
   const validated = sourceEventSchema.parse(fields);
   if (typeof body !== "string" || body !== sourceEventPayloadBody(event) || body !== eventBody(validated) || !expectedAuthor ||
       sourceIssueNumber !== issueNumber || sourceRepositoryFullName !== repositoryFullName) {
     throw new Error("source event body and expected author are required");
   }
-  if (typeof beforeCreate !== "function") throw new Error("exact current Control authority pre-create guard is required");
+  if (!currentAuthority) throw new Error("exact current Control authority snapshot is required");
   if (!Number.isInteger(issueNumber) || issueNumber < 1) throw new Error("valid issueNumber is required");
   for (const method of ["findEventComments", "createIssueComment", "getIssueComment"]) {
     if (typeof github?.[method] !== "function") throw new Error(`GitHub client is missing ${method}`);
@@ -284,7 +316,7 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
   ledger[validated.event_id].state = "SEND_ATTEMPTED";
   await saveLedger(file, ledger);
   try {
-    await beforeCreate();
+    await readCurrentControlAuthority(github, currentAuthority, "source-event GitHub create");
   } catch (error) {
     ledger[validated.event_id].state = "CLAIMED";
     await saveLedger(file, ledger);

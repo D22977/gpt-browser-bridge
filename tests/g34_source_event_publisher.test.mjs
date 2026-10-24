@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { parseActiveControlAuthority } from "../src/g34_contract.mjs";
 
 const { createSourceEvent, publishSourceEvent, markSourceEventConsumed } = await import("../src/g34_source_event_publisher.mjs").catch(() => ({}));
 
@@ -31,6 +32,29 @@ const authority = {
   active_control_id: "6ac3b22a-a830-83ee-bd71-85838e5f1392",
   control_conversation_id: "6ac3b22a-a830-83ee-bd71-85838e5f1392",
 };
+const authorityRecords = {
+  switchReceipt: {
+    id: "9101", url: "https://github.com/D22977/gpt-browser-bridge/issues/88#issuecomment-9101",
+    user: { login: "D22977" },
+    body: `CONTROL_GENERATION_ATOMIC_SWITCH_V1\nstate: ACTIVE_SWITCH_COMMITTED_READBACK_REQUIRED\n\nOLD_CONTROL\ngeneration: 033\nstatus_after: RETIRED\n\nNEW_CONTROL\ngeneration: 034\nconversation_id: ${authority.active_control_id}\nstatus_after: ACTIVE\nsingle_active_control: true`,
+  },
+  index43: {
+    id: "9102", url: "https://github.com/D22977/gpt-browser-bridge/issues/43#issuecomment-9102",
+    user: { login: "D22977" },
+    body: "CURRENT_REHYDRATION_INDEX_V1\ncontrol_generation: 034 ACTIVE\n\nOWNER_RESTORATION_AUTHORITY_AND_ARCH_RECONCILIATION\nactive g34 switch: #88/9101 exact-read",
+  },
+  index81: {
+    id: "9103", url: "https://github.com/D22977/gpt-browser-bridge/issues/81#issuecomment-9103",
+    user: { login: "D22977" },
+    body: `CURRENT_REGISTRY_INDEX_V1\ncontrol_generation: 034 ACTIVE\ncurrent_control: #43/9102 exact-read\nactive_control_id: ${authority.active_control_id}\nsingle_active_control: true`,
+  },
+  rehydrationAck: {
+    id: "9104", url: "https://github.com/D22977/gpt-browser-bridge/issues/88#issuecomment-9104",
+    user: { login: "D22977" },
+    body: `ACTIVE_CONTROL_REHYDRATION_ACK_V1\nstate: ACTIVE_REHYDRATED_ACKNOWLEDGED\ngeneration: 034\nconversation_id: ${authority.active_control_id}\n\nREQUEST_AND_SWITCH\natomic_switch: #88/9101 exact-read\n\nACTIVE_STATE\nsole_active_control_generation: 034\nsole_active_control_identity_match: true\nsingle_active_control: true\nstate_pointer_consistency: matched`,
+  },
+};
+parseActiveControlAuthority(authorityRecords);
 
 const sourceBody = (overrides = {}) => {
   const fields = {
@@ -101,15 +125,22 @@ function clientFor(body, options = {}) {
   const calls = { create: 0, exactGet: 0, find: 0 };
   return {
     calls,
-    async findEventComments() { calls.find++; return options.matches || []; },
+    async getCurrentAuthorityRecords() {
+      options.onAuthorityRead?.();
+      return structuredClone(options.authorityRecords?.() ?? authorityRecords);
+    },
+    async findEventComments() { calls.find++; options.onFind?.(); return options.matches ?? []; },
     async createIssueComment(issueNumber, postedBody) {
       calls.create++;
+      options.onCreate?.();
       assert.equal(issueNumber, 202);
       assert.equal(postedBody, body);
       if (options.createError) throw options.createError;
       return { id: "9001" };
     },
     async getIssueComment(id) {
+      const pointer = Object.values(options.currentAuthorityRecords?.() ?? authorityRecords).find((record) => String(record.id) === String(id));
+      if (pointer) return structuredClone(pointer);
       calls.exactGet++;
       assert.equal(id, "9001");
       if (options.getError) throw options.getError;
@@ -118,8 +149,23 @@ function clientFor(body, options = {}) {
   };
 }
 
-function publishWithTestGuard(args) {
-  return publishSourceEvent({ ...args, beforeCreate: args.beforeCreate ?? (async () => {}) });
+function publishWithCurrentAuthority(args) {
+  const currentAuthority = args.currentAuthority ?? authorityRecords;
+  const sourceGithub = args.github;
+  const liveRecords = () => args.liveAuthorityRecords?.() ?? currentAuthority;
+  const github = {
+    ...sourceGithub,
+    async getCurrentAuthorityRecords() { return structuredClone(liveRecords()); },
+    async getIssueComment(id) {
+      const pointer = Object.values(liveRecords()).find((record) => String(record.id) === String(id));
+      return pointer ? structuredClone(pointer) : sourceGithub.getIssueComment(id);
+    },
+  };
+  return publishSourceEvent({
+    ...args,
+    currentAuthority,
+    github,
+  });
 }
 
 test("source-event exports exist", () => {
@@ -219,7 +265,7 @@ test("publisher persists before sending and exact-reads the created GitHub comme
   const event = sampleEvent();
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-events-"));
   const github = clientFor(event.body);
-  const result = await publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github });
+  const result = await publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github });
   assert.equal(result.state, "DELIVERED");
   assert.deepEqual(github.calls, { create: 1, exactGet: 1, find: 1 });
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
@@ -227,37 +273,39 @@ test("publisher persists before sending and exact-reads the created GitHub comme
   assert.equal(ledger[event.event_id].comment_id, "9001");
 });
 
-test("publisher requires a current-Control guard at the GitHub create boundary", async () => {
+test("publisher exact-reads current Control after event lookup and ignores caller no-op guards", async () => {
   assertImplemented();
   const event = sampleEvent();
-  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-pre-create-guard-required-"));
-  const github = clientFor(event.body);
-  await assert.rejects(() => publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github }), /pre-create guard is required/);
-  assert.equal(github.calls.create, 0);
-
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-pre-create-authority-race-"));
   const order = [];
-  const orderedGithub = {
-    ...github,
-    async findEventComments() { order.push("find"); return []; },
-    async createIssueComment(...args) { order.push("create"); return github.createIssueComment(...args); },
-  };
-  await publishSourceEvent({
-    event, issueNumber: 202, runtimeRoot: await mkdtemp(path.join(tmpdir(), "g34-pre-create-order-")),
-    github: orderedGithub,
-    beforeCreate: async () => { order.push("authority"); assert.equal(order.at(-2), "find"); },
+  let live = structuredClone(authorityRecords);
+  const updated = structuredClone(authorityRecords);
+  const old43 = String(updated.index43.id);
+  const new43 = "9112";
+  const new81 = "9113";
+  updated.index43.id = new43;
+  updated.index43.url = `https://github.com/D22977/gpt-browser-bridge/issues/43#issuecomment-${new43}`;
+  updated.index81.id = new81;
+  updated.index81.url = `https://github.com/D22977/gpt-browser-bridge/issues/81#issuecomment-${new81}`;
+  updated.index81.body = updated.index81.body.replace(`#43/${old43}`, `#43/${new43}`);
+  parseActiveControlAuthority(updated);
+  const github = clientFor(event.body, {
+    authorityRecords: () => live,
+    currentAuthorityRecords: () => live,
+    onFind: () => { order.push("find"); live = updated; },
+    onAuthorityRead: () => order.push("authority"),
+    onCreate: () => order.push("create"),
   });
-  assert.deepEqual(order.slice(-3), ["find", "authority", "create"]);
-});
-
-test("publisher does not create a source event when the final authority guard rejects", async () => {
-  assertImplemented();
-  const event = sampleEvent();
-  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-pre-create-guard-fails-"));
-  const github = clientFor(event.body);
+  const missingAuthorityRoot = await mkdtemp(path.join(tmpdir(), "g34-no-authority-snapshot-"));
   await assert.rejects(() => publishSourceEvent({
-    event, issueNumber: 202, runtimeRoot, github,
-    beforeCreate: async () => { throw new Error("current Control authority changed before source-event GitHub create"); },
-  }), /authority changed before source-event GitHub create/);
+    event, issueNumber: 202, runtimeRoot: missingAuthorityRoot,
+    github: clientFor(event.body), beforeCreate: async () => {},
+  }), /current Control authority snapshot is required/);
+  await assert.rejects(() => publishSourceEvent({
+    event, issueNumber: 202, runtimeRoot, github, currentAuthority: authorityRecords,
+    beforeCreate: async () => {},
+  }), /current Control authority changed before source-event GitHub create/);
+  assert.deepEqual(order, ["find", "authority"]);
   assert.equal(github.calls.create, 0);
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
   assert.equal(ledger[event.event_id].state, "CLAIMED");
@@ -268,8 +316,8 @@ test("uncertain send is reconciled without blindly reposting", async () => {
   const event = sampleEvent();
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-events-"));
   const github = clientFor(event.body, { createError: new Error("response lost") });
-  await assert.rejects(() => publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github }), /UNCERTAIN_SEND/);
-  const retry = await publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github });
+  await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github }), /UNCERTAIN_SEND/);
+  const retry = await publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github });
   assert.equal(retry.state, "UNCERTAIN_SEND");
   assert.equal(github.calls.create, 1);
 });
@@ -294,7 +342,7 @@ test("a repeated resident publication preserves uncertain successor delivery and
       return { id, url: "https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-9001", user: { login: "D22977" }, body: event.body };
     },
   };
-  assert.equal((await publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github })).state, "DELIVERY_UNCERTAIN");
+  assert.equal((await publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github })).state, "DELIVERY_UNCERTAIN");
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
   assert.equal(ledger[event.event_id].state, "SUCCESSOR_DELIVERY_UNCERTAIN");
   assert.equal(creates, 0);
@@ -305,7 +353,7 @@ test("duplicate source-event matches fail closed", async () => {
   const event = sampleEvent();
   const github = clientFor(event.body, { matches: [{ id: "1" }, { id: "2" }] });
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-events-"));
-  await assert.rejects(() => publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github }), /DUPLICATE_EVENT/);
+  await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github }), /DUPLICATE_EVENT/);
   assert.equal(github.calls.create, 0);
 });
 
@@ -313,7 +361,7 @@ test("source event cannot be marked CONSUMED without a successor delivery attemp
   assertImplemented();
   const event = sampleEvent();
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-events-"));
-  await publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github: clientFor(event.body) });
+  await publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github: clientFor(event.body) });
   const args = { eventId: event.event_id, sourceCommentId: event.source_comment_id, controlCommentId: "8001", runtimeRoot };
   await assert.rejects(() => markSourceEventConsumed(args), /successor delivery attempt/);
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
@@ -327,6 +375,6 @@ test("corrupt ledger fails closed before a GitHub create call", async () => {
   await mkdir(path.join(runtimeRoot, "events"));
   await writeFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "not-json");
   const github = clientFor(event.body);
-  await assert.rejects(() => publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github }), /cannot read G34 event ledger/);
+  await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github }), /cannot read G34 event ledger/);
   assert.equal(github.calls.create, 0);
 });
