@@ -504,28 +504,66 @@ export async function publishSourceEvent(args) {
           bindingReceipt.base_sha !== receipt.base_sha) {
         throw new Error("terminal source event does not match its exact Worker start branch or base");
       }
-      if (typeof github.getCommit !== "function") throw new Error("exact Worker base and candidate commit metadata is required");
-      const [baseCommit, headCommit] = await Promise.all([
-        github.getCommit(receipt.base_sha), github.getCommit(receiptHead),
-      ]);
-      if (String(baseCommit?.sha) !== receipt.base_sha ||
-          (bindingReceipt.base_tree_sha !== undefined && String(baseCommit?.tree?.sha) !== bindingReceipt.base_tree_sha) ||
-          String(headCommit?.sha) !== receiptHead ||
-          (receipt.tree_sha !== undefined && String(headCommit?.tree?.sha) !== receipt.tree_sha)) {
-        throw new Error("exact Worker terminal commit or tree metadata does not match its source receipt");
-      }
-      const declaredParents = ["remote_parent", "commit_parent", "parent_sha"]
-        .flatMap((key) => receiptValues(receipt, key));
-      if (declaredParents.some((parent) => parent !== receipt.base_sha) ||
-          (declaredParents.length && (headCommit?.parents?.length !== 1 || headCommit.parents[0]?.sha !== receipt.base_sha))) {
-        throw new Error("exact Worker terminal parent metadata does not match its source receipt");
-      }
       for (const key of ["card_comment_id", "claim_comment_id", "acceptance_comment_id", "binding_comment_id",
         "dispatch_comment_id", "agent_name", "agent_session", "pane", "terminal", "cwd", "model",
         "reasoning_effort", "executor_identity", "lease_id", "attempt_id"]) {
         if (receipt[key] !== undefined && receipt[key] !== bindingReceipt[key]) {
           throw new Error(`terminal source event ${key} does not match its exact Worker start`);
         }
+      }
+    }
+    if (typeof github.getCommit !== "function") throw new Error("exact Worker base and candidate commit metadata is required");
+    const [baseCommit, headCommit] = await Promise.all([
+      github.getCommit(receipt.base_sha), github.getCommit(receiptHead),
+    ]);
+    if (String(baseCommit?.sha) !== receipt.base_sha ||
+        String(headCommit?.sha) !== receiptHead ||
+        !/^[0-9a-f]{40}$/.test(String(baseCommit?.tree?.sha ?? "")) ||
+        !/^[0-9a-f]{40}$/.test(String(headCommit?.tree?.sha ?? ""))) {
+      throw new Error("exact Worker commit or tree metadata does not match GitHub");
+    }
+    const assertTreeAliases = (sourceReceipt, keys, exactTree, label) => {
+      const aliases = keys.flatMap((key) => receiptValues(sourceReceipt, key));
+      if (!aliases.length || aliases.some((tree) => tree !== exactTree)) {
+        throw new Error(`exact Worker ${label} tree metadata does not match every source receipt alias`);
+      }
+    };
+    if (eventKind === "WORKER_STARTED") {
+      assertTreeAliases(receipt, ["base_tree_sha", "tree_sha"], String(baseCommit.tree.sha), "base");
+      assertTreeAliases(receipt, ["base_tree_sha", "tree_sha"], String(headCommit.tree.sha), "candidate");
+    } else {
+      assertTreeAliases(bindingReceipt, ["base_tree_sha", "tree_sha"], String(baseCommit.tree.sha), "base");
+      assertTreeAliases(receipt, ["tree_sha", "remote_tree", "remote_api_tree", "local_tested_tree"], String(headCommit.tree.sha), "candidate");
+      const declaredParents = ["remote_parent", "commit_parent", "parent_sha"]
+        .flatMap((key) => receiptValues(receipt, key));
+      const exactHeadParents = Array.isArray(headCommit.parents)
+        ? headCommit.parents.map((parent) => String(parent?.sha ?? ""))
+        : [];
+      if (exactHeadParents.length !== 1 || !/^[0-9a-f]{40}$/.test(exactHeadParents[0]) ||
+          new Set(exactHeadParents).size !== exactHeadParents.length ||
+          declaredParents.some((parent) => parent !== exactHeadParents[0])) {
+        throw new Error("exact Worker terminal parent metadata is malformed, ambiguous, or does not match its source receipt");
+      }
+      let ancestorSha = exactHeadParents[0];
+      const seenAncestors = new Set([receiptHead]);
+      const maxAncestorReads = 64;
+      let ancestorReads = 0;
+      while (ancestorSha !== receipt.base_sha) {
+        if (seenAncestors.has(ancestorSha) || ancestorReads >= maxAncestorReads) {
+          throw new Error("exact Worker terminal ancestry is cyclic, unrelated, or exceeds the bounded lookup");
+        }
+        seenAncestors.add(ancestorSha);
+        const ancestorCommit = await github.getCommit(ancestorSha);
+        ancestorReads++;
+        if (String(ancestorCommit?.sha) !== ancestorSha ||
+            !Array.isArray(ancestorCommit?.parents) || ancestorCommit.parents.length !== 1) {
+          throw new Error("exact Worker terminal ancestry has malformed or ambiguous parent metadata");
+        }
+        const parentSha = String(ancestorCommit.parents[0]?.sha ?? "");
+        if (!/^[0-9a-f]{40}$/.test(parentSha)) {
+          throw new Error("exact Worker terminal ancestry has malformed parent metadata");
+        }
+        ancestorSha = parentSha;
       }
     }
     const binding = {
