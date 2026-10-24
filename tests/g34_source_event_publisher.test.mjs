@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseActiveControlAuthority } from "../src/g34_contract.mjs";
 
-const { createSourceEvent, publishSourceEvent, sourceEventPayloadBody, markSourceEventConsumed } = await import("../src/g34_source_event_publisher.mjs").catch(() => ({}));
+const { createSourceEvent, publishSourceEvent, sourceEventPayloadBody, markSourceEventConsumed, beginSuccessorDelivery } = await import("../src/g34_source_event_publisher.mjs").catch(() => ({}));
 
 const binding = {
   card_comment_id: "5777732770",
@@ -122,7 +122,7 @@ function sampleEvent() {
 }
 
 function clientFor(body, options = {}) {
-  const calls = { create: 0, exactGet: 0, find: 0 };
+  const calls = { create: 0, exactGet: 0, sourceGet: 0, find: 0 };
   return {
     calls,
     async getCurrentAuthorityRecords() {
@@ -130,7 +130,7 @@ function clientFor(body, options = {}) {
       if (options.currentAuthorityRead) return options.currentAuthorityRead();
       return structuredClone(options.authorityRecords?.() ?? authorityRecords);
     },
-    async findEventComments() { calls.find++; options.onFind?.(); return options.matches ?? []; },
+    async findEventComments() { calls.find++; options.onFind?.(); return typeof options.matches === "function" ? options.matches(calls.find) : options.matches ?? []; },
     async createIssueComment(issueNumber, postedBody) {
       calls.create++;
       options.onCreate?.();
@@ -142,8 +142,14 @@ function clientFor(body, options = {}) {
     async getIssueComment(id) {
       const pointer = Object.values(options.currentAuthorityRecords?.() ?? authorityRecords).find((record) => String(record.id) === String(id));
       if (pointer) return structuredClone(pointer);
+      if (String(id) === "6083328488") {
+        calls.sourceGet++;
+        const source = sourceComment();
+        if (options.sourceComment) return structuredClone(options.sourceComment);
+        return source;
+      }
       calls.exactGet++;
-      assert.equal(id, "9001");
+      assert.equal(String(id), "9001");
       if (options.getError) throw options.getError;
       return { id, url: `https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-${id}`, user: { login: "D22977" }, body };
     },
@@ -268,10 +274,86 @@ test("publisher persists before sending and exact-reads the created GitHub comme
   const github = clientFor(event.body);
   const result = await publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github });
   assert.equal(result.state, "DELIVERED");
-  assert.deepEqual(github.calls, { create: 1, exactGet: 1, find: 1 });
+  assert.deepEqual(github.calls, { create: 1, exactGet: 1, sourceGet: 1, find: 1 });
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
   assert.equal(ledger[event.event_id].state, "DELIVERED");
   assert.equal(ledger[event.event_id].comment_id, "9001");
+});
+
+test("publisher rejects a non-deterministic event id before ledger writes or GitHub creation", async () => {
+  const event = sampleEvent();
+  event.event_id = "f".repeat(64);
+  event.body = sourceEventPayloadBody(event);
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-event-id-tamper-"));
+  const github = clientFor(event.body);
+  await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github }), /deterministic event id/);
+  assert.equal(github.calls.create, 0);
+  assert.equal(github.calls.find, 0);
+  assert.equal(github.calls.sourceGet, 0);
+  await assert.rejects(() => readFile(path.join(runtimeRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
+});
+
+test("publisher binds source identity, issue, repository, and body hash before ledger writes", async () => {
+  const event = sampleEvent();
+  const variants = [
+    { ...sourceComment(), id: "6083328489" },
+    { ...sourceComment(), url: "https://github.com/D22977/gpt-browser-bridge/issues/203#issuecomment-6083328488" },
+    { ...sourceComment(), url: "https://github.com/D22977/other/issues/202#issuecomment-6083328488" },
+    { ...sourceComment(), body: "changed upstream body" },
+  ];
+  for (const [index, source] of variants.entries()) {
+    const runtimeRoot = await mkdtemp(path.join(tmpdir(), `g34-source-metadata-tamper-${index}-`));
+    const github = clientFor(event.body, { sourceComment: source });
+    await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github }), /exact upstream source comment/);
+    assert.equal(github.calls.create, 0);
+    assert.equal(github.calls.find, 0);
+    assert.equal(github.calls.sourceGet, 1);
+    await assert.rejects(() => readFile(path.join(runtimeRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
+  }
+});
+
+test("overlapping publishers for one source event create at most one GitHub event comment", async () => {
+  const event = sampleEvent();
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-parallel-publication-"));
+  let releaseCreate;
+  let signalCreate;
+  const createStarted = new Promise((resolve) => { signalCreate = resolve; });
+  const holdCreate = new Promise((resolve) => { releaseCreate = resolve; });
+  const github = clientFor(event.body, { matches: (call) => call === 1 ? [] : [{ id: "9001" }] });
+  const originalCreate = github.createIssueComment;
+  github.createIssueComment = async (...args) => {
+    signalCreate();
+    await holdCreate;
+    return originalCreate(...args);
+  };
+  const first = publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github });
+  await createStarted;
+  const second = publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github });
+  releaseCreate();
+  const results = await Promise.all([first, second]);
+  assert.equal(github.calls.create, 1);
+  assert.deepEqual(results.map((result) => result.state).sort(), ["DELIVERED", "NO_OP"]);
+});
+
+test("overlapping successor admissions grant READY_TO_DELIVER to at most one caller", async () => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-parallel-successor-"));
+  const ledgerPath = path.join(runtimeRoot, "events", "g34-source-events.json");
+  const event = sampleEvent();
+  await mkdir(path.dirname(ledgerPath), { recursive: true });
+  await writeFile(ledgerPath, JSON.stringify({ [event.event_id]: {
+    state: "DELIVERED", source_publication_state: "DELIVERED", source_comment_id: event.source_comment_id, comment_id: "9001",
+  } }));
+  let deliverCalls = 0;
+  const deliver = async () => { deliverCalls++; };
+  const args = {
+    eventId: event.event_id, sourceCommentId: event.source_comment_id, eventCommentId: "9001",
+    controlCommentId: "8001", successorCommentId: "8002", deliver, runtimeRoot,
+  };
+  const results = await Promise.all([beginSuccessorDelivery(args), beginSuccessorDelivery(args)]);
+  assert.equal(results.filter((result) => result.state === "READY_TO_DELIVER").length, 1);
+  assert.equal(results.filter((result) => result.state === "DELIVERY_UNCERTAIN").length, 1);
+  for (const result of results) if (result.state === "READY_TO_DELIVER") await deliver();
+  assert.equal(deliverCalls, 1);
 });
 
 test("publisher exact-reads current Control after event lookup and ignores caller no-op guards", async () => {
@@ -337,6 +419,18 @@ test("a pending authority read never leaves a durable send-attempt state", async
   const afterFailure = JSON.parse(await readFile(pathToLedger, "utf8"));
   assert.equal(afterFailure[event.event_id].state, "CLAIMED");
   assert.equal(github.calls.create, 0);
+  await assert.rejects(() => readFile(`${pathToLedger}.lock`), { code: "ENOENT" });
+});
+
+test("publisher reclaims an old lock only after its owner process is dead", async () => {
+  const event = sampleEvent();
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-dead-owner-lock-"));
+  const lockPath = path.join(runtimeRoot, "events", "g34-source-events.json.lock");
+  await mkdir(path.dirname(lockPath), { recursive: true });
+  await writeFile(lockPath, JSON.stringify({ pid: 2147483647, token: "dead-owner", created_at: 1 }));
+  const result = await publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github: clientFor(event.body) });
+  assert.equal(result.state, "DELIVERED");
+  await assert.rejects(() => readFile(lockPath), { code: "ENOENT" });
 });
 
 for (const [field, mutate] of [
@@ -352,7 +446,9 @@ for (const [field, mutate] of [
     mutate(event);
     event.body = sourceEventPayloadBody(event);
     const runtimeRoot = await mkdtemp(path.join(tmpdir(), `g34-mismatched-${field.replaceAll("/", "-")}-`));
-    const github = clientFor(event.body);
+    const github = clientFor(event.body, field === "expected_author"
+      ? { sourceComment: { ...sourceComment(), user: { login: "untrusted-publisher" } } }
+      : {});
 
     await assert.rejects(() => publishWithCurrentAuthority({
       event, issueNumber: 202, runtimeRoot, github,
@@ -431,6 +527,7 @@ test("a repeated resident publication preserves uncertain successor delivery and
     async findEventComments() { return [{ id: "9001" }]; },
     async createIssueComment() { creates++; throw new Error("must not resend"); },
     async getIssueComment(id) {
+      if (String(id) === event.source_comment_id) return sourceComment();
       assert.equal(id, "9001");
       return { id, url: "https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-9001", user: { login: "D22977" }, body: event.body };
     },

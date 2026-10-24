@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 import writeFileAtomic from "write-file-atomic";
 import { parseG34ReceiptFields, parseActiveControlAuthority, sourceEventSchema } from "./g34_contract.mjs";
@@ -228,6 +228,63 @@ async function saveLedger(file, ledger) {
   await writeFileAtomic(file, JSON.stringify(ledger, null, 2) + "\n");
 }
 
+const LEDGER_LOCK_STALE_MS = 30_000;
+const LEDGER_LOCK_WAIT_MS = 15_000;
+
+async function withLedgerLock(runtimeRoot, operation) {
+  const file = ledgerPathFor(runtimeRoot);
+  const lockPath = `${file}.lock`;
+  await mkdir(path.dirname(file), { recursive: true });
+  const token = `${process.pid}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  const deadline = Date.now() + LEDGER_LOCK_WAIT_MS;
+  let handle;
+  while (!handle) {
+    try {
+      handle = await open(lockPath, "wx", 0o600);
+      await handle.writeFile(JSON.stringify({ pid: process.pid, token, created_at: Date.now() }));
+      await handle.sync();
+    } catch (error) {
+      if (handle) {
+        await handle.close().catch(() => {});
+        await unlink(lockPath).catch((unlinkError) => { if (unlinkError.code !== "ENOENT") throw unlinkError; });
+        handle = undefined;
+      }
+      if (error.code !== "EEXIST") throw error;
+      let owner;
+      let lockContents;
+      try {
+        lockContents = await readFile(lockPath, "utf8");
+        owner = JSON.parse(lockContents);
+      } catch (readError) {
+        if (readError.code !== "ENOENT") throw new Error(`cannot inspect G34 ledger lock: ${readError.message}`);
+      }
+      let ownerAlive = true;
+      if (Number.isInteger(owner?.pid) && owner.pid > 0) {
+        try { process.kill(owner.pid, 0); }
+        catch (probeError) { ownerAlive = probeError.code !== "ESRCH"; }
+      }
+      if (owner && !ownerAlive && Date.now() - Number(owner.created_at ?? Date.now()) >= LEDGER_LOCK_STALE_MS) {
+        try {
+          if (await readFile(lockPath, "utf8") === lockContents) await unlink(lockPath);
+        } catch (recoveryError) {
+          if (recoveryError.code !== "ENOENT") throw recoveryError;
+        }
+      }
+      if (Date.now() >= deadline) throw new Error("timed out waiting for exclusive G34 ledger lock");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  try {
+    return await operation(file);
+  } finally {
+    let current;
+    try { current = JSON.parse(await readFile(lockPath, "utf8")); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    await handle.close();
+    if (current?.token === token) await unlink(lockPath).catch((error) => { if (error.code !== "ENOENT") throw error; });
+  }
+}
+
 async function findMatch(event, issueNumber, repositoryFullName, github) {
   const matches = await github.findEventComments({ issueNumber, eventId: event.event_id });
   if (!Array.isArray(matches)) throw new Error("GitHub event lookup returned invalid metadata");
@@ -252,7 +309,7 @@ async function verifyComment(event, issueNumber, repositoryFullName, metadata, g
   return exact;
 }
 
-export async function publishSourceEvent({ event, issueNumber, runtimeRoot, github, currentAuthority, repositoryFullName = "D22977/gpt-browser-bridge" }) {
+async function publishSourceEventUnlocked({ event, issueNumber, runtimeRoot, github, currentAuthority, repositoryFullName = "D22977/gpt-browser-bridge" }) {
   const { body, expected_author: expectedAuthor, source_issue_number: sourceIssueNumber, source_repository_full_name: sourceRepositoryFullName, ...fields } = event ?? {};
   const validated = sourceEventSchema.parse(fields);
   if (typeof body !== "string" || body !== sourceEventPayloadBody(event) || body !== eventBody(validated) || !expectedAuthor ||
@@ -351,7 +408,34 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
   }
 }
 
-export async function markSourceEventConsumed({ eventId, sourceCommentId, controlCommentId, runtimeRoot }) {
+export async function publishSourceEvent(args) {
+  const { event, issueNumber, github, repositoryFullName = "D22977/gpt-browser-bridge" } = args ?? {};
+  const { expected_author: expectedAuthor, source_issue_number: sourceIssueNumber,
+    source_repository_full_name: sourceRepositoryFullName } = event ?? {};
+  const validated = sourceEventSchema.parse(Object.fromEntries(eventFields
+    .filter((key) => event?.[key] !== undefined)
+    .map((key) => [key, event[key]])));
+  const deterministicEventId = sha256Hex(JSON.stringify([
+    validated.control_generation, validated.event_kind, validated.source_comment_id,
+  ]));
+  if (validated.event_id !== deterministicEventId) throw new Error("source event has a non-deterministic event id");
+  if (sourceIssueNumber !== issueNumber || sourceRepositoryFullName !== repositoryFullName ||
+      !expectedAuthor || typeof github?.getIssueComment !== "function") {
+    throw new Error("exact upstream source comment metadata is required");
+  }
+  return withLedgerLock(args.runtimeRoot, async () => {
+    const exactSource = await github.getIssueComment(validated.source_comment_id);
+    if (!exactSource || String(exactSource.id) !== validated.source_comment_id ||
+        commentIssueNumber(exactSource, repositoryFullName) !== sourceIssueNumber ||
+        exactSource.user?.login !== expectedAuthor || typeof exactSource.body !== "string" ||
+        sha256Hex(exactSource.body) !== validated.source_body_sha256) {
+      throw new Error("exact upstream source comment does not match the event identity, issue, repository, author, or body hash");
+    }
+    return publishSourceEventUnlocked(args);
+  });
+}
+
+async function markSourceEventConsumedUnlocked({ eventId, sourceCommentId, controlCommentId, runtimeRoot }) {
   const file = ledgerPathFor(runtimeRoot);
   const ledger = await readLedger(file);
   const prior = ledger[eventId];
@@ -367,6 +451,10 @@ export async function markSourceEventConsumed({ eventId, sourceCommentId, contro
     throw new Error("cannot consume with an unbound Control acceptance");
   }
   throw new Error("cannot consume without an exact successor delivery confirmation receipt");
+}
+
+export async function markSourceEventConsumed(args) {
+  return withLedgerLock(args.runtimeRoot, () => markSourceEventConsumedUnlocked(args));
 }
 
 export async function readSourceEventPublication({ eventId, sourceCommentId, eventCommentId, runtimeRoot }) {
@@ -391,7 +479,7 @@ export async function readSourceEventPublication({ eventId, sourceCommentId, eve
   };
 }
 
-export async function beginSuccessorDelivery({ eventId, sourceCommentId, eventCommentId, controlCommentId, successorCommentId, deliver, runtimeRoot }) {
+async function beginSuccessorDeliveryUnlocked({ eventId, sourceCommentId, eventCommentId, controlCommentId, successorCommentId, deliver, runtimeRoot }) {
   const file = ledgerPathFor(runtimeRoot);
   const ledger = await readLedger(file);
   const prior = ledger[eventId];
@@ -413,7 +501,11 @@ export async function beginSuccessorDelivery({ eventId, sourceCommentId, eventCo
   return { state: "READY_TO_DELIVER" };
 }
 
-export async function recordSuccessorDelivery({ eventId, receiptId, event, controlCommentId, successor, github, uncertain, runtimeRoot }) {
+export async function beginSuccessorDelivery(args) {
+  return withLedgerLock(args.runtimeRoot, () => beginSuccessorDeliveryUnlocked(args));
+}
+
+async function recordSuccessorDeliveryUnlocked({ eventId, receiptId, event, controlCommentId, successor, github, uncertain, runtimeRoot }) {
   const file = ledgerPathFor(runtimeRoot);
   const ledger = await readLedger(file);
   const prior = ledger[eventId];
@@ -701,4 +793,8 @@ export async function recordSuccessorDelivery({ eventId, receiptId, event, contr
   };
   await saveLedger(file, ledger);
   return { state: "CONSUMED", receipt_id: String(receiptId) };
+}
+
+export async function recordSuccessorDelivery(args) {
+  return withLedgerLock(args.runtimeRoot, () => recordSuccessorDeliveryUnlocked(args));
 }
