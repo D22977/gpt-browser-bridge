@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawn as spawnChild } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -232,7 +233,7 @@ test("source event rejects unrelated authors and mismatched claim, executor, sta
   }
 });
 
-test("terminal source event derives omitted chain fields from its exact linked start", () => {
+test("terminal source event derives consistent linked fields and rejects conflicting legacy aliases", () => {
   assertImplemented();
   const cases = [
     {
@@ -255,12 +256,17 @@ test("terminal source event derives omitted chain fields from its exact linked s
   for (const item of cases) {
     const baseBinding = { ...binding, ...Object.fromEntries(["claim_comment_id", "acceptance_comment_id", "binding_comment_id", "dispatch_comment_id"].map((key) => [key, item[key]])), executor_identity: "collaboration task /root/g34_211_worker_luna1", agent_name: "/root/g34_211_worker_luna1", start_comment_id: item.start_comment_id, lease_id: item.lease_id, attempt_id: item.attempt_id };
     const source = { id: item.id, url: `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${item.id}`, user: { login: "D22977" }, body: item.body };
-    const event = createSourceEvent({
+    const build = () => createSourceEvent({
       sourceComment: source, sourceIssueNumber: 211, sourceRepositoryFullName: "D22977/gpt-browser-bridge",
       eventKind: "WORKER_TERMINAL_RESULT", authority, binding: baseBinding,
       branch: "work/gbb-g34-review-repair-20261009-01", baseSha: item.base_sha, headSha: item.head_sha,
       state: "READY_FOR_FRESH_REVIEW", expectedAuthor: "D22977",
     });
+    if (item.body.includes("local_tested_commit:")) {
+      assert.throws(build, /upstream executor receipt/);
+      continue;
+    }
+    const event = build();
     assert.equal(event.source_comment_id, item.id);
     assert.equal(event.claim_comment_id, item.claim_comment_id);
     assert.equal(event.acceptance_comment_id, item.acceptance_comment_id);
@@ -364,6 +370,7 @@ test("exported publisher reconstructs a terminal event from the exact linked Wor
     `attempt_id: ${binding.attempt_id}`,
     "branch: work/gbb-g34-source-event-20261009-01",
     "base_sha: c7d17550fdfe3ae3e06ecec352004ca3b7284c55",
+    "remote_parent: c7d17550fdfe3ae3e06ecec352004ca3b7284c55",
     `head_sha: ${"e".repeat(40)}`,
     `tree_sha: ${"a".repeat(40)}`,
   ].join("\n");
@@ -390,9 +397,66 @@ test("exported publisher reconstructs a terminal event from the exact linked Wor
   });
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-terminal-event-reconstruction-"));
   const github = clientFor(event.body, { sourceComments: { [startId]: start, [terminalId]: source } });
+  github.getCommit = async (sha) => sha === "c7d17550fdfe3ae3e06ecec352004ca3b7284c55"
+    ? { sha, tree: { sha: "d".repeat(40) }, parents: [] }
+    : { sha, tree: { sha: "a".repeat(40) }, parents: [{ sha: "c7d17550fdfe3ae3e06ecec352004ca3b7284c55" }] };
   const result = await publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github });
   assert.equal(result.state, "DELIVERED");
   assert.equal(github.calls.create, 1);
+
+  github.getCommit = async (sha) => sha === "c7d17550fdfe3ae3e06ecec352004ca3b7284c55"
+    ? { sha, tree: { sha: "d".repeat(40) }, parents: [] }
+    : { sha, tree: { sha: "a".repeat(40) }, parents: [{ sha: "b".repeat(40) }] };
+  const badParentRoot = await mkdtemp(path.join(tmpdir(), "g34-terminal-parent-mismatch-"));
+  await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot: badParentRoot, github }), /parent metadata/);
+  assert.equal(github.calls.create, 1);
+  await assert.rejects(readFile(path.join(badParentRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
+});
+
+test("exported publisher rejects conflicting terminal head aliases before ledger mutation", async () => {
+  const startId = "6083330100";
+  const terminalId = "6083330101";
+  const start = {
+    id: startId,
+    url: `https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-${startId}`,
+    user: { login: "D22977" },
+    body: sourceBody(),
+  };
+  const source = {
+    id: terminalId,
+    url: `https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-${terminalId}`,
+    user: { login: "D22977" },
+    body: sourceBody({
+      marker: "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1",
+      state: "READY_FOR_FRESH_REVIEW",
+      worker_start_comment_id: startId,
+      head_sha: "e".repeat(40),
+      tree_sha: "a".repeat(40),
+    }),
+  };
+  const event = createSourceEvent({
+    sourceComment: source,
+    canonicalReceipt: parseG34ReceiptFields(source),
+    sourceIssueNumber: 202,
+    sourceRepositoryFullName: "D22977/gpt-browser-bridge",
+    eventKind: "WORKER_TERMINAL_RESULT",
+    authority,
+    binding: { ...binding, start_comment_id: startId },
+    branch: "work/gbb-g34-source-event-20261009-01",
+    baseSha: "c7d17550fdfe3ae3e06ecec352004ca3b7284c55",
+    headSha: "e".repeat(40),
+    state: "READY_FOR_FRESH_REVIEW",
+    terminalCommentId: terminalId,
+    expectedAuthor: "D22977",
+  });
+  source.body += `\nremote_commit: ${"f".repeat(40)}`;
+  event.source_body_sha256 = createHash("sha256").update(source.body, "utf8").digest("hex");
+  event.body = sourceEventPayloadBody(event);
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-terminal-head-alias-conflict-"));
+  const github = clientFor(event.body, { sourceComments: { [startId]: start, [terminalId]: source } });
+  await assert.rejects(() => publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github }));
+  assert.equal(github.calls.create, 0);
+  await assert.rejects(() => readFile(path.join(runtimeRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
 });
 
 test("overlapping publishers for one source event create at most one GitHub event comment", async () => {
@@ -512,6 +576,53 @@ test("publisher uses OS lock ownership without creating path-based lock sidecars
   const result = await publishWithCurrentAuthority({ event, issueNumber: 202, runtimeRoot, github: clientFor(event.body) });
   assert.equal(result.state, "DELIVERED");
   assert.equal(await readFile(lockPath, "utf8"), "partial owner record");
+});
+
+test("publisher owner exits promptly if its acquired mutex provider dies during an awaited source read", async () => {
+  const event = sampleEvent();
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-provider-death-"));
+  const source = sourceComment();
+  const encoded = (value) => Buffer.from(JSON.stringify(value)).toString("base64");
+  const moduleUrl = new URL("../src/g34_source_event_publisher.mjs", import.meta.url).href;
+  const script = `
+    import { publishSourceEvent } from ${JSON.stringify(moduleUrl)};
+    const event = JSON.parse(Buffer.from(process.env.GBB_EVENT, "base64").toString("utf8"));
+    const authority = JSON.parse(Buffer.from(process.env.GBB_AUTHORITY, "base64").toString("utf8"));
+    const source = JSON.parse(Buffer.from(process.env.GBB_SOURCE, "base64").toString("utf8"));
+    const github = {
+      async getIssueComment(id) { if (String(id) === source.id) { process.stdout.write("SOURCE_GET_PENDING\\n"); await new Promise(() => setInterval(() => {}, 1000)); } return source; },
+      async getCurrentAuthorityRecords() { return authority; },
+      async findEventComments() { return []; },
+      async createIssueComment() { throw new Error("must not reach send"); },
+    };
+    publishSourceEvent({ event, issueNumber: 202, runtimeRoot: process.env.GBB_RUNTIME_ROOT, github, currentAuthority: authority })
+      .catch((error) => { process.stderr.write(String(error)); process.exitCode = 1; });
+  `;
+  const child = spawnChild(process.execPath, ["--input-type=module", "-e", script], {
+    cwd: process.cwd(),
+    windowsHide: true,
+    env: { ...process.env, GBB_EVENT: encoded(event), GBB_AUTHORITY: encoded(authorityRecords),
+      GBB_SOURCE: encoded(source), GBB_RUNTIME_ROOT: runtimeRoot },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+  const ready = new Promise((resolve, reject) => {
+    child.stdout.on("data", () => { if (stdout.includes("SOURCE_GET_PENDING")) resolve(); });
+    child.once("error", reject);
+    child.once("close", (code) => reject(new Error(`publisher child exited before source read (${code})`)));
+  });
+  await ready;
+  const mutexSuffix = createHash("sha256").update(path.resolve(runtimeRoot).toLocaleLowerCase("en-US"), "utf8").digest("hex");
+  const command = `Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq ${child.pid} -and $_.CommandLine -like '*GBB-G34-${mutexSuffix}*' } | Select-Object -ExpandProperty ProcessId`;
+  const providerPid = execFileSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], { encoding: "utf8" }).trim();
+  assert.match(providerPid, /^\d+$/, "mutex provider process was not found under the publisher child");
+  execFileSync("taskkill.exe", ["/PID", providerPid, "/F"], { stdio: "ignore" });
+  const exit = await new Promise((resolve) => {
+    const timer = setTimeout(() => { child.kill(); resolve({ code: null, timedOut: true }); }, 7000);
+    child.once("close", (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
+  });
+  assert.equal(exit.code, 70, `publisher did not fail closed after provider death; stdout=${stdout}`);
 });
 
 for (const [field, mutate] of [

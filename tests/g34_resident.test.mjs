@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseActiveControlAuthority } from "../src/g34_contract.mjs";
 import { authorizeControlSuccessor as authorizeControlSuccessorCore, consumeDeliveredControlSuccessor, runG34ResidentCycle } from "../src/g34_resident.mjs";
-import { beginSuccessorDelivery, recordSuccessorDelivery, sourceEventPayloadBody } from "../src/g34_source_event_publisher.mjs";
+import { beginSuccessorDelivery, publishSourceEvent, recordSuccessorDelivery, sourceEventPayloadBody } from "../src/g34_source_event_publisher.mjs";
 
 const authorityRecords = {
   "switchReceipt": {
@@ -308,6 +309,10 @@ function fakeSourceGithub(sourceComments, overrides = {}, firstEventCommentId = 
   let nextId = firstEventCommentId;
   return {
     async getCurrentAuthorityRecords() { return structuredClone(authorityRecords); },
+    async getCommit(sha) {
+      return { sha, tree: { sha: workerBinding.base_tree_sha },
+        parents: sha === workerBinding.base_sha ? [] : [{ sha: workerBinding.base_sha }] };
+    },
     async getIssueComment(id) {
       const authorityRecord = Object.values(authorityRecords).find((record) => String(record.id) === String(id));
       return structuredClone(overrides[String(id)] ?? authorityRecord ?? all.get(String(id)));
@@ -506,7 +511,7 @@ test("resident publishes only Worker start/result receipts bound to the exact cl
   assert.match(results[1].event.body, /worker_start_comment_id=4001/);
 });
 
-test("resident derives the source chain from the exact sparse G14 terminal and linked G14 start", async () => {
+test("resident rejects a sparse G14 terminal whose local and remote commit aliases disagree", async () => {
   const issue211 = (id, body) => ({ id, url: `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${id}`, user: { login: "D22977" }, body });
   const actual = {
     "6306219207": issue211("6306219207", `GBB_G036_211_CONTROL_ROUTE_AMENDMENT_V1\nstate: ONE_ALTERNATE_LOW_COST_WORKER_ROUTE_AUTHORIZED\nrecorded_by_role: ACTIVE_CONTROL\nrepository: D22977/gpt-browser-bridge\nissue: #211\nsource_work_order: GBB_G34_REVIEW_REPAIR_WORK_ORDER_V1\ncontrol_generation: 036 ACTIVE\n\nCANDIDATE_BINDING\ntask_name: /root/g34_211_worker_luna1\nrole: Worker\nruntime_surface: fresh collaboration-managed GPT-6 Luna agent session with shared local workspace tools and GitHub MCP connector\nmodel_effort: gpt-6-luna / low`),
@@ -518,16 +523,13 @@ test("resident derives the source chain from the exact sparse G14 terminal and l
   };
   const terminal = actual["6308893422"];
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-actual-g14-"));
-  const result = await runG34ResidentCycle({
+  await assert.rejects(() => runG34ResidentCycle({
     sourceComments: [terminal], currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
     issueNumber: 211, runtimeRoot, github: fakeSourceGithub([terminal], actual),
     repositoryFullName: "D22977/gpt-browser-bridge", branch: workerBinding.branch,
     baseSha: "9a1fb30b79cb64b26b81180483924ad1a2227cee", headSha: "c7e3b1d53b3fa5e94f7fa4c8701fda9c97760d1f", publisherAuthor: "D22977",
-  });
-  assert.equal(result.length, 1);
-  assert.equal(result[0].event.source_comment_id, "6308893422");
-  assert.match(result[0].event.body, /worker_start_comment_id=6308694953/);
-  assert.match(result[0].event.body, /claim_comment_id=6306230204/);
+  }));
+  await assert.rejects(readFile(path.join(runtimeRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
 });
 
 test("resident rejects a terminal receipt with missing start link or mismatched Worker claim fields", async () => {
@@ -547,6 +549,25 @@ test("resident rejects a terminal receipt with missing start link or mismatched 
     }));
   }
   assert.equal(start.id, "4001");
+});
+
+test("resident rejects conflicting generic terminal head aliases before ledger mutation", async () => {
+  const head = "b".repeat(40);
+  const start = workerComment("4011", "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1", "CONSUMED_STARTED", workerBinding.base_sha);
+  const terminal = workerComment("4012", "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1", "READY_FOR_FRESH_REVIEW", head, {
+    worker_start_comment_id: start.id,
+    tree_sha: "c".repeat(40),
+    remote_commit: "d".repeat(40),
+  });
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-resident-head-alias-conflict-"));
+  await assert.rejects(() => runG34ResidentCycle({
+    sourceComments: [start, terminal], currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
+    issueNumber: 211, runtimeRoot, github: fakeSourceGithub([start, terminal]),
+    repositoryFullName: "D22977/gpt-browser-bridge", branch: workerBinding.branch,
+    baseSha: workerBinding.base_sha, headSha: head, publisherAuthor: "D22977",
+  }));
+  const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
+  assert.deepEqual(Object.values(ledger).map((entry) => entry.source_comment_id), [start.id]);
 });
 
 test("resident rejects a source receipt when the exact-read accepted claim names another executor", async () => {
@@ -715,6 +736,60 @@ test("resident ingests the pinned exact G22 terminal chain and emits its canonic
   assert.equal(terminal.event.branch, "work/gbb-g34-review-repair-20261009-01");
 });
 
+test("exported publisher rejects a conflicting G22 terminal alias before ledger mutation", async () => {
+  const records = structuredClone(pinnedG22ReceiptRecords).map((record) => ({ ...record, id: String(record.id) }));
+  const github = fakeSourceGithub(records, {}, 9900);
+  github.getCommit = async (sha) => sha === "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8"
+    ? { sha, tree: { sha: "13c12f569c3e3302ba60e0be800fb3c9995d903c" }, parents: [] }
+    : { sha, tree: { sha: "6613901a972772dbada0222feb45662e477f0ab5" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] };
+  const generated = await runG34ResidentCycle({
+    sourceComments: records, currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
+    issueNumber: 211, runtimeRoot: await mkdtemp(path.join(tmpdir(), "g34-g22-direct-baseline-")), github,
+    repositoryFullName: "D22977/gpt-browser-bridge", branch: "work/gbb-g34-review-repair-20261009-01",
+    baseSha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8",
+    headSha: "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14", publisherAuthor: "D22977",
+  });
+  const terminal = generated.find(({ event }) => event.source_comment_id === "6329411687");
+  assert.ok(terminal);
+  const source = records.find(({ id }) => id === terminal.event.source_comment_id);
+  source.body += `\nremote_commit: ${"d".repeat(40)}`;
+  const { comment_id: _publishedId, ...forgedEvent } = terminal.event;
+  forgedEvent.source_body_sha256 = createHash("sha256").update(source.body, "utf8").digest("hex");
+  forgedEvent.body = sourceEventPayloadBody(forgedEvent);
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-g22-direct-alias-conflict-"));
+  await assert.rejects(() => publishSourceEvent({
+    event: forgedEvent, issueNumber: 211, runtimeRoot, github, currentAuthority: structuredClone(authorityRecords),
+    repositoryFullName: "D22977/gpt-browser-bridge",
+  }), /G22|exact Worker source receipt|explicit aliases/);
+  await assert.rejects(readFile(path.join(runtimeRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
+});
+
+test("exported G22 publisher verifies exact base and candidate commit metadata before ledger mutation", async () => {
+  const records = structuredClone(pinnedG22ReceiptRecords).map((record) => ({ ...record, id: String(record.id) }));
+  const github = fakeSourceGithub(records, {}, 9900);
+  github.getCommit = async (sha) => sha === "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8"
+    ? { sha, tree: { sha: "13c12f569c3e3302ba60e0be800fb3c9995d903c" }, parents: [] }
+    : { sha, tree: { sha: "6613901a972772dbada0222feb45662e477f0ab5" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] };
+  const generated = await runG34ResidentCycle({
+    sourceComments: records, currentAuthority: structuredClone(authorityRecords), binding: workerBinding,
+    issueNumber: 211, runtimeRoot: await mkdtemp(path.join(tmpdir(), "g34-g22-metadata-baseline-")), github,
+    repositoryFullName: "D22977/gpt-browser-bridge", branch: "work/gbb-g34-review-repair-20261009-01",
+    baseSha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8",
+    headSha: "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14", publisherAuthor: "D22977",
+  });
+  const terminal = generated.find(({ event }) => event.source_comment_id === "6329411687");
+  github.getCommit = async (sha) => sha === "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8"
+    ? { sha, tree: { sha: "13c12f569c3e3302ba60e0be800fb3c9995d903c" }, parents: [] }
+    : { sha, tree: { sha: "ffffffffffffffffffffffffffffffffffffffff" }, parents: [{ sha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8" }] };
+  const { comment_id: _publishedId, ...event } = terminal.event;
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-g22-direct-metadata-mismatch-"));
+  await assert.rejects(() => publishSourceEvent({
+    event, issueNumber: 211, runtimeRoot, github, currentAuthority: structuredClone(authorityRecords),
+    repositoryFullName: "D22977/gpt-browser-bridge",
+  }), /G22 candidate commit metadata/);
+  await assert.rejects(readFile(path.join(runtimeRoot, "events", "g34-source-events.json")), { code: "ENOENT" });
+});
+
 test("resident fails closed on ambiguous, mismatched, or unauthenticated G22 chains", async () => {
   const run = async (records) => {
     const normalized = structuredClone(records).map((record) => ({ ...record, id: String(record.id) }));
@@ -786,6 +861,7 @@ test("resident rejects explicit G22 terminal aliases that conflict with the veri
     (record) => { record.body += "\nattempt_id: GBB-G22-CONFLICTING-ATTEMPT-01"; },
     (record) => { record.body += `\nbase_sha: ${"a".repeat(40)}`; },
     (record) => { record.body += `\nhead_sha: ${"b".repeat(40)}`; },
+    (record) => { record.body += `\nremote_commit: ${"d".repeat(40)}`; },
     (record) => { record.body += `\ntree_sha: ${"c".repeat(40)}`; },
     (record) => { record.body += `\nremote_parent: ${"e".repeat(40)}`; },
     (record) => { record.body += `\nbase_tree_sha: ${"f".repeat(40)}`; },

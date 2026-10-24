@@ -7,6 +7,16 @@ import writeFileAtomic from "write-file-atomic";
 import { parseG34ReceiptFields, parseActiveControlAuthority, sourceEventSchema } from "./g34_contract.mjs";
 
 const sha256Hex = (value) => createHash("sha256").update(value, "utf8").digest("hex");
+function receiptValues(receipt, key) {
+  const values = [];
+  const visit = (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    if (value[key] !== undefined) values.push(value[key]);
+    for (const nested of Object.values(value)) visit(nested);
+  };
+  visit(receipt);
+  return values;
+}
 const executorTaskIdentity = (value) => {
   if (typeof value !== "string") return null;
   const match = /^collaboration task (\/[^\s;()]+)(?:\s*(?:\([^()\r\n]*\)|;[^\r\n]*))?$/.exec(value.trim());
@@ -115,11 +125,14 @@ export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssue
   const expectedMarker = eventKind === "WORKER_STARTED"
     ? "GBB_G34_EXECUTOR_CONSUMED_STARTED_V1"
     : eventKind === "WORKER_TERMINAL_RESULT" ? "GBB_G34_EXECUTOR_TERMINAL_RESULT_V1" : null;
-  const receiptHead = receipt.head_sha ?? receipt.remote_commit ?? receipt.local_tested_commit;
+  const declaredHeads = ["head_sha", "remote_commit", "local_tested_commit"]
+    .flatMap((key) => receiptValues(receipt, key));
+  const receiptHead = declaredHeads[0];
+  const consistentHeads = declaredHeads.every((value) => value === receiptHead);
   const receiptTreeKeys = eventKind === "WORKER_STARTED"
     ? ["base_tree_sha", "tree_sha"]
     : ["tree_sha", "remote_api_tree", "remote_tree", "local_tested_tree"];
-  const declaredTrees = receiptTreeKeys.map((key) => receipt[key]).filter((value) => value !== undefined);
+  const declaredTrees = receiptTreeKeys.flatMap((key) => receiptValues(receipt, key));
   const receiptTree = declaredTrees[0];
   const exactTree = /^[0-9a-f]{40}$/.test(String(receiptTree ?? "")) &&
     declaredTrees.every((value) => value === receiptTree);
@@ -131,7 +144,7 @@ export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssue
     ["executor_identity", binding?.executor_identity],
     ["user_relay_count", "0"],
   ].every(([key, expected]) => receipt[key] === undefined || receipt[key] === String(expected));
-  const commonReceiptMatches = expectedMarker && exactTree && receipt.marker === expectedMarker &&
+  const commonReceiptMatches = expectedMarker && exactTree && consistentHeads && receipt.marker === expectedMarker &&
     receipt.state === state && receipt.branch === branch &&
     receipt.base_sha === baseSha && receiptHead === headSha &&
     (eventKind === "WORKER_STARTED"
@@ -243,6 +256,11 @@ async function acquireLedgerMutex(runtimeRoot) {
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stderr = "";
+  let acquired = false;
+  let releaseStarted = false;
+  let closed;
+  let resolveClosed;
+  const closeSignal = new Promise((resolve) => { resolveClosed = resolve; });
   child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
   const lines = createInterface({ input: child.stdout });
   let timer;
@@ -256,17 +274,26 @@ async function acquireLedgerMutex(runtimeRoot) {
     };
     lines.on("line", (line) => {
       if (line === "GBB_LOCK_ACQUIRED") {
-        finish(null, async () => new Promise((done) => {
-          child.once("close", (...args) => { lines.close(); done(...args); });
+        acquired = true;
+        finish(null, async () => {
+          if (closed) return closed;
+          releaseStarted = true;
           child.stdin.end("release\n");
-          setTimeout(() => { if (child.exitCode === null) child.kill(); }, 3000).unref();
-        }));
+          const timer = setTimeout(() => { if (!closed) child.kill(); }, 3000);
+          const result = await closeSignal;
+          clearTimeout(timer);
+          lines.close();
+          return result;
+        });
       } else if (line === "GBB_LOCK_TIMEOUT") {
         finish(new Error("timed out waiting for exclusive G34 Windows mutex"));
       }
     });
     child.once("error", (error) => finish(new Error(`cannot start G34 mutex provider: ${error.message}`)));
     child.once("close", (code) => {
+      closed = { code };
+      resolveClosed(closed);
+      if (acquired && !releaseStarted) process.exit(70);
       if (!settled) finish(new Error(`G34 mutex provider exited before acquisition (${code}): ${stderr.trim()}`));
     });
     timer = setTimeout(() => {
@@ -458,6 +485,7 @@ export async function publishSourceEvent(args) {
       throw new Error("exact source comment is not an allowed Worker start or terminal receipt");
     }
     let bindingReceipt = receipt;
+    const receiptHead = receipt.head_sha ?? receipt.remote_commit ?? receipt.local_tested_commit;
     let startComment;
     if (eventKind === "WORKER_TERMINAL_RESULT") {
       const startId = String(receipt.worker_start_comment_id ?? "");
@@ -475,6 +503,22 @@ export async function publishSourceEvent(args) {
           bindingReceipt.state !== "CONSUMED_STARTED" || bindingReceipt.branch !== receipt.branch ||
           bindingReceipt.base_sha !== receipt.base_sha) {
         throw new Error("terminal source event does not match its exact Worker start branch or base");
+      }
+      if (typeof github.getCommit !== "function") throw new Error("exact Worker base and candidate commit metadata is required");
+      const [baseCommit, headCommit] = await Promise.all([
+        github.getCommit(receipt.base_sha), github.getCommit(receiptHead),
+      ]);
+      if (String(baseCommit?.sha) !== receipt.base_sha ||
+          (bindingReceipt.base_tree_sha !== undefined && String(baseCommit?.tree?.sha) !== bindingReceipt.base_tree_sha) ||
+          String(headCommit?.sha) !== receiptHead ||
+          (receipt.tree_sha !== undefined && String(headCommit?.tree?.sha) !== receipt.tree_sha)) {
+        throw new Error("exact Worker terminal commit or tree metadata does not match its source receipt");
+      }
+      const declaredParents = ["remote_parent", "commit_parent", "parent_sha"]
+        .flatMap((key) => receiptValues(receipt, key));
+      if (declaredParents.some((parent) => parent !== receipt.base_sha) ||
+          (declaredParents.length && (headCommit?.parents?.length !== 1 || headCommit.parents[0]?.sha !== receipt.base_sha))) {
+        throw new Error("exact Worker terminal parent metadata does not match its source receipt");
       }
       for (const key of ["card_comment_id", "claim_comment_id", "acceptance_comment_id", "binding_comment_id",
         "dispatch_comment_id", "agent_name", "agent_session", "pane", "terminal", "cwd", "model",
@@ -502,7 +546,6 @@ export async function publishSourceEvent(args) {
       attempt_id: bindingReceipt.attempt_id,
       ...(startComment ? { start_comment_id: String(startComment.id) } : {}),
     };
-    const receiptHead = receipt.head_sha ?? receipt.remote_commit ?? receipt.local_tested_commit;
     const reconstructed = createSourceEvent({
       sourceComment: exactSource,
       canonicalReceipt: receipt,
@@ -618,6 +661,31 @@ async function reconstructLegacyG22Event({ event, receipt, exactSource, github, 
       !(state === "READY_FOR_FRESH_REVIEW" || /^BLOCKED_[A-Z0-9_]+$/.test(state ?? "")) ||
       String(event.worker_start_comment_id) !== startId)) {
     throw new Error("G22 terminal receipt does not match the exact authenticated Worker start chain");
+  }
+  const explicitAliases = [
+    ["worker_start_comment_id", startId], ["attempt_id", attempt], ["lease_id", lease],
+    ["base_sha", base], ["base_tree_sha", baseTree], ["head_sha", head], ["tree_sha", tree],
+    ["branch", branch], ["candidate_base_sha", base], ["candidate_branch", branch],
+    ["candidate_exact_head_sha", head], ["candidate_tree_sha", tree], ["remote_commit", head],
+    ["remote_parent", base], ["commit_parent", base], ["parent_sha", base],
+    ["local_tested_commit", head], ["remote_tree", tree], ["remote_api_tree", tree], ["local_tested_tree", tree],
+  ];
+  const conflictingAliases = explicitAliases
+    .filter(([key, expected]) => receiptValues(receipt, key).some((value) => value !== expected))
+    .map(([key]) => key);
+  if (conflictingAliases.length) throw new Error(`G22 terminal explicit aliases conflict with the verified chain: ${conflictingAliases.join(",")}`);
+  if (isLegacyStart || eventKind === "WORKER_TERMINAL_RESULT") {
+    if (typeof github.getCommit !== "function") throw new Error("exact G22 candidate commit and tree read is required");
+    const baseCommit = await github.getCommit(base);
+    if (String(baseCommit?.sha) !== base || String(baseCommit?.tree?.sha) !== baseTree) {
+      throw new Error("G22 base commit metadata is not exact");
+    }
+    if (!isLegacyStart) {
+      const headCommit = await github.getCommit(head);
+      const parents = Array.isArray(headCommit?.parents) ? headCommit.parents.map((parent) => parent.sha) : [];
+      if (String(headCommit?.sha) !== head || String(headCommit?.tree?.sha) !== tree ||
+          parents.length !== 1 || parents[0] !== base) throw new Error("G22 candidate commit metadata is not exact");
+    }
   }
   const canonical = sourceEventSchema.parse({
     marker: "GITHUB_SOURCE_EVENT_V1",
