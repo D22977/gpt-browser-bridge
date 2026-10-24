@@ -69,6 +69,15 @@ test("authority accepts exact sectioned GitHub switch, current indexes, and rehy
   });
 });
 
+test("authority rejects a consistent but noncanonical generation-034 Control ID", () => {
+  const copy = structuredClone(real);
+  const substitutedId = "11111111-1111-1111-1111-111111111111";
+  for (const record of Object.values(copy)) {
+    record.body = record.body.replaceAll(activeId, substitutedId);
+  }
+  assert.throws(() => parseActiveControlAuthority(copy));
+});
+
 test("section parser keeps documented repeated keys in their own sections", () => {
   const fields = parseG34ReceiptFields(real.switchReceipt);
   assert.equal(fields.old_control.generation, "033");

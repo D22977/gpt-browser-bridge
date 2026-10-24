@@ -4,6 +4,7 @@ const controlId = z.string().regex(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}
 const commentId = z.string().regex(/^[1-9][0-9]*$/);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
 const fieldText = z.string().min(1).refine((value) => !/[\r\n]/.test(value));
+const activeG34ControlId = "6ac3b22a-a830-83ee-bd71-85838e5f1392";
 
 export const sourceEventSchema = z.object({
   marker: z.literal("GITHUB_SOURCE_EVENT_V1"),
@@ -107,7 +108,7 @@ export function parseActiveControlAuthority({ switchReceipt, index43, index81, r
     old?.generation !== "033" || old.status_after !== "RETIRED" ||
     next?.generation !== "034" || next.status_after !== "ACTIVE" ||
     next.single_active_control !== "true" ||
-    !controlId.safeParse(activeId).success
+    !controlId.safeParse(activeId).success || activeId !== activeG34ControlId
   ) throw new Error("G34 active Control switch is invalid");
 
   if (switched._author !== "D22977" || indexA._author !== switched._author ||
