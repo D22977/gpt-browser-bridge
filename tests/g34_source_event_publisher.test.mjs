@@ -118,6 +118,10 @@ function clientFor(body, options = {}) {
   };
 }
 
+function publishWithTestGuard(args) {
+  return publishSourceEvent({ ...args, beforeCreate: args.beforeCreate ?? (async () => {}) });
+}
+
 test("source-event exports exist", () => {
   assert.equal(typeof createSourceEvent, "function");
   assert.equal(typeof publishSourceEvent, "function");
@@ -215,7 +219,7 @@ test("publisher persists before sending and exact-reads the created GitHub comme
   const event = sampleEvent();
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-events-"));
   const github = clientFor(event.body);
-  const result = await publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github });
+  const result = await publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github });
   assert.equal(result.state, "DELIVERED");
   assert.deepEqual(github.calls, { create: 1, exactGet: 1, find: 1 });
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
@@ -223,13 +227,49 @@ test("publisher persists before sending and exact-reads the created GitHub comme
   assert.equal(ledger[event.event_id].comment_id, "9001");
 });
 
+test("publisher requires a current-Control guard at the GitHub create boundary", async () => {
+  assertImplemented();
+  const event = sampleEvent();
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-pre-create-guard-required-"));
+  const github = clientFor(event.body);
+  await assert.rejects(() => publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github }), /pre-create guard is required/);
+  assert.equal(github.calls.create, 0);
+
+  const order = [];
+  const orderedGithub = {
+    ...github,
+    async findEventComments() { order.push("find"); return []; },
+    async createIssueComment(...args) { order.push("create"); return github.createIssueComment(...args); },
+  };
+  await publishSourceEvent({
+    event, issueNumber: 202, runtimeRoot: await mkdtemp(path.join(tmpdir(), "g34-pre-create-order-")),
+    github: orderedGithub,
+    beforeCreate: async () => { order.push("authority"); assert.equal(order.at(-2), "find"); },
+  });
+  assert.deepEqual(order.slice(-3), ["find", "authority", "create"]);
+});
+
+test("publisher does not create a source event when the final authority guard rejects", async () => {
+  assertImplemented();
+  const event = sampleEvent();
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-pre-create-guard-fails-"));
+  const github = clientFor(event.body);
+  await assert.rejects(() => publishSourceEvent({
+    event, issueNumber: 202, runtimeRoot, github,
+    beforeCreate: async () => { throw new Error("current Control authority changed before source-event GitHub create"); },
+  }), /authority changed before source-event GitHub create/);
+  assert.equal(github.calls.create, 0);
+  const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
+  assert.equal(ledger[event.event_id].state, "CLAIMED");
+});
+
 test("uncertain send is reconciled without blindly reposting", async () => {
   assertImplemented();
   const event = sampleEvent();
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-events-"));
   const github = clientFor(event.body, { createError: new Error("response lost") });
-  await assert.rejects(() => publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github }), /UNCERTAIN_SEND/);
-  const retry = await publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github });
+  await assert.rejects(() => publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github }), /UNCERTAIN_SEND/);
+  const retry = await publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github });
   assert.equal(retry.state, "UNCERTAIN_SEND");
   assert.equal(github.calls.create, 1);
 });
@@ -254,7 +294,7 @@ test("a repeated resident publication preserves uncertain successor delivery and
       return { id, url: "https://github.com/D22977/gpt-browser-bridge/issues/202#issuecomment-9001", user: { login: "D22977" }, body: event.body };
     },
   };
-  assert.equal((await publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github })).state, "DELIVERY_UNCERTAIN");
+  assert.equal((await publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github })).state, "DELIVERY_UNCERTAIN");
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
   assert.equal(ledger[event.event_id].state, "SUCCESSOR_DELIVERY_UNCERTAIN");
   assert.equal(creates, 0);
@@ -265,7 +305,7 @@ test("duplicate source-event matches fail closed", async () => {
   const event = sampleEvent();
   const github = clientFor(event.body, { matches: [{ id: "1" }, { id: "2" }] });
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-events-"));
-  await assert.rejects(() => publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github }), /DUPLICATE_EVENT/);
+  await assert.rejects(() => publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github }), /DUPLICATE_EVENT/);
   assert.equal(github.calls.create, 0);
 });
 
@@ -273,7 +313,7 @@ test("source event cannot be marked CONSUMED without a successor delivery attemp
   assertImplemented();
   const event = sampleEvent();
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "g34-events-"));
-  await publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github: clientFor(event.body) });
+  await publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github: clientFor(event.body) });
   const args = { eventId: event.event_id, sourceCommentId: event.source_comment_id, controlCommentId: "8001", runtimeRoot };
   await assert.rejects(() => markSourceEventConsumed(args), /successor delivery attempt/);
   const ledger = JSON.parse(await readFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "utf8"));
@@ -287,6 +327,6 @@ test("corrupt ledger fails closed before a GitHub create call", async () => {
   await mkdir(path.join(runtimeRoot, "events"));
   await writeFile(path.join(runtimeRoot, "events", "g34-source-events.json"), "not-json");
   const github = clientFor(event.body);
-  await assert.rejects(() => publishSourceEvent({ event, issueNumber: 202, runtimeRoot, github }), /cannot read G34 event ledger/);
+  await assert.rejects(() => publishWithTestGuard({ event, issueNumber: 202, runtimeRoot, github }), /cannot read G34 event ledger/);
   assert.equal(github.calls.create, 0);
 });

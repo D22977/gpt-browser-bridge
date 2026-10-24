@@ -627,7 +627,10 @@ export async function runG34ResidentCycle({ sourceComments, currentAuthority, bi
       expectedAuthor: activeAuthority.publisher_login,
     });
     await readCurrentControlAuthority(github, activeAuthority, "resident publication");
-    const publication = await publishSourceEvent({ event, issueNumber, runtimeRoot, github, repositoryFullName });
+    const publication = await publishSourceEvent({
+      event, issueNumber, runtimeRoot, github, repositoryFullName,
+      beforeCreate: () => readCurrentControlAuthority(github, activeAuthority, "source-event GitHub create"),
+    });
     results.push({ event: { ...event, comment_id: publication.comment_id }, publication });
   }
   return results;

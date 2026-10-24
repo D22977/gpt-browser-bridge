@@ -61,13 +61,24 @@ const authority = parseActiveControlAuthority(structuredClone(authorityRecords))
 const event = {
   marker: "GITHUB_SOURCE_EVENT_V1",
   event_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  control_generation: "034",
+  active_control_id: "6ac3b22a-a830-83ee-bd71-85838e5f1392",
+  control_conversation_id: "6ac3b22a-a830-83ee-bd71-85838e5f1392",
+  event_kind: "WORKER_STARTED",
   state: "DELIVERED",
   source_comment_id: "6083328488",
   comment_id: "8400",
+  card_comment_id: "2001",
   head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   tree_sha: "d".repeat(40),
+  base_sha: "e".repeat(40),
   agent_session: "worker-session-211",
   agent_name: "/root/g34_211_worker_luna1",
+  pane: "w3:p1",
+  terminal: "term-211",
+  cwd: "C:\\workspace",
+  model: "gpt-6-luna",
+  reasoning_effort: "low",
   branch: "work/gbb-g34-review-repair-20261009-01",
   claim_comment_id: "3001",
   acceptance_comment_id: "3002",
@@ -76,22 +87,35 @@ const event = {
   source_issue_number: 211,
   source_repository_full_name: "D22977/gpt-browser-bridge",
   expected_author: "D22977",
+  user_relay_count: 0,
   source_body_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   body: [
     "marker=GITHUB_SOURCE_EVENT_V1",
     "event_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "control_generation=034",
+    "active_control_id=6ac3b22a-a830-83ee-bd71-85838e5f1392",
+    "control_conversation_id=6ac3b22a-a830-83ee-bd71-85838e5f1392",
+    "event_kind=WORKER_STARTED",
     "source_comment_id=6083328488",
     "source_body_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "card_comment_id=2001",
     "claim_comment_id=3001",
     "acceptance_comment_id=3002",
     "binding_comment_id=3000",
     "dispatch_comment_id=3004",
     "agent_name=/root/g34_211_worker_luna1",
     "agent_session=worker-session-211",
+    "pane=w3:p1",
+    "terminal=term-211",
+    "cwd=C:\\workspace",
+    "model=gpt-6-luna",
+    "reasoning_effort=low",
     "state=DELIVERED",
     "branch=work/gbb-g34-review-repair-20261009-01",
+    `base_sha=${"e".repeat(40)}`,
     "head_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     `tree_sha=${"d".repeat(40)}`,
+    "user_relay_count=0",
   ].join("\n"),
 };
 const activeId = "6ac3b22a-a830-83ee-bd71-85838e5f1392";
@@ -1101,20 +1125,10 @@ test("CONSUMED binds review Control identity to source dispatch separately from 
   event.head_sha = "e".repeat(40);
   event.state = "READY_FOR_FRESH_REVIEW";
   event.worker_start_comment_id = event.source_comment_id;
-  event.body = [
-    "marker=GITHUB_SOURCE_EVENT_V1", `event_id=${event.event_id}`, "event_kind=WORKER_TERMINAL_RESULT",
-    `source_comment_id=${event.source_comment_id}`, `source_body_sha256=${event.source_body_sha256}`,
-    `claim_comment_id=${event.claim_comment_id}`, `acceptance_comment_id=${event.acceptance_comment_id}`,
-    `binding_comment_id=${event.binding_comment_id}`, `dispatch_comment_id=${event.dispatch_comment_id}`,
-    `agent_name=${event.agent_name}`, `agent_session=${event.agent_session}`, `state=${event.state}`,
-    `branch=${event.branch}`, `base_sha=${event.base_sha}`, `head_sha=${event.head_sha}`,
-    `tree_sha=${event.tree_sha}`, `worker_start_comment_id=${event.worker_start_comment_id}`,
-  ].join("\n");
+  event.body = sourceEventPayloadBody(event);
   assert.equal(await runCase("/root/other-control"), "DELIVERY_UNCERTAIN");
   assert.equal(await runCase("/root"), "CONSUMED");
   Object.assign(event, original);
-  delete event.event_kind;
-  delete event.base_sha;
   delete event.worker_start_comment_id;
 });
 
@@ -1296,7 +1310,7 @@ test("resident cycle rejects a stale supplied Control pointer snapshot before so
   }), /current Control authority changed before resident publication/);
 });
 
-test("resident cycle rereads the Control pointer set immediately before publication", async () => {
+test("resident cycle rereads the Control pointer set after publisher lookups and before GitHub create", async () => {
   const records = structuredClone(pinnedG22ReceiptRecords).map((record) => ({ ...record, id: String(record.id) }));
   const github = fakeSourceGithub(records, {}, 9950);
   github.getCommit = async (sha) => sha === "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8"
@@ -1316,11 +1330,16 @@ test("resident cycle rereads the Control pointer set immediately before publicat
   const updatedPointerById = new Map([[new43, updated.index43], [new81, updated.index81]]);
   const getIssueComment = github.getIssueComment.bind(github);
   let authorityReads = 0;
+  let eventLookupStarted = false;
   github.getCurrentAuthorityRecords = async () => {
     authorityReads++;
-    return structuredClone(authorityReads === 1 ? authorityRecords : updated);
+    return structuredClone(eventLookupStarted ? updated : authorityRecords);
   };
   github.getIssueComment = async (id) => structuredClone(updatedPointerById.get(String(id)) ?? await getIssueComment(id));
+  github.findEventComments = async () => {
+    eventLookupStarted = true;
+    return [];
+  };
   const createIssueComment = github.createIssueComment.bind(github);
   let publishedEvents = 0;
   github.createIssueComment = async (...args) => {
@@ -1335,8 +1354,8 @@ test("resident cycle rereads the Control pointer set immediately before publicat
     repositoryFullName: "D22977/gpt-browser-bridge", branch: "work/gbb-g34-review-repair-20261009-01",
     baseSha: "f563cf30eae700bc2a14ae7a6f98ed94dc6dc9c8",
     headSha: "9dbee82a38ff7ce8db3ca30f180b11c0db6ceb14", publisherAuthor: "D22977",
-  }), /current Control authority changed before resident publication/);
-  assert.equal(authorityReads, 2);
+  }), /current Control authority changed before source-event GitHub create/);
+  assert.equal(authorityReads, 3);
   assert.equal(publishedEvents, 0);
 });
 
@@ -1367,4 +1386,21 @@ test("successor authorization rejects caller-substituted event head before deliv
   await assert.rejects(() => authorizeControlSuccessor({
     event: substitutedEvent, authority, controlReceipt: receipt, github,
   }), /delivered source event exact reread mismatch/);
+});
+
+test("successor authorization rejects a canonical-looking event missing required authority fields", async () => {
+  const incompleteEvent = { ...event };
+  delete incompleteEvent.control_generation;
+  incompleteEvent.body = event.body.split("\n").filter((line) => line !== "control_generation=034").join("\n");
+  const receipt = controlReceipt();
+  const github = githubFor(receipt, (id) => id === event.comment_id ? {
+    id: event.comment_id,
+    url: `https://github.com/D22977/gpt-browser-bridge/issues/211#issuecomment-${event.comment_id}`,
+    user: { login: "D22977" },
+    body: incompleteEvent.body,
+  } : undefined);
+
+  await assert.rejects(() => authorizeControlSuccessor({
+    event: incompleteEvent, authority, controlReceipt: receipt, github,
+  }));
 });

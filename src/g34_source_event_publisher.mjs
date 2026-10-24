@@ -41,7 +41,7 @@ export function sourceEventPayloadBody(event) {
   const payload = Object.fromEntries(eventFields
     .filter((key) => event?.[key] !== undefined)
     .map((key) => [key, event[key]]));
-  return eventBody(payload);
+  return eventBody(sourceEventSchema.parse(payload));
 }
 
 export function createSourceEvent({ sourceComment, canonicalReceipt, sourceIssueNumber, sourceRepositoryFullName, eventKind, authority, binding, branch, baseSha, headSha, state, terminalCommentId, reviewCommentId, expectedAuthor }) {
@@ -209,13 +209,14 @@ async function verifyComment(event, issueNumber, repositoryFullName, metadata, g
   return exact;
 }
 
-export async function publishSourceEvent({ event, issueNumber, runtimeRoot, github, repositoryFullName = "D22977/gpt-browser-bridge" }) {
+export async function publishSourceEvent({ event, issueNumber, runtimeRoot, github, beforeCreate, repositoryFullName = "D22977/gpt-browser-bridge" }) {
   const { body, expected_author: expectedAuthor, source_issue_number: sourceIssueNumber, source_repository_full_name: sourceRepositoryFullName, ...fields } = event ?? {};
   const validated = sourceEventSchema.parse(fields);
   if (typeof body !== "string" || body !== sourceEventPayloadBody(event) || body !== eventBody(validated) || !expectedAuthor ||
       sourceIssueNumber !== issueNumber || sourceRepositoryFullName !== repositoryFullName) {
     throw new Error("source event body and expected author are required");
   }
+  if (typeof beforeCreate !== "function") throw new Error("exact current Control authority pre-create guard is required");
   if (!Number.isInteger(issueNumber) || issueNumber < 1) throw new Error("valid issueNumber is required");
   for (const method of ["findEventComments", "createIssueComment", "getIssueComment"]) {
     if (typeof github?.[method] !== "function") throw new Error(`GitHub client is missing ${method}`);
@@ -282,6 +283,13 @@ export async function publishSourceEvent({ event, issueNumber, runtimeRoot, gith
   await saveLedger(file, ledger);
   ledger[validated.event_id].state = "SEND_ATTEMPTED";
   await saveLedger(file, ledger);
+  try {
+    await beforeCreate();
+  } catch (error) {
+    ledger[validated.event_id].state = "CLAIMED";
+    await saveLedger(file, ledger);
+    throw error;
+  }
   let created;
   try {
     created = await github.createIssueComment(issueNumber, body);
