@@ -1,0 +1,43 @@
+name: G36 #250 focused review tests
+
+on:
+  push:
+    branches:
+      - codex/g36-review-test-250-20261025-01
+
+permissions:
+  contents: read
+
+jobs:
+  focused-review-tests:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      BASE_SHA: 9f54c308eb9b6c57dcbf3dfb96db0075a3407895
+      CANDIDATE_SHA: 21a128abd4f2fef7047062ee73a147292ce52dc2
+      CANDIDATE_TREE: 7ef0d3f774d744e9cf9b67a2d60651927bc9166e
+    steps:
+      - name: Check out the pinned candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 21a128abd4f2fef7047062ee73a147292ce52dc2
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+      - name: Verify exact candidate pins
+        shell: pwsh
+        run: |
+          $actualSha = (git rev-parse HEAD).Trim()
+          $actualTree = (git rev-parse 'HEAD^{tree}').Trim()
+          if ($actualSha -ne $env:CANDIDATE_SHA) { throw "Unexpected HEAD: $actualSha" }
+          if ($actualTree -ne $env:CANDIDATE_TREE) { throw "Unexpected tree: $actualTree" }
+          git diff --check $env:BASE_SHA $env:CANDIDATE_SHA
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run only the changed tree-alias matrix tests
+        run: node --test --test-name-pattern='checks every start tree alias|checks every terminal tree alias' tests/g34_source_event_publisher.test.mjs
+      - name: Syntax check changed test file
+        run: node --check tests/g34_source_event_publisher.test.mjs
